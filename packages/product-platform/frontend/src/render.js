@@ -5,6 +5,7 @@ import { renderDrawer } from "./drawers.js";
 import { escapeHtml } from "./html.js";
 import { renderAgentsPage } from "./agents.js";
 import { renderDiscoveryPage } from "./discovery.js";
+import { renderPoliciesPage } from "./policies.js";
 
 export { escapeHtml };
 
@@ -195,6 +196,8 @@ export function renderShell({ currentPath = DEFAULT_ROUTE, state = createInitial
         ? renderAccessDeniedPage(normalized)
       : route?.path === "/agents"
         ? renderAgentsPage(state)
+      : route?.path === "/policies"
+        ? renderPoliciesPage(state)
       : route?.path === "/discovery"
         ? renderDiscoveryPage(state)
       : route

@@ -24,7 +24,10 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
                 ).fetchall()
             }
 
-            self.assertEqual(applied, ["0001", "0002", "0003", "0004", "0005"])
+            self.assertEqual(
+                applied,
+                ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008"],
+            )
             self.assertIn("organizations", tables)
             self.assertIn("environments", tables)
             self.assertIn("api_keys", tables)
@@ -42,7 +45,17 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertIn("discovery_evidence", tables)
             self.assertIn("discovery_suppressions", tables)
             self.assertIn("reconciliation_actions", tables)
-            self.assertEqual(runner.applied_versions(), ["0001", "0002", "0003", "0004", "0005"])
+            self.assertIn("policies", tables)
+            self.assertIn("policy_versions", tables)
+            self.assertIn("policy_imports", tables)
+            self.assertIn("policy_lint_results", tables)
+            self.assertIn("policy_bindings", tables)
+            self.assertIn("policy_exceptions", tables)
+            self.assertIn("policy_rollout_events", tables)
+            self.assertEqual(
+                runner.applied_versions(),
+                ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008"],
+            )
         finally:
             connection.close()
 
@@ -52,6 +65,66 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             connection.row_factory = sqlite3.Row
             runner = MigrationRunner(connection)
             runner.apply_all()
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0008")
+            self.assertNotIn("policy_bindings", tables)
+            self.assertIn("policy_lint_results", tables)
+            self.assertIn("policies", tables)
+            self.assertIn("discovery_findings", tables)
+            self.assertIn("discovery_targets", tables)
+            self.assertIn("agent_credentials", tables)
+            self.assertIn("agents", tables)
+            self.assertIn("organizations", tables)
+            self.assertEqual(
+                runner.applied_versions(),
+                ["0001", "0002", "0003", "0004", "0005", "0006", "0007"],
+            )
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0007")
+            self.assertNotIn("policy_lint_results", tables)
+            self.assertIn("policies", tables)
+            self.assertIn("discovery_findings", tables)
+            self.assertIn("discovery_targets", tables)
+            self.assertIn("agent_credentials", tables)
+            self.assertIn("agents", tables)
+            self.assertIn("organizations", tables)
+            self.assertEqual(
+                runner.applied_versions(),
+                ["0001", "0002", "0003", "0004", "0005", "0006"],
+            )
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0006")
+            self.assertNotIn("policies", tables)
+            self.assertIn("discovery_findings", tables)
+            self.assertIn("discovery_targets", tables)
+            self.assertIn("agent_credentials", tables)
+            self.assertIn("agents", tables)
+            self.assertIn("organizations", tables)
+            self.assertEqual(runner.applied_versions(), ["0001", "0002", "0003", "0004", "0005"])
 
             rolled_back = runner.rollback_last()
             tables = {
@@ -141,8 +214,11 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             finally:
                 reopened.close()
 
-        self.assertEqual(applied, ["0001", "0002", "0003", "0004", "0005"])
-        self.assertEqual(count, 5)
+        self.assertEqual(
+            applied,
+            ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008"],
+        )
+        self.assertEqual(count, 8)
 
 
 if __name__ == "__main__":

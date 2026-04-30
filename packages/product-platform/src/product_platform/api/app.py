@@ -124,6 +124,46 @@ from product_platform.discovery.repository import (
     discovery_target_response,
 )
 from product_platform.discovery.runner import DiscoveryScanRunner
+from product_platform.policies.models import (
+    PolicyBindingCreateRequest,
+    PolicyBindingPatchRequest,
+    PolicyBindingPromoteRequest,
+    PolicyBindingResponse,
+    PolicyCreateRequest,
+    PolicyDetailResponse,
+    PolicyExportResponse,
+    PolicyAffectedResourcesResponse,
+    PolicyExceptionCreateRequest,
+    PolicyExceptionResponse,
+    PolicyImportRequest,
+    PolicyImportResponse,
+    PolicyLintIssue,
+    PolicyLintRequest,
+    PolicyLintResponse,
+    PolicyResponse,
+    PolicyVersionCreateRequest,
+    PolicyVersionResponse,
+)
+from product_platform.policies.bindings import (
+    PolicyBindingNotFoundError,
+    PolicyBindingRepository,
+    PolicyBindingTargetError,
+    policy_binding_response,
+    policy_exception_response,
+)
+from product_platform.policies.importer import prepare_policy_import
+from product_platform.policies.linting import lint_policy_body
+from product_platform.policies.repository import (
+    DuplicatePolicySlugError,
+    PolicyNotFoundError,
+    PolicyRepository,
+    policy_detail_response,
+    policy_export_response,
+    policy_import_response,
+    policy_lint_issue_response,
+    policy_response,
+    policy_version_response,
+)
 from product_platform.worker.api_models import (
     JobCreateRequest,
     JobResponse,
@@ -352,6 +392,10 @@ def create_app(
             raise HTTPException(status_code=400, detail="Organization context is required.")
         return current_user.organization_id
 
+    def _default_environment_id_for_org(organization_id: str) -> str:
+        environments = tenants.list_environments(organization_id)
+        return environments[0].id if environments else "env_default"
+
     def _serialize_job(repository: JobStateRepository, job_id: str) -> JobResponse:
         row = repository.get_job(job_id)
         return job_response(row, repository.runs_for_job(job_id))
@@ -454,6 +498,75 @@ def create_app(
                 "risk_level": finding["risk_level"],
                 "registry_agent_id": finding["registry_agent_id"],
             },
+        )
+
+    def _policy_version_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        event_type: str,
+        actor_id: str,
+        policy_id: str,
+        version_id: str,
+        version_number: int,
+        correlation_id: str | None,
+        payload_json: dict[str, Any] | None = None,
+    ) -> AuditEventEnvelope:
+        payload = {
+            "policy_id": policy_id,
+            "policy_version_id": version_id,
+            "version_number": version_number,
+        }
+        payload.update(payload_json or {})
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type=event_type,
+            source_component="policy-library",
+            actor_type="user",
+            actor_id=actor_id,
+            resource_type="policy_version",
+            resource_id=version_id,
+            policy_id=policy_id,
+            policy_version_id=version_id,
+            correlation_id=correlation_id,
+            payload_json=payload,
+        )
+
+    def _policy_binding_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        event_type: str,
+        actor_id: str,
+        binding: Any,
+        correlation_id: str | None,
+        payload_json: dict[str, Any] | None = None,
+    ) -> AuditEventEnvelope:
+        payload = {
+            "binding_id": binding["id"],
+            "policy_id": binding["policy_id"],
+            "policy_version_id": binding["policy_version_id"],
+            "target_type": binding["target_type"],
+            "target_id": binding["target_id"],
+            "mode": binding["mode"],
+            "rollout_percentage": binding["rollout_percentage"],
+            "status": binding["status"],
+        }
+        payload.update(payload_json or {})
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type=event_type,
+            source_component="policy-bindings",
+            actor_type="user",
+            actor_id=actor_id,
+            resource_type="policy_binding",
+            resource_id=binding["id"],
+            policy_id=binding["policy_id"],
+            policy_version_id=binding["policy_version_id"],
+            correlation_id=correlation_id,
+            payload_json=payload,
         )
 
     def _resolve_sponsor_email(row: Any, current_user: UserPrincipal, connection: Any) -> str:
@@ -727,6 +840,651 @@ def create_app(
         if event is None:
             raise HTTPException(status_code=404, detail="Audit event not found.")
         return event
+
+    @app.post(
+        "/api/v1/policies",
+        status_code=201,
+        tags=["policies"],
+    )
+    async def create_policy(
+        request: Request,
+        body: PolicyCreateRequest | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_WRITE)),
+    ) -> Any:
+        """Create a tenant-scoped policy library entry."""
+
+        if body is None:
+            environment_id = getattr(request.state, "selected_environment_id", None)
+            if not environment_id:
+                raise HTTPException(status_code=400, detail="X-Environment-ID is required.")
+            return {
+                "id": "policy_placeholder",
+                "status": "created",
+                "created_by": current_user.id,
+                "environment_id": str(environment_id),
+            }
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                row = PolicyRepository(connection, organization_id).create_policy(
+                    body,
+                    actor_id=current_user.id,
+                )
+                return policy_response(row)
+        except DuplicatePolicySlugError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/api/v1/policies", response_model=list[PolicyResponse], tags=["policies"])
+    async def list_policies(
+        scope: str | None = None,
+        owner_user_id: str | None = None,
+        backend: str | None = None,
+        status: str | None = None,
+        tag: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_READ)),
+    ) -> list[PolicyResponse]:
+        """List policies for the current organization."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = PolicyRepository(_audit_database().connect(), organization_id)
+        rows = repository.list_policies(
+            scope=scope,
+            owner_user_id=owner_user_id,
+            backend=backend,
+            status=status,
+            tag=tag,
+            limit=limit,
+            offset=offset,
+        )
+        return [policy_response(row) for row in rows]
+
+    @app.get(
+        "/api/v1/policies/{policy_id}",
+        response_model=PolicyDetailResponse,
+        tags=["policies"],
+    )
+    async def get_policy(
+        policy_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_READ)),
+    ) -> PolicyDetailResponse:
+        """Get one policy with version history."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = PolicyRepository(_audit_database().connect(), organization_id)
+        row = repository.get_policy(policy_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Policy not found.")
+        return policy_detail_response(repository, row)
+
+    @app.post(
+        "/api/v1/policies/{policy_id}/versions",
+        response_model=PolicyVersionResponse,
+        status_code=201,
+        tags=["policies"],
+    )
+    async def create_policy_version(
+        policy_id: str,
+        body: PolicyVersionCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_WRITE)),
+    ) -> PolicyVersionResponse:
+        """Create an immutable policy version."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                row = PolicyRepository(connection, organization_id).create_version(
+                    policy_id,
+                    body,
+                    actor_id=current_user.id,
+                )
+                return policy_version_response(row)
+        except PolicyNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/policies/{policy_id}/versions",
+        response_model=list[PolicyVersionResponse],
+        tags=["policies"],
+    )
+    async def list_policy_versions(
+        policy_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_READ)),
+    ) -> list[PolicyVersionResponse]:
+        """List immutable versions for a policy."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            repository = PolicyRepository(_audit_database().connect(), organization_id)
+            return [policy_version_response(row) for row in repository.list_versions(policy_id)]
+        except PolicyNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/policies/lint",
+        response_model=PolicyLintResponse,
+        tags=["policies"],
+    )
+    async def lint_unsaved_policy(
+        body: PolicyLintRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_WRITE)),
+    ) -> PolicyLintResponse:
+        """Lint an unsaved policy body."""
+
+        _require_organization_id(current_user)
+        return lint_policy_body(body)
+
+    @app.post(
+        "/api/v1/policies/{policy_id}/versions/draft",
+        response_model=PolicyVersionResponse,
+        status_code=201,
+        tags=["policies"],
+    )
+    async def save_policy_draft_version(
+        policy_id: str,
+        body: PolicyVersionCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_WRITE)),
+    ) -> PolicyVersionResponse:
+        """Save a non-active draft version and persist lint results."""
+
+        organization_id = _require_organization_id(current_user)
+        draft_body = PolicyVersionCreateRequest(
+            body_format=body.body_format,
+            body_text=body.body_text,
+            backend=body.backend,
+            status="draft",
+        )
+        lint_result = lint_policy_body(
+            PolicyLintRequest(body_text=draft_body.body_text, body_format=draft_body.body_format)
+        )
+        try:
+            with _audit_database().transaction() as connection:
+                repository = PolicyRepository(connection, organization_id)
+                row = repository.create_version(policy_id, draft_body, actor_id=current_user.id)
+                repository.replace_lint_results(policy_id, row["id"], lint_result)
+                return policy_version_response(row)
+        except PolicyNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/policies/{policy_id}/versions/{version_id}/lint",
+        response_model=PolicyLintResponse,
+        tags=["policies"],
+    )
+    async def lint_saved_policy_version(
+        policy_id: str,
+        version_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_WRITE)),
+    ) -> PolicyLintResponse:
+        """Lint a saved policy version and persist the results."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = PolicyRepository(connection, organization_id)
+                version = repository.get_version(policy_id, version_id)
+                if version is None:
+                    raise PolicyNotFoundError("Policy version not found.")
+                lint_result = lint_policy_body(
+                    PolicyLintRequest(
+                        body_text=version["body_text"],
+                        body_format=version["body_format"],
+                    )
+                )
+                repository.replace_lint_results(policy_id, version_id, lint_result)
+                return lint_result
+        except PolicyNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/policies/{policy_id}/versions/{version_id}/lint-results",
+        response_model=list[PolicyLintIssue],
+        tags=["policies"],
+    )
+    async def list_policy_version_lint_results(
+        policy_id: str,
+        version_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_READ)),
+    ) -> list[PolicyLintIssue]:
+        """List persisted lint results for a saved policy version."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            repository = PolicyRepository(_audit_database().connect(), organization_id)
+            return [
+                policy_lint_issue_response(row)
+                for row in repository.list_lint_results(policy_id, version_id)
+            ]
+        except PolicyNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/policies/{policy_id}/affected-resources",
+        response_model=PolicyAffectedResourcesResponse,
+        tags=["policies"],
+    )
+    async def get_policy_affected_resources(
+        policy_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_READ)),
+    ) -> PolicyAffectedResourcesResponse:
+        """Return resources that currently reference a policy."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            return PolicyRepository(
+                _audit_database().connect(),
+                organization_id,
+            ).affected_resources(policy_id)
+        except PolicyNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/policy-bindings",
+        response_model=PolicyBindingResponse,
+        status_code=201,
+        tags=["policies"],
+    )
+    async def create_policy_binding(
+        body: PolicyBindingCreateRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> PolicyBindingResponse:
+        """Create a policy binding for a selected environment target."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = PolicyBindingRepository(connection, organization_id, environment_id)
+                row = repository.create_binding(body, actor_id=current_user.id)
+                AuditEventRepository(connection).insert(
+                    _policy_binding_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        event_type="policy.binding.created",
+                        actor_id=current_user.id,
+                        binding=row,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return policy_binding_response(row)
+        except (PolicyNotFoundError, PolicyBindingTargetError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/policy-bindings",
+        response_model=list[PolicyBindingResponse],
+        tags=["policies"],
+    )
+    async def list_policy_bindings(
+        policy_id: str | None = None,
+        target_type: str | None = None,
+        target_id: str | None = None,
+        status: str | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[PolicyBindingResponse]:
+        """List policy bindings in the selected environment."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = PolicyBindingRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        return [
+            policy_binding_response(row)
+            for row in repository.list_bindings(
+                policy_id=policy_id,
+                target_type=target_type,
+                target_id=target_id,
+                status=status,
+            )
+        ]
+
+    @app.patch(
+        "/api/v1/policy-bindings/{binding_id}",
+        response_model=PolicyBindingResponse,
+        tags=["policies"],
+    )
+    async def patch_policy_binding(
+        binding_id: str,
+        body: PolicyBindingPatchRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> PolicyBindingResponse:
+        """Patch policy binding rollout controls."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = PolicyBindingRepository(connection, organization_id, environment_id)
+                row = repository.update_binding(binding_id, body)
+                AuditEventRepository(connection).insert(
+                    _policy_binding_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        event_type="policy.binding.updated",
+                        actor_id=current_user.id,
+                        binding=row,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return policy_binding_response(row)
+        except PolicyBindingNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.delete(
+        "/api/v1/policy-bindings/{binding_id}",
+        status_code=204,
+        tags=["policies"],
+    )
+    async def delete_policy_binding(
+        binding_id: str,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> None:
+        """Delete a binding by marking it deleted and emitting an audit event."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = PolicyBindingRepository(connection, organization_id, environment_id)
+                row = repository.delete_binding(binding_id)
+                AuditEventRepository(connection).insert(
+                    _policy_binding_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        event_type="policy.binding.deleted",
+                        actor_id=current_user.id,
+                        binding=row,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+        except PolicyBindingNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/policy-bindings/{binding_id}/promote",
+        response_model=PolicyBindingResponse,
+        tags=["policies"],
+    )
+    async def promote_policy_binding(
+        binding_id: str,
+        body: PolicyBindingPromoteRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> PolicyBindingResponse:
+        """Promote binding mode or rollout percentage with an audit trail."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = PolicyBindingRepository(connection, organization_id, environment_id)
+                row = repository.promote_binding(binding_id, body, actor_id=current_user.id)
+                AuditEventRepository(connection).insert(
+                    _policy_binding_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        event_type="policy.binding.promoted",
+                        actor_id=current_user.id,
+                        binding=row,
+                        correlation_id=context.correlation_id,
+                        payload_json={"reason": body.reason},
+                    )
+                )
+                return policy_binding_response(row)
+        except PolicyBindingNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/policy-bindings/{binding_id}/exceptions",
+        response_model=PolicyExceptionResponse,
+        status_code=201,
+        tags=["policies"],
+    )
+    async def create_policy_exception(
+        binding_id: str,
+        body: PolicyExceptionCreateRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> PolicyExceptionResponse:
+        """Create an exception for a visible binding."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = PolicyBindingRepository(connection, organization_id, environment_id)
+                row = repository.create_exception(binding_id, body, actor_id=current_user.id)
+                binding = repository.get_binding(binding_id)
+                if binding is not None:
+                    AuditEventRepository(connection).insert(
+                        _policy_binding_audit_event(
+                            organization_id=organization_id,
+                            environment_id=environment_id,
+                            event_type="policy.binding.exception_created",
+                            actor_id=current_user.id,
+                            binding=binding,
+                            correlation_id=context.correlation_id,
+                            payload_json={"exception_id": row["id"], "reason": row["reason"]},
+                        )
+                    )
+                return policy_exception_response(row)
+        except (PolicyBindingNotFoundError, PolicyBindingTargetError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/policy-exceptions",
+        response_model=list[PolicyExceptionResponse],
+        tags=["policies"],
+    )
+    async def list_policy_exceptions(
+        binding_id: str | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[PolicyExceptionResponse]:
+        """List exceptions in the selected environment."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = PolicyBindingRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        return [
+            policy_exception_response(row)
+            for row in repository.list_exceptions(binding_id=binding_id)
+        ]
+
+    @app.post(
+        "/api/v1/policies/{policy_id}/versions/{version_id}/activate",
+        response_model=PolicyVersionResponse,
+        tags=["policies"],
+    )
+    async def activate_policy_version(
+        policy_id: str,
+        version_id: str,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_WRITE)),
+    ) -> PolicyVersionResponse:
+        """Activate a policy version and audit the change."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = PolicyRepository(connection, organization_id)
+                row = repository.activate_version(policy_id, version_id)
+                AuditEventRepository(connection).insert(
+                    _policy_version_audit_event(
+                        organization_id=organization_id,
+                        environment_id=context.environment_id
+                        or _default_environment_id_for_org(organization_id),
+                        event_type="policy.version.activated",
+                        actor_id=current_user.id,
+                        policy_id=policy_id,
+                        version_id=version_id,
+                        version_number=int(row["version_number"]),
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return policy_version_response(row)
+        except PolicyNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/policies/{policy_id}/versions/{version_id}/rollback",
+        response_model=PolicyVersionResponse,
+        tags=["policies"],
+    )
+    async def rollback_policy_version(
+        policy_id: str,
+        version_id: str,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_WRITE)),
+    ) -> PolicyVersionResponse:
+        """Roll back by activating the selected previous policy version."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = PolicyRepository(connection, organization_id)
+                row = repository.activate_version(policy_id, version_id)
+                AuditEventRepository(connection).insert(
+                    _policy_version_audit_event(
+                        organization_id=organization_id,
+                        environment_id=context.environment_id
+                        or _default_environment_id_for_org(organization_id),
+                        event_type="policy.version.rolled_back",
+                        actor_id=current_user.id,
+                        policy_id=policy_id,
+                        version_id=version_id,
+                        version_number=int(row["version_number"]),
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return policy_version_response(row)
+        except PolicyNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/policies/{policy_id}/versions/{version_id}/archive",
+        response_model=PolicyVersionResponse,
+        tags=["policies"],
+    )
+    async def archive_policy_version(
+        policy_id: str,
+        version_id: str,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_WRITE)),
+    ) -> PolicyVersionResponse:
+        """Archive a policy version so it cannot be activated."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = PolicyRepository(connection, organization_id)
+                row = repository.archive_version(policy_id, version_id)
+                AuditEventRepository(connection).insert(
+                    _policy_version_audit_event(
+                        organization_id=organization_id,
+                        environment_id=context.environment_id
+                        or _default_environment_id_for_org(organization_id),
+                        event_type="policy.version.archived",
+                        actor_id=current_user.id,
+                        policy_id=policy_id,
+                        version_id=version_id,
+                        version_number=int(row["version_number"]),
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return policy_version_response(row)
+        except PolicyNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/policies/import",
+        response_model=PolicyImportResponse,
+        status_code=201,
+        tags=["policies"],
+    )
+    async def import_policy(
+        body: PolicyImportRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_WRITE)),
+    ) -> PolicyImportResponse:
+        """Import a policy body or known repository policy path."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            prepared = prepare_policy_import(body)
+            with _audit_database().transaction() as connection:
+                repository = PolicyRepository(connection, organization_id)
+                policy_row = repository.create_policy(prepared.policy, actor_id=current_user.id)
+                version_row = repository.create_version(
+                    policy_row["id"],
+                    prepared.version,
+                    actor_id=current_user.id,
+                )
+                import_row = repository.record_import(
+                    source_type=prepared.source_type,
+                    source_path=prepared.source_path,
+                    status="succeeded",
+                    summary={
+                        **prepared.summary,
+                        "policy_id": policy_row["id"],
+                        "policy_version_id": version_row["id"],
+                    },
+                )
+                return policy_import_response(
+                    import_row,
+                    policy=policy_response(policy_row),
+                    version=policy_version_response(version_row),
+                )
+        except DuplicatePolicySlugError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/policies/{policy_id}/export",
+        response_model=PolicyExportResponse,
+        tags=["policies"],
+    )
+    async def export_policy(
+        policy_id: str,
+        version_id: str | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_READ)),
+    ) -> PolicyExportResponse:
+        """Export a policy version body with checksum metadata."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = PolicyRepository(_audit_database().connect(), organization_id)
+        policy_row = repository.get_policy(policy_id)
+        if policy_row is None:
+            raise HTTPException(status_code=404, detail="Policy not found.")
+        version_row = repository.latest_export_version(policy_id, version_id)
+        if version_row is None:
+            raise HTTPException(status_code=404, detail="Policy version not found.")
+        return policy_export_response(policy_row, version_row)
 
     @app.get(
         "/api/v1/discovery/scanners",

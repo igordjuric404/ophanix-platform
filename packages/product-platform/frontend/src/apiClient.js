@@ -164,6 +164,72 @@ export function createApiClient({
       request(`/discovery/findings/${encodeURIComponent(findingId)}/mark-decommissioned`, {
         method: "POST"
       }),
+    listPolicies: (params = {}) => request(`/policies${queryString(params)}`),
+    getPolicy: (policyId) => request(`/policies/${encodeURIComponent(policyId)}`),
+    createPolicyVersion: (policyId, body) =>
+      request(`/policies/${encodeURIComponent(policyId)}/versions`, {
+        method: "POST",
+        body
+      }),
+    listPolicyVersions: (policyId) =>
+      request(`/policies/${encodeURIComponent(policyId)}/versions`),
+    importPolicy: (body) => request("/policies/import", { method: "POST", body }),
+    lintPolicy: (body) => request("/policies/lint", { method: "POST", body }),
+    savePolicyDraftVersion: (policyId, body) =>
+      request(`/policies/${encodeURIComponent(policyId)}/versions/draft`, {
+        method: "POST",
+        body
+      }),
+    lintPolicyVersion: (policyId, versionId) =>
+      request(
+        `/policies/${encodeURIComponent(policyId)}/versions/${encodeURIComponent(versionId)}/lint`,
+        { method: "POST" }
+      ),
+    listPolicyLintResults: (policyId, versionId) =>
+      request(
+        `/policies/${encodeURIComponent(policyId)}/versions/${encodeURIComponent(versionId)}/lint-results`
+      ),
+    getPolicyAffectedResources: (policyId) =>
+      request(`/policies/${encodeURIComponent(policyId)}/affected-resources`),
+    listPolicyBindings: (params = {}) => request(`/policy-bindings${queryString(params)}`),
+    createPolicyBinding: (body) => request("/policy-bindings", { method: "POST", body }),
+    patchPolicyBinding: (bindingId, body) =>
+      request(`/policy-bindings/${encodeURIComponent(bindingId)}`, {
+        method: "PATCH",
+        body
+      }),
+    deletePolicyBinding: (bindingId) =>
+      request(`/policy-bindings/${encodeURIComponent(bindingId)}`, { method: "DELETE" }),
+    promotePolicyBinding: (bindingId, body) =>
+      request(`/policy-bindings/${encodeURIComponent(bindingId)}/promote`, {
+        method: "POST",
+        body
+      }),
+    createPolicyException: (bindingId, body) =>
+      request(`/policy-bindings/${encodeURIComponent(bindingId)}/exceptions`, {
+        method: "POST",
+        body
+      }),
+    listPolicyExceptions: (params = {}) => request(`/policy-exceptions${queryString(params)}`),
+    activatePolicyVersion: (policyId, versionId) =>
+      request(
+        `/policies/${encodeURIComponent(policyId)}/versions/${encodeURIComponent(versionId)}/activate`,
+        { method: "POST" }
+      ),
+    rollbackPolicyVersion: (policyId, versionId) =>
+      request(
+        `/policies/${encodeURIComponent(policyId)}/versions/${encodeURIComponent(versionId)}/rollback`,
+        { method: "POST" }
+      ),
+    archivePolicyVersion: (policyId, versionId) =>
+      request(
+        `/policies/${encodeURIComponent(policyId)}/versions/${encodeURIComponent(versionId)}/archive`,
+        { method: "POST" }
+      ),
+    exportPolicy: (policyId, versionId = null) => {
+      const query = versionId ? `?version_id=${encodeURIComponent(versionId)}` : "";
+      return request(`/policies/${encodeURIComponent(policyId)}/export${query}`);
+    },
     getAuditEvent: (eventId) => request(`/audit/events/${encodeURIComponent(eventId)}`),
     verifyAuditEvent: (eventId) => request(`/audit/events/${encodeURIComponent(eventId)}/verify`, {
       method: "POST"

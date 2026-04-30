@@ -553,6 +553,23 @@ input {
   max-width: 1240px;
 }
 
+.policy-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(340px, 0.8fr);
+  gap: 16px;
+  max-width: 1280px;
+}
+
+.policy-library,
+.policy-version-drawer,
+.policy-editor,
+.policy-bindings,
+.policy-affected-resources,
+.policy-import,
+.policy-export {
+  grid-column: 1 / -1;
+}
+
 .discovery-scanners,
 .discovery-targets,
 .discovery-runs,
@@ -716,6 +733,108 @@ input {
   border-color: var(--teal);
   color: #134e4a;
   font-weight: 700;
+}
+
+.policy-binding-create,
+.policy-binding-actions form,
+.policy-exception-dialog form[data-policy-exception-form],
+.policy-import-form,
+.policy-editor-form,
+.editor-metadata {
+  display: grid;
+  gap: 10px;
+}
+
+.policy-binding-create,
+.editor-metadata {
+  grid-template-columns: repeat(4, minmax(140px, 1fr));
+  align-items: end;
+  margin-bottom: 14px;
+}
+
+.policy-binding-create label,
+.policy-binding-actions label,
+.policy-exception-dialog label,
+.policy-import-form label,
+.policy-editor-form label,
+.editor-metadata label {
+  display: grid;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.policy-binding-create input,
+.policy-binding-create select,
+.policy-binding-create button,
+.policy-binding-actions input,
+.policy-binding-actions select,
+.policy-binding-actions button,
+.policy-exception-dialog input,
+.policy-exception-dialog select,
+.policy-exception-dialog button,
+.policy-import-form input,
+.policy-import-form select,
+.policy-import-form textarea,
+.policy-import-form button,
+.policy-editor-form input,
+.policy-editor-form select,
+.policy-editor-form textarea,
+.policy-editor-form button {
+  min-width: 0;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0 10px;
+}
+
+.policy-import-form textarea,
+.policy-editor-form textarea {
+  padding: 10px;
+  resize: vertical;
+}
+
+.policy-binding-actions {
+  min-width: 280px;
+}
+
+.policy-binding-actions form {
+  grid-template-columns: minmax(86px, 1fr) 76px minmax(110px, 1fr) auto;
+  align-items: center;
+  width: 100%;
+}
+
+.policy-binding-actions input[name="reason"] {
+  min-width: 110px;
+}
+
+.policy-exception-dialog {
+  width: min(560px, calc(100vw - 32px));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  padding: 18px;
+}
+
+.policy-exception-dialog::backdrop {
+  background: rgb(15 23 42 / 0.36);
+}
+
+.dialog-close-row {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 0 12px;
+}
+
+.checkbox-row {
+  display: inline-flex;
+  grid-template-columns: auto 1fr;
+  align-items: center;
 }
 
 .data-table {
@@ -1045,14 +1164,21 @@ input {
 
   .agent-workspace,
   .discovery-workspace,
+  .policy-workspace,
   .scanner-grid,
   .finding-detail-grid,
   .finding-actions,
   .form-grid,
   .filter-bar,
+  .policy-binding-create,
+  .editor-metadata,
   .lifecycle-funnel,
   .lifecycle-grid,
   .credential-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .policy-binding-actions form {
     grid-template-columns: 1fr;
   }
 }

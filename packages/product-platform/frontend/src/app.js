@@ -16,6 +16,14 @@ import {
 import { renderShell } from "./render.js";
 import { discoveryFindingParamsFromForm } from "./discovery.js";
 import {
+  policyBindingPayloadFromForm,
+  policyEditorPayloadFromForm,
+  policyExceptionPayloadFromForm,
+  policyFilterParamsFromForm,
+  policyImportPayloadFromForm,
+  policyPromotePayloadFromForm
+} from "./policies.js";
+import {
   createLoadingState,
   loadAppContext,
   loadSystemStatus,
@@ -81,6 +89,37 @@ async function refreshDiscoveryWorkspace(root, apiClient, selectedRunId = null) 
   mount(root, appState);
 }
 
+async function loadPolicyState(apiClient, selectedPolicyId = null) {
+  const [policies, policyBindings, policyExceptions, agents] = await Promise.all([
+    apiClient.listPolicies(),
+    apiClient.listPolicyBindings(),
+    apiClient.listPolicyExceptions(),
+    apiClient.listAgents()
+  ]);
+  const policyId = selectedPolicyId ?? policies[0]?.id ?? null;
+  const selectedPolicy = policyId ? await apiClient.getPolicy(policyId) : null;
+  const policyAffectedResources = policyId
+    ? await apiClient.getPolicyAffectedResources(policyId)
+    : null;
+  return {
+    ...appState,
+    policies: selectedPolicy
+      ? policies.map((policy) => (policy.id === selectedPolicy.id ? selectedPolicy : policy))
+      : policies,
+    selectedPolicy,
+    policyVersions: selectedPolicy?.versions ?? [],
+    policyAffectedResources,
+    policyBindings,
+    policyExceptions,
+    policyBindingTargets: { agents }
+  };
+}
+
+async function refreshPolicyWorkspace(root, apiClient, selectedPolicyId = null) {
+  appState = await loadPolicyState(apiClient, selectedPolicyId);
+  mount(root, appState);
+}
+
 export function installNavigation(root = document.getElementById("app"), apiClient = null) {
   document.addEventListener("click", async (event) => {
     const link = event.target.closest("[data-route]");
@@ -95,6 +134,9 @@ export function installNavigation(root = document.getElementById("app"), apiClie
     navigate(targetPath, root);
     if (apiClient && normalizePath(targetPath) === "/discovery") {
       await refreshDiscoveryWorkspace(root, apiClient);
+    }
+    if (apiClient && normalizePath(targetPath) === "/policies") {
+      await refreshPolicyWorkspace(root, apiClient);
     }
   });
   document.addEventListener("change", (event) => {
@@ -161,6 +203,104 @@ export function installNavigation(root = document.getElementById("app"), apiClie
       selectedDiscoveryRun: await apiClient.getDiscoveryRun(runId)
     };
     mount(root, appState);
+  });
+  document.addEventListener("click", async (event) => {
+    const openPolicyButton = event.target.closest("[data-policy-open]");
+    if (!openPolicyButton || !apiClient) {
+      return;
+    }
+    const policyId = openPolicyButton.getAttribute("data-policy-open");
+    if (!policyId) {
+      return;
+    }
+    await refreshPolicyWorkspace(root, apiClient, policyId);
+  });
+  document.addEventListener("click", async (event) => {
+    const exportPolicyButton = event.target.closest("[data-policy-export]");
+    if (!exportPolicyButton || !apiClient) {
+      return;
+    }
+    const policyId = exportPolicyButton.getAttribute("data-policy-export");
+    if (!policyId) {
+      return;
+    }
+    appState = {
+      ...appState,
+      policyExport: await apiClient.exportPolicy(policyId)
+    };
+    mount(root, appState);
+  });
+  document.addEventListener("click", async (event) => {
+    const actionButton = event.target.closest(
+      "[data-policy-activate], [data-policy-rollback], [data-policy-archive]"
+    );
+    if (!actionButton || !apiClient) {
+      return;
+    }
+    const pair =
+      actionButton.getAttribute("data-policy-activate") ??
+      actionButton.getAttribute("data-policy-rollback") ??
+      actionButton.getAttribute("data-policy-archive") ??
+      "";
+    const [policyId, versionId] = pair.split(":");
+    if (!policyId || !versionId) {
+      return;
+    }
+    if (actionButton.hasAttribute("data-policy-activate")) {
+      await apiClient.activatePolicyVersion(policyId, versionId);
+    }
+    if (actionButton.hasAttribute("data-policy-rollback")) {
+      await apiClient.rollbackPolicyVersion(policyId, versionId);
+    }
+    if (actionButton.hasAttribute("data-policy-archive")) {
+      await apiClient.archivePolicyVersion(policyId, versionId);
+    }
+    await refreshPolicyWorkspace(root, apiClient, policyId);
+  });
+  document.addEventListener("click", async (event) => {
+    const lintButton = event.target.closest("[data-policy-editor-lint]");
+    if (!lintButton || !apiClient) {
+      return;
+    }
+    const policyId = lintButton.getAttribute("data-policy-editor-lint");
+    const form = document.querySelector(`[data-policy-editor-form][data-policy-id="${policyId}"]`);
+    if (!policyId || !form) {
+      return;
+    }
+    const payload = policyEditorPayloadFromForm(form);
+    appState = {
+      ...appState,
+      policyEditorLint: await apiClient.lintPolicy(payload),
+      policyEditorBody: payload.body_text,
+      policyEditorBodyFormat: payload.body_format,
+      policyEditorBackend: payload.backend
+    };
+    mount(root, appState);
+  });
+  document.addEventListener("click", async (event) => {
+    const openExceptionButton = event.target.closest("[data-policy-exception-open]");
+    if (!openExceptionButton) {
+      return;
+    }
+    const bindingId = openExceptionButton.getAttribute("data-policy-exception-open");
+    const dialog = bindingId
+      ? document.querySelector(`[data-policy-exception-modal="${bindingId}"]`)
+      : null;
+    if (dialog?.showModal) {
+      dialog.showModal();
+    }
+  });
+  document.addEventListener("click", async (event) => {
+    const deleteBindingButton = event.target.closest("[data-policy-binding-delete]");
+    if (!deleteBindingButton || !apiClient) {
+      return;
+    }
+    const bindingId = deleteBindingButton.getAttribute("data-policy-binding-delete");
+    if (!bindingId) {
+      return;
+    }
+    await apiClient.deletePolicyBinding(bindingId);
+    await refreshPolicyWorkspace(root, apiClient, appState.selectedPolicy?.id ?? null);
   });
   document.addEventListener("click", async (event) => {
     const relatedButton = event.target.closest("[data-related-event-id]");
@@ -248,6 +388,88 @@ export function installNavigation(root = document.getElementById("app"), apiClie
       mount(root, appState);
       return;
     }
+    const policyFilterForm = event.target.closest("[data-policy-filter]");
+    if (policyFilterForm && apiClient) {
+      event.preventDefault();
+      const policies = await apiClient.listPolicies(policyFilterParamsFromForm(policyFilterForm));
+      const selectedPolicyId = policies[0]?.id ?? null;
+      const selectedPolicy = selectedPolicyId ? await apiClient.getPolicy(selectedPolicyId) : null;
+      appState = {
+        ...appState,
+        policies,
+        selectedPolicy,
+        policyVersions: selectedPolicy?.versions ?? []
+      };
+      mount(root, appState);
+      return;
+    }
+    const policyImportForm = event.target.closest("[data-policy-import-form]");
+    if (policyImportForm && apiClient) {
+      event.preventDefault();
+      const result = policyImportForm.querySelector("[data-policy-import-result]");
+      if (result) {
+        result.textContent = "Importing";
+      }
+      try {
+        const imported = await apiClient.importPolicy(policyImportPayloadFromForm(policyImportForm));
+        if (result) {
+          result.textContent = imported.policy.id;
+        }
+        await refreshPolicyWorkspace(root, apiClient, imported.policy.id);
+      } catch (error) {
+        if (result) {
+          result.textContent = error?.message ?? "Import failed";
+        }
+      }
+      return;
+    }
+    const policyEditorForm = event.target.closest("[data-policy-editor-form]");
+    if (policyEditorForm && apiClient) {
+      event.preventDefault();
+      const policyId = policyEditorForm.getAttribute("data-policy-id");
+      if (!policyId) {
+        return;
+      }
+      const payload = policyEditorPayloadFromForm(policyEditorForm);
+      const created = await apiClient.savePolicyDraftVersion(policyId, payload);
+      await apiClient.lintPolicyVersion(policyId, created.id);
+      await refreshPolicyWorkspace(root, apiClient, policyId);
+      return;
+    }
+    const policyBindingCreateForm = event.target.closest("[data-policy-binding-create-form]");
+    if (policyBindingCreateForm && apiClient) {
+      event.preventDefault();
+      const payload = policyBindingPayloadFromForm(policyBindingCreateForm);
+      await apiClient.createPolicyBinding(payload);
+      await refreshPolicyWorkspace(root, apiClient, payload.policy_id ?? appState.selectedPolicy?.id ?? null);
+      return;
+    }
+    const policyBindingPromoteForm = event.target.closest("[data-policy-binding-promote-form]");
+    if (policyBindingPromoteForm && apiClient) {
+      event.preventDefault();
+      const bindingId = policyBindingPromoteForm.getAttribute("data-binding-id");
+      if (!bindingId) {
+        return;
+      }
+      await apiClient.promotePolicyBinding(bindingId, policyPromotePayloadFromForm(policyBindingPromoteForm));
+      await refreshPolicyWorkspace(root, apiClient, appState.selectedPolicy?.id ?? null);
+      return;
+    }
+    const policyExceptionForm = event.target.closest("[data-policy-exception-form]");
+    if (policyExceptionForm && apiClient) {
+      event.preventDefault();
+      const bindingId = policyExceptionForm.getAttribute("data-binding-id");
+      if (!bindingId) {
+        return;
+      }
+      await apiClient.createPolicyException(bindingId, policyExceptionPayloadFromForm(policyExceptionForm));
+      const dialog = document.querySelector(`[data-policy-exception-modal="${bindingId}"]`);
+      if (dialog?.close) {
+        dialog.close();
+      }
+      await refreshPolicyWorkspace(root, apiClient, appState.selectedPolicy?.id ?? null);
+      return;
+    }
     const filterForm = event.target.closest("[data-agent-inventory-filter]");
     if (filterForm && apiClient) {
       event.preventDefault();
@@ -323,6 +545,10 @@ export async function bootstrap({
     mount(root, appState);
     if (currentPath() === "/discovery") {
       appState = await loadDiscoveryState(apiClient);
+      mount(root, appState);
+    }
+    if (currentPath() === "/policies") {
+      appState = await loadPolicyState(apiClient);
       mount(root, appState);
     }
     if (appState.drawer.open && appState.drawer.kind === "audit-event" && appState.drawer.resourceId) {
