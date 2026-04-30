@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import time
+import json
 from typing import Any
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -19,7 +21,7 @@ from product_platform.api.api_keys import (
     ApiKeyResponse,
     ApiKeyStore,
 )
-from product_platform.audit.events import AuditEventEnvelope, workflow_run_event
+from product_platform.audit.events import AuditEventEnvelope, agent_lifecycle_event, workflow_run_event
 from product_platform.audit.hash_chain import AuditVerificationResult
 from product_platform.audit.store import AuditEventQuery, AuditEventRepository
 from product_platform.audit.streaming import format_sse_event
@@ -52,8 +54,76 @@ from product_platform.api.tenancy import (
     TenantStore,
     require_environment_context,
 )
+from product_platform.agents.models import (
+    AgentCredentialIssueRequest,
+    AgentCredentialIssueResponse,
+    AgentCredentialRotationResponse,
+    AgentCredentialResponse,
+    AgentDetailResponse,
+    AgentHeartbeatRequest,
+    AgentIdentityCreateResponse,
+    AgentInventorySummary,
+    AgentLifecycleActionRequest,
+    AgentOwnerChangeRequest,
+    AgentPatchRequest,
+    AgentRegistrationSimulationResponse,
+    AgentRegistrationDraftCreate,
+    AgentRegistrationDraftPatch,
+    AgentRegistrationDraftResponse,
+    AgentTimelineEvent,
+    CredentialActionRequest,
+    CredentialVerifyRequest,
+    CredentialVerifyResponse,
+    OrphanDetectionRunRequest,
+    OrphanDetectionRunResponse,
+)
+from product_platform.agents.credentials import (
+    AgentCredentialIssuer,
+    AgentCredentialRepository,
+    CredentialNotFoundError,
+    CredentialExpiryMonitor,
+    agent_credential_response,
+)
+from product_platform.agents.repository import (
+    AgentNotFoundError,
+    AgentRegistryRepository,
+    DuplicateAgentNameError,
+    agent_inventory_summary,
+    agent_identity_response,
+    agent_registration_draft_response,
+    agent_detail_response,
+    lifecycle_timeline_event,
+)
+from product_platform.agents.identity import AgentIdentityAdapter
+from product_platform.agents.lifecycle import AgentLifecycleTransitionError
+from product_platform.agents.simulation import simulate_registration_action
 from product_platform.db.connection import Database
 from product_platform.db.seed import seed_demo_data
+from product_platform.discovery.models import (
+    DiscoveryAssignOwnerRequest,
+    DiscoveryFindingResponse,
+    DiscoveryRegisterAgentRequest,
+    DiscoveryRunCreateRequest,
+    DiscoveryRunResponse,
+    DiscoveryScannerResponse,
+    DiscoveryTargetCreateRequest,
+    DiscoveryTargetResponse,
+    DiscoveryTargetSchedulePatch,
+    DiscoverySuppressRequest,
+)
+from product_platform.discovery.findings import (
+    DiscoveryFindingNotFoundError,
+    DiscoveryFindingRepository,
+    discovery_finding_response,
+)
+from product_platform.discovery.registry import DiscoveryScannerRegistry
+from product_platform.discovery.repository import (
+    DiscoveryRepository,
+    DiscoveryTargetNotFoundError,
+    discovery_run_response,
+    discovery_target_response,
+)
+from product_platform.discovery.runner import DiscoveryScanRunner
 from product_platform.worker.api_models import (
     JobCreateRequest,
     JobResponse,
@@ -233,7 +303,7 @@ def create_app(
             status_code=422,
             code="VALIDATION_ERROR",
             message="Request validation failed.",
-            details={"errors": exc.errors()},
+            details={"errors": jsonable_encoder(exc.errors())},
         )
 
     @app.exception_handler(StarletteHTTPException)
@@ -304,6 +374,101 @@ def create_app(
                 status=status,
             )
         )
+
+    def _agent_registration_audit_event(
+        *,
+        row: Any,
+        actor_id: str,
+        event_type: str,
+        correlation_id: str | None = None,
+    ) -> AuditEventEnvelope:
+        return AuditEventEnvelope(
+            organization_id=row["organization_id"],
+            environment_id=row["environment_id"],
+            event_type=event_type,
+            source_component="agent-registry",
+            actor_type="user",
+            actor_id=actor_id,
+            agent_id=row["id"],
+            resource_type="agent",
+            resource_id=row["id"],
+            correlation_id=correlation_id,
+            payload_json={
+                "name": row["name"],
+                "status": row["status"],
+                "framework": row["framework"],
+                "runtime_type": row["runtime_type"],
+            },
+        )
+
+    def _discovery_scan_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        event_type: str,
+        actor_id: str,
+        run: Any,
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type=event_type,
+            source_component="discovery-scan-runner",
+            actor_type="user",
+            actor_id=actor_id,
+            resource_type="discovery_run",
+            resource_id=run["id"],
+            correlation_id=correlation_id,
+            payload_json={
+                "run_id": run["id"],
+                "target_id": run["target_id"],
+                "scanner_type": run["scanner_type"],
+                "status": run["status"],
+            },
+        )
+
+    def _discovery_finding_action_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        finding: Any,
+        action_type: str,
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type="discovery.finding.action",
+            source_component="discovery-reconciliation",
+            actor_type="user",
+            actor_id=actor_id,
+            resource_type="discovery_finding",
+            resource_id=finding["id"],
+            correlation_id=correlation_id,
+            payload_json={
+                "action_type": action_type,
+                "finding_id": finding["id"],
+                "status": finding["status"],
+                "risk_level": finding["risk_level"],
+                "registry_agent_id": finding["registry_agent_id"],
+            },
+        )
+
+    def _resolve_sponsor_email(row: Any, current_user: UserPrincipal, connection: Any) -> str:
+        sponsor_user_id = str(row["sponsor_user_id"])
+        if "@" in sponsor_user_id:
+            return sponsor_user_id
+        user_row = connection.execute(
+            "SELECT email FROM users WHERE id = ? AND deleted_at IS NULL",
+            (sponsor_user_id,),
+        ).fetchone()
+        if user_row is not None:
+            return str(user_row["email"])
+        if sponsor_user_id == current_user.id:
+            return current_user.email
+        raise HTTPException(status_code=400, detail="Sponsor email could not be resolved.")
 
     @app.get("/health", response_model=HealthStatus, tags=["system"])
     async def health() -> HealthStatus:
@@ -563,6 +728,442 @@ def create_app(
             raise HTTPException(status_code=404, detail="Audit event not found.")
         return event
 
+    @app.get(
+        "/api/v1/discovery/scanners",
+        response_model=list[DiscoveryScannerResponse],
+        tags=["discovery"],
+    )
+    async def list_discovery_scanners(
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+    ) -> list[DiscoveryScannerResponse]:
+        """List built-in discovery scanner metadata and availability."""
+
+        return DiscoveryScannerRegistry.default().list_scanners()
+
+    @app.post(
+        "/api/v1/discovery/targets",
+        response_model=DiscoveryTargetResponse,
+        status_code=201,
+        tags=["discovery"],
+    )
+    async def create_discovery_target(
+        body: DiscoveryTargetCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> DiscoveryTargetResponse:
+        """Create a tenant-scoped discovery scanner target."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = DiscoveryRepository(connection, organization_id, environment_id)
+                return discovery_target_response(repository.create_target(body))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/discovery/targets",
+        response_model=list[DiscoveryTargetResponse],
+        tags=["discovery"],
+    )
+    async def list_discovery_targets(
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[DiscoveryTargetResponse]:
+        """List tenant-scoped discovery scanner targets."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = DiscoveryRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        return [discovery_target_response(row) for row in repository.list_targets()]
+
+    @app.get(
+        "/api/v1/discovery/findings",
+        response_model=list[DiscoveryFindingResponse],
+        tags=["discovery"],
+    )
+    async def list_discovery_findings(
+        risk_level: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        source: str | None = Query(default=None),
+        owner: str | None = Query(default=None),
+        registry_match: str | None = Query(default=None),
+        include_suppressed: bool = Query(default=False),
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[DiscoveryFindingResponse]:
+        """List normalized discovery findings."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = DiscoveryFindingRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        try:
+            rows = repository.list_findings(
+                risk_level=risk_level,
+                status=status,
+                source=source,
+                owner=owner,
+                registry_match=registry_match,
+                include_suppressed=include_suppressed or status == "suppressed",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return [discovery_finding_response(repository, row) for row in rows]
+
+    @app.get(
+        "/api/v1/discovery/findings/{finding_id}",
+        response_model=DiscoveryFindingResponse,
+        tags=["discovery"],
+    )
+    async def get_discovery_finding(
+        finding_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> DiscoveryFindingResponse:
+        """Get one normalized discovery finding with evidence and risk factors."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = DiscoveryFindingRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        row = repository.get_finding(finding_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Discovery finding not found.")
+        return discovery_finding_response(repository, row, include_evidence=True)
+
+    @app.post(
+        "/api/v1/discovery/findings/{finding_id}/assign-owner",
+        response_model=DiscoveryFindingResponse,
+        tags=["discovery"],
+    )
+    async def assign_discovery_finding_owner(
+        finding_id: str,
+        body: DiscoveryAssignOwnerRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> DiscoveryFindingResponse:
+        """Assign an owner to a normalized discovery finding."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = DiscoveryFindingRepository(connection, organization_id, environment_id)
+                row = repository.assign_owner(
+                    finding_id,
+                    body.owner_user_id,
+                    actor_id=current_user.id,
+                )
+                AuditEventRepository(connection).insert(
+                    _discovery_finding_action_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        finding=row,
+                        action_type="assign_owner",
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return discovery_finding_response(repository, row, include_evidence=True)
+        except DiscoveryFindingNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/discovery/findings/{finding_id}/suppress",
+        response_model=DiscoveryFindingResponse,
+        tags=["discovery"],
+    )
+    async def suppress_discovery_finding(
+        finding_id: str,
+        body: DiscoverySuppressRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> DiscoveryFindingResponse:
+        """Suppress a discovery finding with an operator reason."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = DiscoveryFindingRepository(connection, organization_id, environment_id)
+                row = repository.suppress(
+                    finding_id,
+                    reason=body.reason,
+                    expires_at=body.expires_at,
+                    actor_id=current_user.id,
+                )
+                AuditEventRepository(connection).insert(
+                    _discovery_finding_action_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        finding=row,
+                        action_type="suppress",
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return discovery_finding_response(repository, row, include_evidence=True)
+        except DiscoveryFindingNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/discovery/findings/{finding_id}/mark-decommissioned",
+        response_model=DiscoveryFindingResponse,
+        tags=["discovery"],
+    )
+    async def mark_discovery_finding_decommissioned(
+        finding_id: str,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> DiscoveryFindingResponse:
+        """Mark a discovery finding as decommissioned."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = DiscoveryFindingRepository(connection, organization_id, environment_id)
+                row = repository.mark_decommissioned(finding_id, actor_id=current_user.id)
+                AuditEventRepository(connection).insert(
+                    _discovery_finding_action_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        finding=row,
+                        action_type="mark_decommissioned",
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return discovery_finding_response(repository, row, include_evidence=True)
+        except DiscoveryFindingNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/discovery/findings/{finding_id}/register-agent",
+        response_model=DiscoveryFindingResponse,
+        tags=["discovery"],
+    )
+    async def register_discovery_finding_as_agent(
+        finding_id: str,
+        body: DiscoveryRegisterAgentRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> DiscoveryFindingResponse:
+        """Create an agent registration draft from a discovery finding."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                findings = DiscoveryFindingRepository(connection, organization_id, environment_id)
+                finding = findings.get_finding(finding_id)
+                if finding is None:
+                    raise DiscoveryFindingNotFoundError("Discovery finding not found.")
+                draft = AgentRegistryRepository(
+                    connection,
+                    organization_id,
+                    environment_id,
+                ).create_registration_draft(
+                    AgentRegistrationDraftCreate(
+                        name=finding["detected_name"],
+                        owner_user_id=body.owner_user_id,
+                        sponsor_user_id=body.sponsor_user_id,
+                        framework=body.framework or finding["agent_type"],
+                        runtime_type=body.runtime_type,
+                        description=f"Discovered from {finding['source'] or 'discovery scan'}",
+                        endpoint_url=finding["endpoint_url"],
+                    ),
+                    created_by=current_user.id,
+                )
+                row = findings.link_registration_draft(
+                    finding_id,
+                    agent_id=draft["id"],
+                    actor_id=current_user.id,
+                )
+                audit = AuditEventRepository(connection)
+                audit.insert(
+                    _agent_registration_audit_event(
+                        row=draft,
+                        actor_id=current_user.id,
+                        event_type="agent.registration_draft.created",
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                audit.insert(
+                    _discovery_finding_action_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        finding=row,
+                        action_type="register_agent",
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return discovery_finding_response(findings, row, include_evidence=True)
+        except DiscoveryFindingNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except DuplicateAgentNameError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/discovery/reconcile-run/{run_id}",
+        response_model=list[DiscoveryFindingResponse],
+        tags=["discovery"],
+    )
+    async def reconcile_discovery_run(
+        run_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[DiscoveryFindingResponse]:
+        """Normalize, risk score, and registry-reconcile raw findings for a run."""
+
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = DiscoveryFindingRepository(connection, organization_id, environment_id)
+            normalized = repository.reconcile_run(run_id)
+            for finding in normalized:
+                repository.score_finding(finding["id"])
+            reconciled = repository.reconcile_registry()
+            normalized_ids = {finding["id"] for finding in normalized}
+            return [
+                discovery_finding_response(repository, row, include_evidence=True)
+                for row in reconciled
+                if row["id"] in normalized_ids
+            ]
+
+    @app.patch(
+        "/api/v1/discovery/targets/{target_id}/schedule",
+        response_model=DiscoveryTargetResponse,
+        tags=["discovery"],
+    )
+    async def patch_discovery_target_schedule(
+        target_id: str,
+        body: DiscoveryTargetSchedulePatch,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> DiscoveryTargetResponse:
+        """Patch hourly/daily/manual scheduling controls for a target."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = DiscoveryRepository(connection, organization_id, environment_id)
+                return discovery_target_response(
+                    repository.update_target_schedule(target_id, body)
+                )
+        except DiscoveryTargetNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/discovery/runs",
+        response_model=DiscoveryRunResponse,
+        status_code=201,
+        tags=["discovery"],
+    )
+    async def create_discovery_run(
+        body: DiscoveryRunCreateRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> DiscoveryRunResponse:
+        """Run a discovery scanner target and persist raw findings."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = DiscoveryRepository(connection, organization_id, environment_id)
+                runner = DiscoveryScanRunner(repository)
+                target = repository.get_target(body.target_id)
+                if target is None:
+                    raise DiscoveryTargetNotFoundError("Discovery target not found.")
+                run = repository.create_run(target)
+                audit = AuditEventRepository(connection)
+                audit.insert(
+                    _discovery_scan_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        event_type="discovery.scan.started",
+                        actor_id=current_user.id,
+                        run=run,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                completed = await runner.run_created_target(target, run)
+                audit.insert(
+                    _discovery_scan_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        event_type=(
+                            "discovery.scan.completed"
+                            if completed["status"] == "succeeded"
+                            else "discovery.scan.failed"
+                        ),
+                        actor_id=current_user.id,
+                        run=completed,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return discovery_run_response(repository, completed, include_findings=True)
+        except DiscoveryTargetNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/discovery/runs",
+        response_model=list[DiscoveryRunResponse],
+        tags=["discovery"],
+    )
+    async def list_discovery_runs(
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[DiscoveryRunResponse]:
+        """List discovery scan runs for the selected environment."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = DiscoveryRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        return [discovery_run_response(repository, row) for row in repository.list_runs()]
+
+    @app.get(
+        "/api/v1/discovery/runs/{run_id}",
+        response_model=DiscoveryRunResponse,
+        tags=["discovery"],
+    )
+    async def get_discovery_run(
+        run_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> DiscoveryRunResponse:
+        """Get one discovery scan run with raw findings."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = DiscoveryRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        row = repository.get_run(run_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Discovery run not found.")
+        return discovery_run_response(repository, row, include_findings=True)
+
     @app.post(
         "/api/v1/audit/events/{event_id}/verify",
         response_model=AuditVerificationResult,
@@ -625,26 +1226,100 @@ def create_app(
                 status=created["status"],
             )
             if body.run_immediately:
-                if body.job_type != "demo.noop":
+                if body.job_type == "demo.noop":
+                    jobs.mark_running(created["id"])
+                    completed = jobs.mark_succeeded(
+                        created["id"],
+                        logs=["queued", "started demo.noop", "completed demo.noop"],
+                        metrics={"duration_ms": 0},
+                        result={"ok": True, "job_type": body.job_type},
+                    )
+                    _insert_job_audit_event(
+                        audit,
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        job_id=completed["id"],
+                        job_type=completed["job_type"],
+                        status=completed["status"],
+                    )
+                elif body.job_type == "discovery.scan":
+                    target_id = str(body.payload.get("target_id") or "").strip()
+                    if not target_id:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="payload.target_id is required for discovery.scan.",
+                        )
+                    jobs.mark_running(created["id"])
+                    discovery_repository = DiscoveryRepository(
+                        connection,
+                        organization_id,
+                        environment_id,
+                    )
+                    target = discovery_repository.get_target(target_id)
+                    if target is None:
+                        raise HTTPException(status_code=404, detail="Discovery target not found.")
+                    run = discovery_repository.create_run(target)
+                    audit.insert(
+                        _discovery_scan_audit_event(
+                            organization_id=organization_id,
+                            environment_id=environment_id,
+                            event_type="discovery.scan.started",
+                            actor_id=current_user.id,
+                            run=run,
+                            correlation_id=None,
+                        )
+                    )
+                    completed_run = await DiscoveryScanRunner(
+                        discovery_repository
+                    ).run_created_target(target, run)
+                    terminal_event = {
+                        "succeeded": "discovery.scan.completed",
+                        "skipped": "discovery.scan.skipped",
+                    }.get(completed_run["status"], "discovery.scan.failed")
+                    audit.insert(
+                        _discovery_scan_audit_event(
+                            organization_id=organization_id,
+                            environment_id=environment_id,
+                            event_type=terminal_event,
+                            actor_id=current_user.id,
+                            run=completed_run,
+                            correlation_id=None,
+                        )
+                    )
+                    summary = json.loads(completed_run["summary_json"])
+                    job_result = {
+                        "ok": completed_run["status"] == "succeeded",
+                        "discovery_run_id": completed_run["id"],
+                        "discovery_status": completed_run["status"],
+                        "raw_finding_count": summary.get("raw_finding_count", 0),
+                    }
+                    if completed_run["status"] == "failed":
+                        completed = jobs.mark_failed(
+                            created["id"],
+                            error_message=completed_run["error_message"]
+                            or "Discovery scan failed.",
+                            logs=["queued", "started discovery.scan", "failed discovery.scan"],
+                        )
+                    else:
+                        completed = jobs.mark_succeeded(
+                            created["id"],
+                            logs=["queued", "started discovery.scan", "completed discovery.scan"],
+                            metrics={"raw_finding_count": job_result["raw_finding_count"]},
+                            result=job_result,
+                        )
+                    _insert_job_audit_event(
+                        audit,
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        job_id=completed["id"],
+                        job_type=completed["job_type"],
+                        status=completed["status"],
+                    )
+                else:
                     raise HTTPException(
                         status_code=400,
                         detail="Only demo.noop can run immediately in the foundation runtime.",
                     )
-                jobs.mark_running(created["id"])
-                completed = jobs.mark_succeeded(
-                    created["id"],
-                    logs=["queued", "started demo.noop", "completed demo.noop"],
-                    metrics={"duration_ms": 0},
-                    result={"ok": True, "job_type": body.job_type},
-                )
-                _insert_job_audit_event(
-                    audit,
-                    organization_id=organization_id,
-                    environment_id=environment_id,
-                    job_id=completed["id"],
-                    job_type=completed["job_type"],
-                    status=completed["status"],
-                )
             return _serialize_job(jobs, created["id"])
 
     @app.get("/api/v1/jobs", response_model=list[JobResponse], tags=["jobs"])
@@ -764,6 +1439,1045 @@ def create_app(
             if schedule is None:
                 raise HTTPException(status_code=404, detail="Schedule not found.")
             return job_schedule_response(schedule)
+
+    @app.post(
+        "/api/v1/agents/registration-drafts",
+        response_model=AgentRegistrationDraftResponse,
+        status_code=201,
+        tags=["agents"],
+    )
+    async def create_agent_registration_draft(
+        body: AgentRegistrationDraftCreate,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> AgentRegistrationDraftResponse:
+        """Create a tenant-scoped agent registration draft."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                agents = AgentRegistryRepository(connection, organization_id, environment_id)
+                row = agents.create_registration_draft(body, created_by=current_user.id)
+                AuditEventRepository(connection).insert(
+                    _agent_registration_audit_event(
+                        row=row,
+                        actor_id=current_user.id,
+                        event_type="agent.registration_draft.created",
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return agent_registration_draft_response(row)
+        except DuplicateAgentNameError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.patch(
+        "/api/v1/agents/registration-drafts/{draft_id}",
+        response_model=AgentRegistrationDraftResponse,
+        tags=["agents"],
+    )
+    async def patch_agent_registration_draft(
+        draft_id: str,
+        body: AgentRegistrationDraftPatch,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> AgentRegistrationDraftResponse:
+        """Patch a tenant-scoped agent registration draft."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                row = AgentRegistryRepository(
+                    connection, organization_id, environment_id
+                ).update_registration_draft(draft_id, body)
+                agents = AgentRegistryRepository(connection, organization_id, environment_id)
+                if body.capabilities is not None:
+                    agents.replace_capabilities(
+                        draft_id,
+                        body.capabilities,
+                        requested_by=current_user.id,
+                    )
+                if body.policy_selections is not None:
+                    agents.replace_policy_selections(draft_id, body.policy_selections)
+                return agent_registration_draft_response(
+                    row,
+                    capabilities=agents.list_capabilities(draft_id),
+                    policy_selections=agents.list_policy_selections(draft_id),
+                )
+        except DuplicateAgentNameError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except AgentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/agents/registration-drafts/{draft_id}/simulate",
+        response_model=AgentRegistrationSimulationResponse,
+        tags=["agents"],
+    )
+    async def simulate_agent_registration_draft(
+        draft_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> AgentRegistrationSimulationResponse:
+        """Simulate the first requested draft capability against selected policies."""
+
+        organization_id = _require_organization_id(current_user)
+        agents = AgentRegistryRepository(_audit_database().connect(), organization_id, environment_id)
+        draft = agents.get(draft_id)
+        if draft is None or draft["status"] != "draft":
+            raise HTTPException(status_code=404, detail="Registration draft not found.")
+        capabilities = [
+            row["capability_name"] for row in agents.list_capabilities(draft_id)
+        ]
+        policy_ids = [
+            row["policy_id"] for row in agents.list_policy_selections(draft_id)
+        ]
+        return simulate_registration_action(
+            agent_id=draft_id,
+            capability_names=capabilities,
+            policy_ids=policy_ids,
+        )
+
+    @app.get("/api/v1/agents", response_model=list[AgentInventorySummary], tags=["agents"])
+    async def list_agents(
+        status: str | None = None,
+        owner_user_id: str | None = None,
+        sponsor_user_id: str | None = None,
+        framework: str | None = None,
+        protocol: str | None = None,
+        trust_tier: str | None = None,
+        capability: str | None = None,
+        environment_filter: str | None = Query(default=None, alias="environment_id"),
+        sort: str = Query(default="name"),
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[AgentInventorySummary]:
+        """List tenant-scoped agent inventory summaries."""
+
+        organization_id = _require_organization_id(current_user)
+        if environment_filter is not None and environment_filter != environment_id:
+            return []
+        repository = AgentRegistryRepository(
+            _audit_database().connect(), organization_id, environment_id
+        )
+        rows = repository.list_inventory(
+            limit=limit,
+            offset=offset,
+            status=status,
+            owner_user_id=owner_user_id,
+            sponsor_user_id=sponsor_user_id,
+            framework=framework,
+            protocol=protocol,
+            trust_tier=trust_tier,
+            capability=capability,
+            environment_filter=environment_filter,
+            sort=sort,
+        )
+        return [agent_inventory_summary(row) for row in rows]
+
+    @app.get("/api/v1/agents/{agent_id}", response_model=AgentDetailResponse, tags=["agents"])
+    async def get_agent_detail(
+        agent_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> AgentDetailResponse:
+        """Return aggregate detail for one accessible agent."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = AgentRegistryRepository(
+            _audit_database().connect(), organization_id, environment_id
+        )
+        row = repository.get_inventory_summary(agent_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Agent not found.")
+        return agent_detail_response(repository, row)
+
+    @app.get(
+        "/api/v1/agents/{agent_id}/credentials",
+        response_model=list[AgentCredentialResponse],
+        tags=["agents"],
+    )
+    async def list_agent_credentials(
+        agent_id: str,
+        status: str | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[AgentCredentialResponse]:
+        """List credential metadata for one accessible agent without token hashes."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = AgentCredentialRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        try:
+            rows = repository.list_for_agent(agent_id, status=status)
+        except AgentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return [agent_credential_response(repository, row) for row in rows]
+
+    @app.post(
+        "/api/v1/agents/{agent_id}/credentials",
+        response_model=AgentCredentialIssueResponse,
+        status_code=201,
+        tags=["agents"],
+    )
+    async def issue_agent_credential(
+        agent_id: str,
+        body: AgentCredentialIssueRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> AgentCredentialIssueResponse:
+        """Issue a one-time credential token for an accessible active agent."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = AgentCredentialRepository(
+                    connection,
+                    organization_id,
+                    environment_id,
+                )
+                agent_did = repository.identity_did(agent_id)
+                repository.validate_scopes(agent_id, body.scopes)
+                issued = AgentCredentialIssuer(default_ttl_seconds=body.ttl_seconds).issue(
+                    agent_did=agent_did,
+                    scopes=body.scopes,
+                    ttl_seconds=body.ttl_seconds,
+                    issued_for=body.issued_for,
+                )
+                row = repository.create_metadata(
+                    agent_id=agent_id,
+                    credential_type=body.credential_type,
+                    raw_token=issued.token,
+                    issuer=body.issuer,
+                    expires_at=issued.expires_at,
+                    scopes=body.scopes,
+                    metadata_json={
+                        "agent_did": agent_did,
+                        "agentmesh_credential_id": issued.agentmesh_credential_id,
+                        "issued_for": body.issued_for,
+                        "ttl_seconds": issued.ttl_seconds,
+                    },
+                    status=issued.status,
+                    issued_at=issued.issued_at,
+                )
+                AuditEventRepository(connection).insert(
+                    AuditEventEnvelope(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        event_type="agent.credential.issued",
+                        source_component="agent-registry",
+                        actor_type="user",
+                        actor_id=current_user.id,
+                        agent_id=agent_id,
+                        resource_type="agent_credential",
+                        resource_id=row["id"],
+                        correlation_id=context.correlation_id,
+                        payload_json={
+                            "credential_type": body.credential_type,
+                            "issuer": body.issuer,
+                            "status": row["status"],
+                            "expires_at": row["expires_at"],
+                            "scope_count": len(body.scopes),
+                        },
+                    )
+                )
+                return AgentCredentialIssueResponse(
+                    credential=agent_credential_response(repository, row),
+                    token=issued.token,
+                    bearer_token=issued.bearer_token,
+                )
+        except AgentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def _require_credential_reason(body: CredentialActionRequest | None, action: str) -> str:
+        reason = body.reason if body else None
+        if not reason:
+            raise HTTPException(status_code=422, detail=f"Reason is required to {action}.")
+        return reason
+
+    def _credential_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        event_type: str,
+        actor_id: str,
+        agent_id: str,
+        credential_id: str,
+        correlation_id: str | None,
+        payload_json: dict[str, Any],
+    ) -> AuditEventEnvelope:
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type=event_type,
+            source_component="agent-registry",
+            actor_type="user",
+            actor_id=actor_id,
+            agent_id=agent_id,
+            resource_type="agent_credential",
+            resource_id=credential_id,
+            correlation_id=correlation_id,
+            payload_json=payload_json,
+        )
+
+    @app.post(
+        "/api/v1/credentials/{credential_id}/rotate",
+        response_model=AgentCredentialRotationResponse,
+        tags=["agents"],
+    )
+    async def rotate_agent_credential(
+        credential_id: str,
+        request: Request,
+        body: CredentialActionRequest | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> AgentCredentialRotationResponse:
+        """Rotate an active credential and return replacement token material once."""
+
+        reason = _require_credential_reason(body, "rotate a credential")
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = AgentCredentialRepository(
+                    connection,
+                    organization_id,
+                    environment_id,
+                )
+                original = repository.get(credential_id)
+                if original is None:
+                    raise CredentialNotFoundError("Credential not found.")
+                if original["status"] != "active":
+                    raise ValueError("Only active credentials can be rotated.")
+                agent_id = original["agent_id"]
+                scopes = repository.scope_requests(credential_id)
+                metadata = json.loads(original["metadata_json"])
+                ttl_seconds = int(metadata.get("ttl_seconds") or 900)
+                agent_did = repository.identity_did(agent_id)
+                issued = AgentCredentialIssuer(default_ttl_seconds=ttl_seconds).issue(
+                    agent_did=agent_did,
+                    scopes=scopes,
+                    ttl_seconds=ttl_seconds,
+                    issued_for=metadata.get("issued_for"),
+                )
+                previous = repository.revoke(
+                    credential_id,
+                    reason=reason,
+                    actor_id=current_user.id,
+                    publication_type="rotation",
+                )
+                created = repository.create_metadata(
+                    agent_id=agent_id,
+                    credential_type=original["credential_type"],
+                    raw_token=issued.token,
+                    issuer=original["issuer"],
+                    expires_at=issued.expires_at,
+                    scopes=scopes,
+                    metadata_json={
+                        "agent_did": agent_did,
+                        "agentmesh_credential_id": issued.agentmesh_credential_id,
+                        "issued_for": metadata.get("issued_for"),
+                        "rotated_from": credential_id,
+                        "ttl_seconds": issued.ttl_seconds,
+                    },
+                    status=issued.status,
+                    issued_at=issued.issued_at,
+                )
+                rotation = repository.record_rotation(
+                    agent_id=agent_id,
+                    previous_credential_id=credential_id,
+                    new_credential_id=created["id"],
+                    reason=reason,
+                    requested_by=current_user.id,
+                )
+                repository.record_lifecycle_evidence(
+                    agent_id=agent_id,
+                    actor_id=current_user.id,
+                    reason="credential rotated",
+                    metadata_json={
+                        "previous_credential_id": credential_id,
+                        "new_credential_id": created["id"],
+                        "rotation_id": rotation["id"],
+                        "reason": reason,
+                    },
+                )
+                audit = AuditEventRepository(connection)
+                audit.insert(
+                    _credential_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        event_type="agent.credential.rotated",
+                        actor_id=current_user.id,
+                        agent_id=agent_id,
+                        credential_id=created["id"],
+                        correlation_id=context.correlation_id,
+                        payload_json={
+                            "previous_credential_id": credential_id,
+                            "new_credential_id": created["id"],
+                            "rotation_id": rotation["id"],
+                            "reason": reason,
+                        },
+                    )
+                )
+                audit.insert(
+                    _credential_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        event_type="agent.credential.revocation_published",
+                        actor_id=current_user.id,
+                        agent_id=agent_id,
+                        credential_id=credential_id,
+                        correlation_id=context.correlation_id,
+                        payload_json={
+                            "credential_id": credential_id,
+                            "publication_type": "rotation",
+                            "reason": reason,
+                            "targets": ["agent-gateways", "agent-runtime"],
+                        },
+                    )
+                )
+                return AgentCredentialRotationResponse(
+                    rotation_id=rotation["id"],
+                    previous_credential=agent_credential_response(repository, previous),
+                    credential=agent_credential_response(repository, created),
+                    token=issued.token,
+                    bearer_token=issued.bearer_token,
+                )
+        except (CredentialNotFoundError, AgentNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/credentials/{credential_id}/revoke",
+        response_model=AgentCredentialResponse,
+        tags=["agents"],
+    )
+    async def revoke_agent_credential(
+        credential_id: str,
+        request: Request,
+        body: CredentialActionRequest | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> AgentCredentialResponse:
+        """Revoke an active credential and publish revocation metadata."""
+
+        reason = _require_credential_reason(body, "revoke a credential")
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = AgentCredentialRepository(
+                    connection,
+                    organization_id,
+                    environment_id,
+                )
+                row = repository.revoke(
+                    credential_id,
+                    reason=reason,
+                    actor_id=current_user.id,
+                    publication_type="revocation",
+                )
+                agent_id = row["agent_id"]
+                repository.record_lifecycle_evidence(
+                    agent_id=agent_id,
+                    actor_id=current_user.id,
+                    reason="credential revoked",
+                    metadata_json={"credential_id": credential_id, "reason": reason},
+                )
+                audit = AuditEventRepository(connection)
+                audit.insert(
+                    _credential_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        event_type="agent.credential.revoked",
+                        actor_id=current_user.id,
+                        agent_id=agent_id,
+                        credential_id=credential_id,
+                        correlation_id=context.correlation_id,
+                        payload_json={"credential_id": credential_id, "reason": reason},
+                    )
+                )
+                audit.insert(
+                    _credential_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        event_type="agent.credential.revocation_published",
+                        actor_id=current_user.id,
+                        agent_id=agent_id,
+                        credential_id=credential_id,
+                        correlation_id=context.correlation_id,
+                        payload_json={
+                            "credential_id": credential_id,
+                            "publication_type": "revocation",
+                            "reason": reason,
+                            "targets": ["agent-gateways", "agent-runtime"],
+                        },
+                    )
+                )
+                return agent_credential_response(repository, row)
+        except (CredentialNotFoundError, AgentNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/credentials/expiring",
+        response_model=list[AgentCredentialResponse],
+        tags=["agents"],
+    )
+    async def list_expiring_credentials(
+        threshold_hours: int = Query(default=24, ge=1, le=720),
+        now: str | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[AgentCredentialResponse]:
+        """List credentials expiring within the threshold for the selected environment."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = AgentCredentialRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        rows = repository.list_expiring(threshold_hours=threshold_hours, now=now)
+        return [agent_credential_response(repository, row) for row in rows]
+
+    @app.post(
+        "/api/v1/credentials/{credential_id}/verify",
+        response_model=CredentialVerifyResponse,
+        tags=["agents"],
+    )
+    async def verify_agent_credential(
+        credential_id: str,
+        body: CredentialVerifyRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> CredentialVerifyResponse:
+        """Verify a submitted token against credential metadata without exposing hashes."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                result = AgentCredentialRepository(
+                    connection,
+                    organization_id,
+                    environment_id,
+                ).verify_token(credential_id, raw_token=body.token)
+                return CredentialVerifyResponse(**result)
+        except CredentialNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/agents/{agent_id}/timeline",
+        response_model=list[AgentTimelineEvent],
+        tags=["agents"],
+    )
+    async def get_agent_timeline(
+        agent_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[AgentTimelineEvent]:
+        """Return combined lifecycle and audit timeline events for one agent."""
+
+        organization_id = _require_organization_id(current_user)
+        database_for_agents = _audit_database()
+        repository = AgentRegistryRepository(database_for_agents.connect(), organization_id, environment_id)
+        if repository.get(agent_id) is None:
+            raise HTTPException(status_code=404, detail="Agent not found.")
+        timeline = [
+            lifecycle_timeline_event(row) for row in repository.lifecycle_events(agent_id)
+        ]
+        audit_events = AuditEventRepository(database_for_agents.connect()).query(
+            AuditEventQuery(
+                organization_id=organization_id,
+                agent_id=agent_id,
+                limit=100,
+            )
+        )
+        for event in audit_events:
+            timeline.append(
+                AgentTimelineEvent(
+                    id=event.id,
+                    source="audit",
+                    event_type=event.event_type,
+                    created_at=event.created_at,
+                    actor_id=event.actor_id,
+                    payload_json=event.payload_json,
+                )
+            )
+        return sorted(timeline, key=lambda event: (event.created_at, event.id))
+
+    @app.get(
+        "/api/v1/agents/{agent_id}/audit",
+        response_model=list[AuditEventEnvelope],
+        tags=["agents"],
+    )
+    async def get_agent_audit(
+        agent_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[AuditEventEnvelope]:
+        """Return audit events for one accessible agent."""
+
+        organization_id = _require_organization_id(current_user)
+        database_for_agents = _audit_database()
+        repository = AgentRegistryRepository(database_for_agents.connect(), organization_id, environment_id)
+        if repository.get(agent_id) is None:
+            raise HTTPException(status_code=404, detail="Agent not found.")
+        return AuditEventRepository(database_for_agents.connect()).query(
+            AuditEventQuery(
+                organization_id=organization_id,
+                agent_id=agent_id,
+                limit=100,
+            )
+        )
+
+    @app.patch("/api/v1/agents/{agent_id}", response_model=AgentInventorySummary, tags=["agents"])
+    async def patch_agent(
+        agent_id: str,
+        body: AgentPatchRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> AgentInventorySummary:
+        """Patch editable fields on an accessible agent."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                row = AgentRegistryRepository(
+                    connection, organization_id, environment_id
+                ).patch_agent(agent_id, body)
+                return agent_inventory_summary(row)
+        except AgentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/agents/registration-drafts/{draft_id}/identity",
+        response_model=AgentIdentityCreateResponse,
+        tags=["agents"],
+    )
+    async def create_agent_identity(
+        draft_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> AgentIdentityCreateResponse:
+        """Create an AgentMesh identity for a draft and return bootstrap material once."""
+
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            agents = AgentRegistryRepository(connection, organization_id, environment_id)
+            draft = agents.get(draft_id)
+            if draft is None or draft["status"] != "draft":
+                raise HTTPException(status_code=404, detail="Registration draft not found.")
+            existing = agents.get_identity(draft_id)
+            if existing is not None:
+                return AgentIdentityCreateResponse(
+                    identity=agent_identity_response(existing),
+                    bootstrap=None,
+                )
+            created = AgentIdentityAdapter().create_identity(
+                name=draft["name"],
+                sponsor_email=_resolve_sponsor_email(draft, current_user, connection),
+                organization=organization_id,
+                description=draft["description"],
+            )
+            row = agents.create_identity(draft_id, created)
+            return AgentIdentityCreateResponse(
+                identity=agent_identity_response(row),
+                bootstrap=created.bootstrap,
+            )
+
+    @app.post(
+        "/api/v1/agents/registration-drafts/{draft_id}/submit",
+        response_model=AgentRegistrationDraftResponse,
+        tags=["agents"],
+    )
+    async def submit_agent_registration_draft(
+        draft_id: str,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> AgentRegistrationDraftResponse:
+        """Submit a draft agent for approval."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                agents = AgentRegistryRepository(connection, organization_id, environment_id)
+                if agents.get_identity(draft_id) is None:
+                    raise HTTPException(status_code=400, detail="Agent identity is required before submit.")
+                if not agents.list_capabilities(draft_id):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="At least one requested capability is required before submit.",
+                    )
+                row = agents.transition_status(
+                    draft_id,
+                    next_status="pending_approval",
+                    actor_id=current_user.id,
+                    reason="registration submitted",
+                )
+                AuditEventRepository(connection).insert(
+                    _agent_registration_audit_event(
+                        row=row,
+                        actor_id=current_user.id,
+                        event_type="agent.registration_submitted",
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return agent_registration_draft_response(
+                    row,
+                    capabilities=agents.list_capabilities(draft_id),
+                    policy_selections=agents.list_policy_selections(draft_id),
+                )
+        except AgentLifecycleTransitionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/agents/{agent_id}/approve",
+        response_model=AgentRegistrationDraftResponse,
+        tags=["agents"],
+    )
+    async def approve_agent_registration(
+        agent_id: str,
+        body: AgentLifecycleActionRequest | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> AgentRegistrationDraftResponse:
+        """Approve a submitted agent and its pending capabilities."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                agents = AgentRegistryRepository(connection, organization_id, environment_id)
+                row = agents.transition_status(
+                    agent_id,
+                    next_status="provisioned",
+                    actor_id=current_user.id,
+                    reason=body.reason if body else "registration approved",
+                )
+                agents.approve_pending_capabilities(agent_id, approved_by=current_user.id)
+                AuditEventRepository(connection).insert(
+                    agent_lifecycle_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        agent_id=agent_id,
+                        lifecycle_state="provisioned",
+                        actor_id=current_user.id,
+                    )
+                )
+                return agent_registration_draft_response(
+                    row,
+                    capabilities=agents.list_capabilities(agent_id),
+                    policy_selections=agents.list_policy_selections(agent_id),
+                )
+        except AgentLifecycleTransitionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except AgentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/agents/{agent_id}/activate",
+        response_model=AgentRegistrationDraftResponse,
+        tags=["agents"],
+    )
+    async def activate_agent_registration(
+        agent_id: str,
+        body: AgentLifecycleActionRequest | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> AgentRegistrationDraftResponse:
+        """Activate an approved agent and queue initial credential issuance."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                agents = AgentRegistryRepository(connection, organization_id, environment_id)
+                row = agents.transition_status(
+                    agent_id,
+                    next_status="active",
+                    actor_id=current_user.id,
+                    reason=body.reason if body else "registration activated",
+                    metadata_json='{"credential_task":"pending"}',
+                )
+                credential_job = JobStateRepository(connection).create_job(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    job_type="agent.credential.issue",
+                    payload={"agent_id": agent_id},
+                    max_attempts=3,
+                )
+                audit = AuditEventRepository(connection)
+                audit.insert(
+                    agent_lifecycle_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        agent_id=agent_id,
+                        lifecycle_state="active",
+                        actor_id=current_user.id,
+                    )
+                )
+                _insert_job_audit_event(
+                    audit,
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    job_id=credential_job["id"],
+                    job_type=credential_job["job_type"],
+                    status=credential_job["status"],
+                )
+                return agent_registration_draft_response(
+                    row,
+                    capabilities=agents.list_capabilities(agent_id),
+                    policy_selections=agents.list_policy_selections(agent_id),
+                )
+        except AgentLifecycleTransitionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except AgentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    def _require_reason(body: AgentLifecycleActionRequest | None, action: str) -> str:
+        reason = body.reason if body else None
+        if not reason:
+            raise HTTPException(status_code=422, detail=f"Reason is required to {action}.")
+        return reason
+
+    @app.post(
+        "/api/v1/agents/{agent_id}/reject",
+        response_model=AgentInventorySummary,
+        tags=["agents"],
+    )
+    async def reject_agent(
+        agent_id: str,
+        body: AgentLifecycleActionRequest | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> AgentInventorySummary:
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                row = AgentRegistryRepository(connection, organization_id, environment_id).transition_status(
+                    agent_id,
+                    next_status="rejected",
+                    actor_id=current_user.id,
+                    reason=body.reason if body else "registration rejected",
+                )
+                AuditEventRepository(connection).insert(
+                    agent_lifecycle_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        agent_id=agent_id,
+                        lifecycle_state="rejected",
+                        actor_id=current_user.id,
+                    )
+                )
+                return agent_inventory_summary(
+                    AgentRegistryRepository(connection, organization_id, environment_id).get_inventory_summary(agent_id)
+                    or row
+                )
+        except (AgentLifecycleTransitionError, AgentNotFoundError) as exc:
+            raise HTTPException(status_code=400 if isinstance(exc, AgentLifecycleTransitionError) else 404, detail=str(exc)) from exc
+
+    @app.post("/api/v1/agents/{agent_id}/suspend", response_model=AgentInventorySummary, tags=["agents"])
+    async def suspend_agent(
+        agent_id: str,
+        body: AgentLifecycleActionRequest | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> AgentInventorySummary:
+        reason = _require_reason(body, "suspend an agent")
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = AgentRegistryRepository(connection, organization_id, environment_id)
+                row = repository.transition_status(
+                    agent_id,
+                    next_status="suspended",
+                    actor_id=current_user.id,
+                    reason=reason,
+                )
+                AuditEventRepository(connection).insert(
+                    agent_lifecycle_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        agent_id=agent_id,
+                        lifecycle_state="suspended",
+                        actor_id=current_user.id,
+                    )
+                )
+                return agent_inventory_summary(repository.get_inventory_summary(agent_id) or row)
+        except (AgentLifecycleTransitionError, AgentNotFoundError) as exc:
+            raise HTTPException(status_code=400 if isinstance(exc, AgentLifecycleTransitionError) else 404, detail=str(exc)) from exc
+
+    @app.post("/api/v1/agents/{agent_id}/resume", response_model=AgentInventorySummary, tags=["agents"])
+    async def resume_agent(
+        agent_id: str,
+        body: AgentLifecycleActionRequest | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> AgentInventorySummary:
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = AgentRegistryRepository(connection, organization_id, environment_id)
+                row = repository.transition_status(
+                    agent_id,
+                    next_status="active",
+                    actor_id=current_user.id,
+                    reason=body.reason if body else "agent resumed",
+                )
+                AuditEventRepository(connection).insert(
+                    agent_lifecycle_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        agent_id=agent_id,
+                        lifecycle_state="active",
+                        actor_id=current_user.id,
+                    )
+                )
+                return agent_inventory_summary(repository.get_inventory_summary(agent_id) or row)
+        except (AgentLifecycleTransitionError, AgentNotFoundError) as exc:
+            raise HTTPException(status_code=400 if isinstance(exc, AgentLifecycleTransitionError) else 404, detail=str(exc)) from exc
+
+    @app.post("/api/v1/agents/{agent_id}/change-owner", response_model=AgentInventorySummary, tags=["agents"])
+    async def change_agent_owner(
+        agent_id: str,
+        body: AgentOwnerChangeRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> AgentInventorySummary:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = AgentRegistryRepository(connection, organization_id, environment_id)
+            row = repository.change_owner(
+                agent_id,
+                new_owner_user_id=body.new_owner_user_id,
+                actor_id=current_user.id,
+                reason=body.reason,
+            )
+            AuditEventRepository(connection).insert(
+                AuditEventEnvelope(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    event_type="agent.owner_changed",
+                    source_component="agent-registry",
+                    actor_type="user",
+                    actor_id=current_user.id,
+                    agent_id=agent_id,
+                    resource_type="agent",
+                    resource_id=agent_id,
+                    payload_json={"new_owner_user_id": body.new_owner_user_id},
+                )
+            )
+            return agent_inventory_summary(repository.get_inventory_summary(agent_id) or row)
+
+    @app.post("/api/v1/agents/{agent_id}/decommission", response_model=AgentInventorySummary, tags=["agents"])
+    async def decommission_agent(
+        agent_id: str,
+        body: AgentLifecycleActionRequest | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> AgentInventorySummary:
+        reason = _require_reason(body, "decommission an agent")
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = AgentRegistryRepository(connection, organization_id, environment_id)
+                repository.transition_status(
+                    agent_id,
+                    next_status="decommissioning",
+                    actor_id=current_user.id,
+                    reason=reason,
+                )
+                row = repository.transition_status(
+                    agent_id,
+                    next_status="decommissioned",
+                    actor_id=current_user.id,
+                    reason=reason,
+                )
+                AuditEventRepository(connection).insert(
+                    agent_lifecycle_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        agent_id=agent_id,
+                        lifecycle_state="decommissioned",
+                        actor_id=current_user.id,
+                    )
+                )
+                return agent_inventory_summary(repository.get_inventory_summary(agent_id) or row)
+        except (AgentLifecycleTransitionError, AgentNotFoundError) as exc:
+            raise HTTPException(status_code=400 if isinstance(exc, AgentLifecycleTransitionError) else 404, detail=str(exc)) from exc
+
+    @app.post("/api/v1/agents/{agent_id}/heartbeat", response_model=AgentInventorySummary, tags=["agents"])
+    async def record_agent_heartbeat(
+        agent_id: str,
+        body: AgentHeartbeatRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> AgentInventorySummary:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = AgentRegistryRepository(connection, organization_id, environment_id)
+            row = repository.record_heartbeat(
+                agent_id,
+                status=body.status,
+                metadata_json=body.metadata_json,
+            )
+            return agent_inventory_summary(repository.get_inventory_summary(agent_id) or row)
+
+    @app.post(
+        "/api/v1/agents/orphan-detection/run",
+        response_model=OrphanDetectionRunResponse,
+        tags=["agents"],
+    )
+    async def run_orphan_detection(
+        body: OrphanDetectionRunRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> OrphanDetectionRunResponse:
+        organization_id = _require_organization_id(current_user)
+        orphaned_ids: list[str] = []
+        with _audit_database().transaction() as connection:
+            repository = AgentRegistryRepository(connection, organization_id, environment_id)
+            candidates = repository.orphan_candidates(threshold_hours=body.threshold_hours)
+            audit = AuditEventRepository(connection)
+            for candidate in candidates:
+                try:
+                    repository.transition_status(
+                        candidate["id"],
+                        next_status="orphaned",
+                        actor_id=current_user.id,
+                        reason="orphan detection",
+                    )
+                except AgentLifecycleTransitionError:
+                    continue
+                orphaned_ids.append(candidate["id"])
+                audit.insert(
+                    agent_lifecycle_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        agent_id=candidate["id"],
+                        lifecycle_state="orphaned",
+                        actor_id=current_user.id,
+                    )
+                )
+        return OrphanDetectionRunResponse(
+            processed_count=len(orphaned_ids),
+            orphaned_agent_ids=orphaned_ids,
+        )
 
     @app.post("/api/v1/policies", status_code=201, tags=["policies"])
     async def create_policy_placeholder(

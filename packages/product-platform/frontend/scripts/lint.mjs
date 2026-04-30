@@ -51,6 +51,7 @@ for (const route of PRODUCT_ROUTES) {
 
 for (const file of [
   "src/navigation.js",
+  "src/agents.js",
   "src/auditDrawers.js",
   "src/render.js",
   "src/app.js",

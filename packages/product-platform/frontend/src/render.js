@@ -3,6 +3,8 @@ import { canAccessRoute } from "./permissions.js";
 import { createInitialAppState, guardRoute } from "./state.js";
 import { renderDrawer } from "./drawers.js";
 import { escapeHtml } from "./html.js";
+import { renderAgentsPage } from "./agents.js";
+import { renderDiscoveryPage } from "./discovery.js";
 
 export { escapeHtml };
 
@@ -191,6 +193,10 @@ export function renderShell({ currentPath = DEFAULT_ROUTE, state = createInitial
       ? renderAuthRequiredPage()
       : guarded.reason === "forbidden"
         ? renderAccessDeniedPage(normalized)
+      : route?.path === "/agents"
+        ? renderAgentsPage(state)
+      : route?.path === "/discovery"
+        ? renderDiscoveryPage(state)
       : route
         ? renderPlaceholderPage(route)
         : renderNotFoundPage(normalized);

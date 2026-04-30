@@ -16,6 +16,8 @@ class Permission:
     TENANT_MANAGE = "tenant:manage"
     POLICY_READ = "policy:read"
     POLICY_WRITE = "policy:write"
+    AGENT_READ = "agent:read"
+    AGENT_WRITE = "agent:write"
     AUDIT_READ = "audit:read"
     AUDIT_WRITE = "audit:write"
     JOB_RUN = "job:run"
@@ -29,13 +31,15 @@ VIEWER_PERMISSIONS = {
     Permission.SYSTEM_READ,
     Permission.TENANT_READ,
     Permission.POLICY_READ,
+    Permission.AGENT_READ,
     Permission.AUDIT_READ,
     Permission.COMPLIANCE_READ,
 }
 
 ROLE_PERMISSIONS: dict[str, set[str]] = {
     "Viewer": VIEWER_PERMISSIONS,
-    "Operator": VIEWER_PERMISSIONS | {Permission.JOB_RUN, Permission.JOB_CANCEL},
+    "Operator": VIEWER_PERMISSIONS
+    | {Permission.AGENT_WRITE, Permission.JOB_RUN, Permission.JOB_CANCEL},
     "Policy Admin": VIEWER_PERMISSIONS | {Permission.POLICY_WRITE, Permission.AUDIT_WRITE},
     "Security Admin": VIEWER_PERMISSIONS | {Permission.SECURITY_MANAGE, Permission.API_KEYS_MANAGE},
     "Compliance Admin": VIEWER_PERMISSIONS | {Permission.AUDIT_WRITE},
@@ -45,6 +49,8 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         Permission.TENANT_MANAGE,
         Permission.POLICY_READ,
         Permission.POLICY_WRITE,
+        Permission.AGENT_READ,
+        Permission.AGENT_WRITE,
         Permission.AUDIT_READ,
         Permission.AUDIT_WRITE,
         Permission.JOB_RUN,
