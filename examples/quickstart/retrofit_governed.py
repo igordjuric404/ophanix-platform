@@ -7,8 +7,8 @@ Retrofit Governance — Standalone Verification Demo
 Companion script for docs/tutorials/retrofit-governance.md
 
 Run from the repo root:
-    pip install agent-governance-toolkit[full]
-    python docs/tutorials/retrofit-governance-demo.py
+    python3 -m pip install 'agent-governance-toolkit[full]'
+    python3 examples/quickstart/retrofit_governed.py
 
 No additional dependencies required. Works without an LLM API key —
 governance runs entirely at the application layer.

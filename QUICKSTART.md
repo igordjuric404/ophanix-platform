@@ -24,19 +24,27 @@ graph LR
 Install the governance toolkit:
 
 ```bash
-pip install agent-governance-toolkit[full]
+python3 -m pip install 'agent-governance-toolkit[full]'
 ```
 
-Or install individual packages:
+If you are running examples from this checkout, install the local packages in
+editable mode so imports such as `agent_os` resolve to the code in this repo:
 
 ```bash
-pip install agent-os-kernel        # Policy enforcement + framework integrations
-pip install agentmesh-platform     # Zero-trust identity + trust cards
-pip install agent-governance-toolkit    # OWASP ASI verification + integrity CLI
-pip install agent-sre              # SLOs, error budgets, chaos testing
-pip install agentmesh-runtime       # Execution supervisor + privilege rings
-pip install agentmesh-marketplace      # Plugin lifecycle management
-pip install agentmesh-lightning        # RL training governance
+cd ophanix-platform
+python3 -m pip install -e packages/agent-os
+```
+
+Or install individual published packages:
+
+```bash
+python3 -m pip install agent-os-kernel        # Policy enforcement + framework integrations
+python3 -m pip install agentmesh-platform     # Zero-trust identity + trust cards
+python3 -m pip install agent-governance-toolkit    # OWASP ASI verification + integrity CLI
+python3 -m pip install agent-sre              # SLOs, error budgets, chaos testing
+python3 -m pip install agentmesh-runtime       # Execution supervisor + privilege rings
+python3 -m pip install agentmesh-marketplace      # Plugin lifecycle management
+python3 -m pip install agentmesh-lightning        # RL training governance
 ```
 
 ### TypeScript / Node.js
