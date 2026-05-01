@@ -8,6 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY packages/product-platform/pyproject.toml ./pyproject.toml
+COPY packages/product-platform/README.md ./README.md
 COPY packages/product-platform/src ./src
 
 RUN python -m pip install --upgrade pip \
