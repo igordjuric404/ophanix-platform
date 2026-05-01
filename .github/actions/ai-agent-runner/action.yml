@@ -140,11 +140,11 @@ runs:
               );
               context.diff = await diffRes.text();
               // Truncate diffs to stay within GitHub Models token limits
-              // (~4 chars per token, keep under ~6000 tokens for diff)
-              if (context.diff.length > 24000) {
+              // (~4 chars per token, keep room for prompts and response budget)
+              if (context.diff.length > 12000) {
                 context.diff =
-                  context.diff.slice(0, 24000) +
-                  "\n\n... [diff truncated — showing first 24k chars of full diff] ...";
+                  context.diff.slice(0, 12000) +
+                  "\n\n... [diff truncated; showing first 12k chars of full diff] ...";
               }
             }
 
