@@ -211,6 +211,50 @@ export function createApiClient({
         body
       }),
     listPolicyExceptions: (params = {}) => request(`/policy-exceptions${queryString(params)}`),
+    listTrustScores: () => request("/trust/scores"),
+    getTrustScore: (agentId) => request(`/trust/scores/${encodeURIComponent(agentId)}`),
+    listTrustEvents: (params = {}) => request(`/trust/events${queryString(params)}`),
+    recalculateTrust: (body = {}) => request("/trust/recalculate", { method: "POST", body }),
+    listTrustRules: (params = {}) => request(`/trust/rules${queryString(params)}`),
+    patchTrustRule: (ruleId, body = {}) =>
+      request(`/trust/rules/${encodeURIComponent(ruleId)}`, { method: "PATCH", body }),
+    listTrustThresholds: (params = {}) => request(`/trust/thresholds${queryString(params)}`),
+    createTrustThreshold: (body) => request("/trust/thresholds", { method: "POST", body }),
+    patchTrustThreshold: (thresholdId, body = {}) =>
+      request(`/trust/thresholds/${encodeURIComponent(thresholdId)}`, { method: "PATCH", body }),
+    listTrustHandshakes: (params = {}) => request(`/trust/handshakes${queryString(params)}`),
+    simulateTrustHandshake: (body) =>
+      request("/trust/handshakes/simulate", { method: "POST", body }),
+    recordTrustHandshake: (body) =>
+      request("/trust/handshakes/record", { method: "POST", body }),
+    createMeshMessage: (body) => request("/mesh/messages", { method: "POST", body }),
+    listMeshMessages: (params = {}) => request(`/mesh/messages${queryString(params)}`),
+    createMeshHandoff: (body) => request("/mesh/handoffs", { method: "POST", body }),
+    listMeshHandoffs: (params = {}) => request(`/mesh/handoffs${queryString(params)}`),
+    getMeshTopology: (params = {}) => request(`/mesh/topology${queryString(params)}`),
+    createProtocolBridge: (body) =>
+      request("/mesh/protocol-bridges", { method: "POST", body }),
+    listProtocolBridges: (params = {}) =>
+      request(`/mesh/protocol-bridges${queryString(params)}`),
+    getProtocolBridge: (bridgeId) =>
+      request(`/mesh/protocol-bridges/${encodeURIComponent(bridgeId)}`),
+    createProtocolBridgeRoute: (bridgeId, body) =>
+      request(`/mesh/protocol-bridges/${encodeURIComponent(bridgeId)}/routes`, {
+        method: "POST",
+        body
+      }),
+    runProtocolBridgeHealthCheck: (bridgeId) =>
+      request(`/mesh/protocol-bridges/${encodeURIComponent(bridgeId)}/health-check`, {
+        method: "POST"
+      }),
+    issueTrustCard: (body) => request("/trust/cards", { method: "POST", body }),
+    listTrustCards: (params = {}) => request(`/trust/cards${queryString(params)}`),
+    getTrustCard: (cardId) => request(`/trust/cards/${encodeURIComponent(cardId)}`),
+    verifyTrustCard: (cardId) =>
+      request(`/trust/cards/${encodeURIComponent(cardId)}/verify`, { method: "POST" }),
+    revokeTrustCard: (cardId, body) =>
+      request(`/trust/cards/${encodeURIComponent(cardId)}/revoke`, { method: "POST", body }),
+    getAgentTrustCard: (agentId) => request(`/agents/${encodeURIComponent(agentId)}/trust-card`),
     activatePolicyVersion: (policyId, versionId) =>
       request(
         `/policies/${encodeURIComponent(policyId)}/versions/${encodeURIComponent(versionId)}/activate`,

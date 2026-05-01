@@ -1,4 +1,6 @@
 import { escapeHtml } from "./html.js";
+import { renderAgentTrustTab } from "./trust.js";
+import { renderMeshHandoffsTable, renderMeshMessagesTable } from "./mesh.js";
 
 export function renderAgentsPage(state) {
   return `
@@ -277,6 +279,7 @@ export const AGENT_DETAIL_TABS = [
   "identity",
   "policies",
   "credentials",
+  "mesh",
   "trust",
   "audit",
   "runtime",
@@ -322,6 +325,19 @@ export function renderAgentDetailTab(detail, activeTab) {
   if (activeTab === "audit") {
     return renderAuditTab(detail.auditEvents ?? []);
   }
+  if (activeTab === "trust") {
+    return renderAgentTrustTab({
+      trustScore: detail.trustScore ?? null,
+      trustEvents: detail.trustEvents ?? [],
+      currentTrustCard: detail.currentTrustCard ?? null
+    });
+  }
+  if (activeTab === "mesh") {
+    return renderAgentMeshTab({
+      messages: detail.meshMessages ?? [],
+      handoffs: detail.meshHandoffs ?? []
+    });
+  }
   if (activeTab === "overview") {
     return renderOverviewTab(detail);
   }
@@ -329,6 +345,15 @@ export function renderAgentDetailTab(detail, activeTab) {
     <div class="empty-state" data-agent-detail-placeholder="${escapeHtml(activeTab)}">
       <strong>${escapeHtml(activeTab)}</strong>
       <span>Pending linked feature</span>
+    </div>
+  `;
+}
+
+export function renderAgentMeshTab({ messages = [], handoffs = [] } = {}) {
+  return `
+    <div data-agent-mesh-activity>
+      ${renderMeshMessagesTable({ messages })}
+      ${renderMeshHandoffsTable({ handoffs })}
     </div>
   `;
 }

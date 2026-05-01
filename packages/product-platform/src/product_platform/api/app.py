@@ -124,6 +124,32 @@ from product_platform.discovery.repository import (
     discovery_target_response,
 )
 from product_platform.discovery.runner import DiscoveryScanRunner
+from product_platform.mesh.models import (
+    MeshHandoffCreateRequest,
+    MeshHandoffResponse,
+    MeshMessageCreateRequest,
+    MeshMessageResponse,
+    MeshTopologyResponse,
+    ProtocolBridgeCreateRequest,
+    ProtocolBridgeHealthCheckResponse,
+    ProtocolBridgePatchRequest,
+    ProtocolBridgeResponse,
+    ProtocolBridgeRouteCreateRequest,
+    ProtocolBridgeRouteResponse,
+)
+from product_platform.mesh.bridges import ProtocolBridgeHealthAdapter
+from product_platform.mesh.repository import (
+    MeshAgentNotFoundError,
+    MeshRepository,
+    ProtocolBridgeNotFoundError,
+    ProtocolBridgeReferenceNotFoundError,
+    mesh_handoff_response,
+    mesh_message_response,
+    protocol_bridge_health_check_response,
+    protocol_bridge_response,
+    protocol_bridge_route_response,
+)
+from product_platform.mesh.topology import MeshTopologyService
 from product_platform.policies.models import (
     PolicyBindingCreateRequest,
     PolicyBindingPatchRequest,
@@ -163,6 +189,45 @@ from product_platform.policies.repository import (
     policy_lint_issue_response,
     policy_response,
     policy_version_response,
+)
+from product_platform.trust.models import (
+    AgentTrustCardResponse,
+    TrustHandshakeRequest,
+    TrustHandshakeResponse,
+    TrustCardIssueRequest,
+    TrustCardResponse,
+    TrustCardRevokeRequest,
+    TrustCardVerifyResponse,
+    TrustEventResponse,
+    TrustRecalculateRequest,
+    TrustRecalculationRunResponse,
+    TrustRulePatchRequest,
+    TrustRuleResponse,
+    TrustScoreResponse,
+    TrustThresholdCreateRequest,
+    TrustThresholdPatchRequest,
+    TrustThresholdResponse,
+)
+from product_platform.trust.cards import (
+    TrustCardIssuer,
+    TrustCardNotFoundError,
+    TrustCardRepository,
+    trust_card_response,
+)
+from product_platform.trust.handshakes import TrustHandshakeService
+from product_platform.trust.pipeline import TrustScoreRecalculator
+from product_platform.trust.repository import (
+    DuplicateTrustThresholdError,
+    TrustAgentNotFoundError,
+    TrustRepository,
+    TrustRuleNotFoundError,
+    TrustThresholdNotFoundError,
+    trust_event_response,
+    trust_recalculation_run_response,
+    trust_handshake_response,
+    trust_rule_response,
+    trust_score_response,
+    trust_threshold_response,
 )
 from product_platform.worker.api_models import (
     JobCreateRequest,
@@ -567,6 +632,111 @@ def create_app(
             policy_version_id=binding["policy_version_id"],
             correlation_id=correlation_id,
             payload_json=payload,
+        )
+
+    def _trust_card_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        event_type: str,
+        actor_id: str,
+        card: Any,
+        correlation_id: str | None,
+        payload_json: dict[str, Any] | None = None,
+    ) -> AuditEventEnvelope:
+        payload = {
+            "trust_card_id": card["id"],
+            "agent_id": card["agent_id"],
+            "issuer": card["issuer"],
+            "status": card["status"],
+            "valid_until": card["valid_until"],
+        }
+        payload.update(payload_json or {})
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type=event_type,
+            source_component="trust-cards",
+            actor_type="user",
+            actor_id=actor_id,
+            agent_id=card["agent_id"],
+            resource_type="trust_card",
+            resource_id=card["id"],
+            correlation_id=correlation_id,
+            payload_json=payload,
+        )
+
+    def _trust_handshake_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        handshake: TrustHandshakeResponse,
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        payload = handshake.model_dump()
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type="trust.handshake",
+            source_component="trust-handshakes",
+            actor_type="user",
+            actor_id=actor_id,
+            agent_id=handshake.source_agent_id,
+            resource_type="handshake",
+            resource_id=handshake.id,
+            decision="allow" if handshake.result == "allowed" else "deny",
+            severity="warning" if handshake.result == "denied" else "info",
+            correlation_id=correlation_id,
+            payload_json=payload,
+        )
+
+    def _mesh_message_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        message: MeshMessageResponse,
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        decision = message.decision.lower()
+        event_type = "mesh.message.escalated" if decision in {"escalate", "escalated"} else "mesh.message.blocked"
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type=event_type,
+            source_component="mesh-message-feed",
+            actor_type="user",
+            actor_id=actor_id,
+            agent_id=message.source_agent_id,
+            resource_type="mesh_message",
+            resource_id=message.id,
+            decision=message.decision,
+            severity="warning",
+            correlation_id=correlation_id,
+            payload_json=message.model_dump(),
+        )
+
+    def _protocol_bridge_route_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        route: ProtocolBridgeRouteResponse,
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type="protocol_bridge.route.changed",
+            source_component="protocol-bridge-config",
+            actor_type="user",
+            actor_id=actor_id,
+            agent_id=route.source_agent_id,
+            resource_type="protocol_bridge_route",
+            resource_id=route.id,
+            correlation_id=correlation_id,
+            payload_json=route.model_dump(),
         )
 
     def _resolve_sponsor_email(row: Any, current_user: UserPrincipal, connection: Any) -> str:
@@ -1306,6 +1476,788 @@ def create_app(
             policy_exception_response(row)
             for row in repository.list_exceptions(binding_id=binding_id)
         ]
+
+    @app.get(
+        "/api/v1/trust/scores",
+        response_model=list[TrustScoreResponse],
+        tags=["trust"],
+    )
+    async def list_trust_scores(
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[TrustScoreResponse]:
+        """List current trust scores for the selected environment."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = TrustRepository(_audit_database().connect(), organization_id, environment_id)
+        return [trust_score_response(row) for row in repository.list_scores()]
+
+    @app.get(
+        "/api/v1/trust/scores/{agent_id}",
+        response_model=TrustScoreResponse,
+        tags=["trust"],
+    )
+    async def get_trust_score(
+        agent_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> TrustScoreResponse:
+        """Get one agent trust score."""
+
+        organization_id = _require_organization_id(current_user)
+        row = TrustRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        ).get_score(agent_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Trust score not found.")
+        return trust_score_response(row)
+
+    @app.get(
+        "/api/v1/trust/events",
+        response_model=list[TrustEventResponse],
+        tags=["trust"],
+    )
+    async def list_trust_events(
+        agent_id: str | None = None,
+        dimension: str | None = None,
+        source_event_id: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[TrustEventResponse]:
+        """List explainable trust events."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = TrustRepository(_audit_database().connect(), organization_id, environment_id)
+        return [
+            trust_event_response(row)
+            for row in repository.list_events(
+                agent_id=agent_id,
+                dimension=dimension,
+                source_event_id=source_event_id,
+                limit=limit,
+                offset=offset,
+            )
+        ]
+
+    @app.post(
+        "/api/v1/trust/recalculate",
+        response_model=TrustRecalculationRunResponse,
+        status_code=201,
+        tags=["trust"],
+    )
+    async def recalculate_trust(
+        body: TrustRecalculateRequest | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> TrustRecalculationRunResponse:
+        """Recalculate trust scores from current audit and trust events."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = TrustRepository(connection, organization_id, environment_id)
+                run = TrustScoreRecalculator(repository).recalculate(
+                    agent_id=body.agent_id if body is not None else None
+                )
+                return trust_recalculation_run_response(run)
+        except TrustAgentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/trust/rules",
+        response_model=list[TrustRuleResponse],
+        tags=["trust"],
+    )
+    async def list_trust_rules(
+        enabled: bool | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[TrustRuleResponse]:
+        """List trust signal mapping rules."""
+
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = TrustRepository(connection, organization_id, environment_id)
+            repository.seed_default_rules()
+            rows = repository.list_rules(enabled=enabled)
+            return [trust_rule_response(row) for row in rows]
+
+    @app.patch(
+        "/api/v1/trust/rules/{rule_id}",
+        response_model=TrustRuleResponse,
+        tags=["trust"],
+    )
+    async def patch_trust_rule(
+        rule_id: str,
+        body: TrustRulePatchRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> TrustRuleResponse:
+        """Patch trust rule controls."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = TrustRepository(connection, organization_id, environment_id)
+                return trust_rule_response(repository.update_rule(rule_id, body))
+        except TrustRuleNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/trust/thresholds",
+        response_model=list[TrustThresholdResponse],
+        tags=["trust"],
+    )
+    async def list_trust_thresholds(
+        threshold_type: str | None = None,
+        enabled: bool | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[TrustThresholdResponse]:
+        """List protected-action trust thresholds."""
+
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = TrustRepository(connection, organization_id, environment_id)
+            repository.seed_default_thresholds()
+            return [
+                trust_threshold_response(row)
+                for row in repository.list_thresholds(
+                    threshold_type=threshold_type,
+                    enabled=enabled,
+                )
+            ]
+
+    @app.post(
+        "/api/v1/trust/thresholds",
+        response_model=TrustThresholdResponse,
+        status_code=201,
+        tags=["trust"],
+    )
+    async def create_trust_threshold(
+        body: TrustThresholdCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> TrustThresholdResponse:
+        """Create a protected-action trust threshold."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                row = TrustRepository(connection, organization_id, environment_id).create_threshold(body)
+                return trust_threshold_response(row)
+        except DuplicateTrustThresholdError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.patch(
+        "/api/v1/trust/thresholds/{threshold_id}",
+        response_model=TrustThresholdResponse,
+        tags=["trust"],
+    )
+    async def patch_trust_threshold(
+        threshold_id: str,
+        body: TrustThresholdPatchRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> TrustThresholdResponse:
+        """Patch a protected-action trust threshold."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                row = TrustRepository(connection, organization_id, environment_id).update_threshold(
+                    threshold_id,
+                    body,
+                )
+                return trust_threshold_response(row)
+        except TrustThresholdNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except DuplicateTrustThresholdError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/trust/handshakes/simulate",
+        response_model=TrustHandshakeResponse,
+        status_code=201,
+        tags=["trust"],
+    )
+    async def simulate_trust_handshake(
+        body: TrustHandshakeRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> TrustHandshakeResponse:
+        """Simulate and persist an explainable trust handshake."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = TrustRepository(connection, organization_id, environment_id)
+                handshake = TrustHandshakeService(repository).evaluate_and_record(
+                    body,
+                    correlation_id=context.correlation_id,
+                    mode="simulate",
+                )
+                AuditEventRepository(connection).insert(
+                    _trust_handshake_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        handshake=handshake,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return handshake
+        except TrustAgentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/trust/handshakes/record",
+        response_model=TrustHandshakeResponse,
+        status_code=201,
+        tags=["trust"],
+    )
+    async def record_trust_handshake(
+        body: TrustHandshakeRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> TrustHandshakeResponse:
+        """Record a real mesh/framework trust handshake attempt."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = TrustRepository(connection, organization_id, environment_id)
+                handshake = TrustHandshakeService(repository).evaluate_and_record(
+                    body,
+                    correlation_id=context.correlation_id,
+                    mode="record",
+                )
+                AuditEventRepository(connection).insert(
+                    _trust_handshake_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        handshake=handshake,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return handshake
+        except TrustAgentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/trust/handshakes",
+        response_model=list[TrustHandshakeResponse],
+        tags=["trust"],
+    )
+    async def list_trust_handshakes(
+        source_agent_id: str | None = None,
+        target_agent_id: str | None = None,
+        result: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[TrustHandshakeResponse]:
+        """List persisted trust handshakes."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = TrustRepository(_audit_database().connect(), organization_id, environment_id)
+        return [
+            trust_handshake_response(row)
+            for row in repository.list_handshake_events(
+                source_agent_id=source_agent_id,
+                target_agent_id=target_agent_id,
+                result=result,
+                limit=limit,
+                offset=offset,
+            )
+        ]
+
+    @app.post(
+        "/api/v1/mesh/messages",
+        response_model=MeshMessageResponse,
+        status_code=201,
+        tags=["mesh"],
+    )
+    async def ingest_mesh_message(
+        body: MeshMessageCreateRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> MeshMessageResponse:
+        """Ingest an inter-agent mesh message from an SDK or adapter."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                message = mesh_message_response(
+                    MeshRepository(connection, organization_id, environment_id).create_message(body)
+                )
+                if message.decision.lower() in {"deny", "denied", "blocked", "escalate", "escalated"}:
+                    AuditEventRepository(connection).insert(
+                        _mesh_message_audit_event(
+                            organization_id=organization_id,
+                            environment_id=environment_id,
+                            actor_id=current_user.id,
+                            message=message,
+                            correlation_id=context.correlation_id,
+                        )
+                    )
+                return message
+        except MeshAgentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/mesh/handoffs",
+        response_model=MeshHandoffResponse,
+        status_code=201,
+        tags=["mesh"],
+    )
+    async def ingest_mesh_handoff(
+        body: MeshHandoffCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> MeshHandoffResponse:
+        """Ingest a mesh handoff attempt from an SDK or adapter."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                return mesh_handoff_response(
+                    MeshRepository(connection, organization_id, environment_id).create_handoff(body)
+                )
+        except MeshAgentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/mesh/messages",
+        response_model=list[MeshMessageResponse],
+        tags=["mesh"],
+    )
+    async def list_mesh_messages(
+        source_agent_id: str | None = None,
+        target_agent_id: str | None = None,
+        protocol: str | None = None,
+        decision: str | None = None,
+        action: str | None = None,
+        correlation_id: str | None = None,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[MeshMessageResponse]:
+        """List mesh messages with feed filters."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = MeshRepository(_audit_database().connect(), organization_id, environment_id)
+        return [
+            mesh_message_response(row)
+            for row in repository.list_messages(
+                source_agent_id=source_agent_id,
+                target_agent_id=target_agent_id,
+                protocol=protocol,
+                decision=decision,
+                action=action,
+                correlation_id=correlation_id,
+                start_time=start_time,
+                end_time=end_time,
+                limit=limit,
+                offset=offset,
+            )
+        ]
+
+    @app.get(
+        "/api/v1/mesh/handoffs",
+        response_model=list[MeshHandoffResponse],
+        tags=["mesh"],
+    )
+    async def list_mesh_handoffs(
+        source_agent_id: str | None = None,
+        target_agent_id: str | None = None,
+        status: str | None = None,
+        correlation_id: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[MeshHandoffResponse]:
+        """List mesh handoffs."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = MeshRepository(_audit_database().connect(), organization_id, environment_id)
+        return [
+            mesh_handoff_response(row)
+            for row in repository.list_handoffs(
+                source_agent_id=source_agent_id,
+                target_agent_id=target_agent_id,
+                status=status,
+                correlation_id=correlation_id,
+                limit=limit,
+                offset=offset,
+            )
+        ]
+
+    @app.get(
+        "/api/v1/mesh/topology",
+        response_model=MeshTopologyResponse,
+        tags=["mesh"],
+    )
+    async def get_mesh_topology(
+        start_time: str | None = None,
+        end_time: str | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> MeshTopologyResponse:
+        """Return aggregated mesh topology for the selected time range."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = MeshRepository(_audit_database().connect(), organization_id, environment_id)
+        return MeshTopologyService(repository).get_topology(
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+    @app.post(
+        "/api/v1/mesh/protocol-bridges",
+        response_model=ProtocolBridgeResponse,
+        status_code=201,
+        tags=["mesh"],
+    )
+    async def create_protocol_bridge(
+        body: ProtocolBridgeCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ProtocolBridgeResponse:
+        """Register a protocol bridge configuration."""
+
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            return protocol_bridge_response(
+                MeshRepository(connection, organization_id, environment_id).create_protocol_bridge(body)
+            )
+
+    @app.get(
+        "/api/v1/mesh/protocol-bridges",
+        response_model=list[ProtocolBridgeResponse],
+        tags=["mesh"],
+    )
+    async def list_protocol_bridges(
+        bridge_type: str | None = None,
+        status: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[ProtocolBridgeResponse]:
+        """List protocol bridge configurations."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = MeshRepository(_audit_database().connect(), organization_id, environment_id)
+        return [
+            protocol_bridge_response(
+                row,
+                current_health=protocol_bridge_health_check_response(latest)
+                if (latest := repository.latest_protocol_bridge_health_check(row["id"])) is not None
+                else None,
+            )
+            for row in repository.list_protocol_bridges(
+                bridge_type=bridge_type,
+                status=status,
+                limit=limit,
+                offset=offset,
+            )
+        ]
+
+    @app.get(
+        "/api/v1/mesh/protocol-bridges/{bridge_id}",
+        response_model=ProtocolBridgeResponse,
+        tags=["mesh"],
+    )
+    async def get_protocol_bridge(
+        bridge_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ProtocolBridgeResponse:
+        """Get one protocol bridge configuration."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = MeshRepository(_audit_database().connect(), organization_id, environment_id)
+        row = repository.get_protocol_bridge(bridge_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Protocol bridge not found.")
+        latest = repository.latest_protocol_bridge_health_check(bridge_id)
+        routes = [
+            protocol_bridge_route_response(route)
+            for route in repository.list_protocol_bridge_routes(bridge_id)
+        ]
+        return protocol_bridge_response(
+            row,
+            current_health=protocol_bridge_health_check_response(latest) if latest is not None else None,
+            routes=routes,
+        )
+
+    @app.patch(
+        "/api/v1/mesh/protocol-bridges/{bridge_id}",
+        response_model=ProtocolBridgeResponse,
+        tags=["mesh"],
+    )
+    async def patch_protocol_bridge(
+        bridge_id: str,
+        body: ProtocolBridgePatchRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ProtocolBridgeResponse:
+        """Patch a protocol bridge configuration."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                return protocol_bridge_response(
+                    MeshRepository(connection, organization_id, environment_id).update_protocol_bridge(
+                        bridge_id,
+                        body,
+                    )
+                )
+        except ProtocolBridgeNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/mesh/protocol-bridges/{bridge_id}/routes",
+        response_model=ProtocolBridgeRouteResponse,
+        status_code=201,
+        tags=["mesh"],
+    )
+    async def create_protocol_bridge_route(
+        bridge_id: str,
+        body: ProtocolBridgeRouteCreateRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ProtocolBridgeRouteResponse:
+        """Create a route through a configured protocol bridge."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = MeshRepository(connection, organization_id, environment_id)
+                route = protocol_bridge_route_response(
+                    repository.create_protocol_bridge_route(bridge_id, body)
+                )
+                AuditEventRepository(connection).insert(
+                    _protocol_bridge_route_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        route=route,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return route
+        except (
+            MeshAgentNotFoundError,
+            ProtocolBridgeNotFoundError,
+            ProtocolBridgeReferenceNotFoundError,
+        ) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/mesh/protocol-bridges/{bridge_id}/health-check",
+        response_model=ProtocolBridgeHealthCheckResponse,
+        status_code=201,
+        tags=["mesh"],
+    )
+    async def run_protocol_bridge_health_check(
+        bridge_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ProtocolBridgeHealthCheckResponse:
+        """Run and persist an honest health check for a configured protocol bridge."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = MeshRepository(connection, organization_id, environment_id)
+                bridge = repository.get_protocol_bridge(bridge_id)
+                if bridge is None:
+                    raise ProtocolBridgeNotFoundError("Protocol bridge not found.")
+                result = ProtocolBridgeHealthAdapter().check(bridge)
+                return protocol_bridge_health_check_response(
+                    repository.create_protocol_bridge_health_check(
+                        bridge_id,
+                        status=result.status,
+                        latency_ms=result.latency_ms,
+                        message=result.message,
+                    )
+                )
+        except ProtocolBridgeNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/trust/cards",
+        response_model=TrustCardResponse,
+        status_code=201,
+        tags=["trust"],
+    )
+    async def issue_trust_card(
+        body: TrustCardIssueRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> TrustCardResponse:
+        """Issue a signed trust card for an agent."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                card = TrustCardIssuer(connection, organization_id, environment_id).issue(body)
+                AuditEventRepository(connection).insert(
+                    _trust_card_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        event_type="trust.card.issued",
+                        actor_id=current_user.id,
+                        card=card,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return trust_card_response(card)
+        except AgentNotFoundError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/trust/cards",
+        response_model=list[TrustCardResponse],
+        tags=["trust"],
+    )
+    async def list_trust_cards(
+        agent_id: str | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[TrustCardResponse]:
+        """List persisted trust cards."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = TrustCardRepository(_audit_database().connect(), organization_id, environment_id)
+        return [trust_card_response(row) for row in repository.list_cards(agent_id=agent_id)]
+
+    @app.get(
+        "/api/v1/trust/cards/{card_id}",
+        response_model=TrustCardResponse,
+        tags=["trust"],
+    )
+    async def get_trust_card(
+        card_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> TrustCardResponse:
+        """Get a single trust card."""
+
+        organization_id = _require_organization_id(current_user)
+        row = TrustCardRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        ).get_card(card_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Trust card not found.")
+        return trust_card_response(row)
+
+    @app.post(
+        "/api/v1/trust/cards/{card_id}/verify",
+        response_model=TrustCardVerifyResponse,
+        tags=["trust"],
+    )
+    async def verify_trust_card(
+        card_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> TrustCardVerifyResponse:
+        """Verify a trust card signature and revocation status."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            return TrustCardRepository(
+                _audit_database().connect(),
+                organization_id,
+                environment_id,
+            ).verify_card(card_id)
+        except TrustCardNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/trust/cards/{card_id}/revoke",
+        response_model=TrustCardResponse,
+        tags=["trust"],
+    )
+    async def revoke_trust_card(
+        card_id: str,
+        body: TrustCardRevokeRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> TrustCardResponse:
+        """Revoke a trust card."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = TrustCardRepository(connection, organization_id, environment_id)
+                card = repository.revoke_card(card_id, reason=body.reason, revoked_by=current_user.id)
+                AuditEventRepository(connection).insert(
+                    _trust_card_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        event_type="trust.card.revoked",
+                        actor_id=current_user.id,
+                        card=card,
+                        correlation_id=context.correlation_id,
+                        payload_json={"reason": body.reason},
+                    )
+                )
+                return trust_card_response(card)
+        except TrustCardNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/agents/{agent_id}/trust-card",
+        response_model=AgentTrustCardResponse,
+        tags=["trust"],
+    )
+    async def get_agent_current_trust_card(
+        agent_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> AgentTrustCardResponse:
+        """Return the latest valid non-revoked trust card for an agent."""
+
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            agent = AgentRegistryRepository(connection, organization_id, environment_id).get(agent_id)
+            if agent is None:
+                raise HTTPException(status_code=404, detail="Agent not found.")
+            row = TrustCardRepository(connection, organization_id, environment_id).current_card(agent_id)
+            if row is None:
+                return AgentTrustCardResponse(
+                    agent_id=agent_id,
+                    card=None,
+                    warning="No valid trust card exists for this agent.",
+                )
+            return AgentTrustCardResponse(agent_id=agent_id, card=trust_card_response(row))
 
     @app.post(
         "/api/v1/policies/{policy_id}/versions/{version_id}/activate",

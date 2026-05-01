@@ -905,6 +905,187 @@ input {
   grid-column: 1 / -1;
 }
 
+.trust-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.65fr);
+  gap: 16px;
+}
+
+.mesh-workspace {
+  display: grid;
+  gap: 16px;
+}
+
+.trust-summary,
+.trust-leaderboard,
+.trust-events,
+.trust-cards,
+.trust-thresholds,
+.trust-handshakes,
+.mesh-topology,
+.mesh-messages,
+.mesh-handoffs,
+.protocol-bridges {
+  grid-column: 1 / -1;
+}
+
+.trust-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.trust-summary article {
+  display: grid;
+  gap: 6px;
+}
+
+.trust-summary strong {
+  font-size: 1.4rem;
+}
+
+.score-meter {
+  display: inline-flex;
+  width: 110px;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  vertical-align: middle;
+  margin-right: 8px;
+}
+
+.score-meter span {
+  display: block;
+  background: var(--accent);
+}
+
+.trend-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.trend-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.trust-card-detail,
+.handshake-detail {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.compact-inline-form {
+  grid-template-columns: minmax(80px, 0.5fr) minmax(120px, 0.7fr) auto auto;
+}
+
+.topology-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 12px;
+}
+
+.topology-nodes,
+.topology-edges {
+  display: grid;
+  gap: 8px;
+}
+
+.topology-nodes article,
+.topology-edges article {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--surface);
+}
+
+.bridge-management-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.9fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.bridge-list-panel,
+.bridge-detail-panel,
+.bridge-health-panel,
+.bridge-routes-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.bridge-form-grid,
+.route-editor-grid {
+  display: grid;
+  gap: 10px;
+  align-items: end;
+}
+
+.bridge-form-grid {
+  grid-template-columns: minmax(150px, 1fr) minmax(110px, 0.5fr) minmax(190px, 1fr) minmax(150px, 0.7fr) auto;
+}
+
+.route-editor-grid {
+  grid-template-columns: repeat(2, minmax(120px, 0.75fr)) repeat(2, minmax(150px, 1fr)) minmax(150px, 0.8fr) auto;
+}
+
+.bridge-form-grid label,
+.route-editor-grid label {
+  display: grid;
+  gap: 6px;
+}
+
+.bridge-form-grid input,
+.bridge-form-grid select,
+.route-editor-grid input,
+.route-editor-grid select {
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0 10px;
+}
+
+.json-preview {
+  overflow: auto;
+  max-height: 260px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  padding: 12px;
+}
+
+.inline-warning,
+.inline-status {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.inline-warning {
+  color: #b42318;
+  background: #fff1f0;
+}
+
+.inline-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
 .credential-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.5fr) repeat(2, minmax(220px, 0.7fr));
@@ -1165,6 +1346,9 @@ input {
   .agent-workspace,
   .discovery-workspace,
   .policy-workspace,
+  .bridge-management-grid,
+  .bridge-form-grid,
+  .route-editor-grid,
   .scanner-grid,
   .finding-detail-grid,
   .finding-actions,

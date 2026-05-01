@@ -6,6 +6,8 @@ import { escapeHtml } from "./html.js";
 import { renderAgentsPage } from "./agents.js";
 import { renderDiscoveryPage } from "./discovery.js";
 import { renderPoliciesPage } from "./policies.js";
+import { renderTrustPage } from "./trust.js";
+import { renderMeshPage } from "./mesh.js";
 
 export { escapeHtml };
 
@@ -198,6 +200,10 @@ export function renderShell({ currentPath = DEFAULT_ROUTE, state = createInitial
         ? renderAgentsPage(state)
       : route?.path === "/policies"
         ? renderPoliciesPage(state)
+      : route?.path === "/trust"
+        ? renderTrustPage(state)
+      : route?.path === "/mesh"
+        ? renderMeshPage(state)
       : route?.path === "/discovery"
         ? renderDiscoveryPage(state)
       : route

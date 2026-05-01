@@ -11,10 +11,19 @@ import {
   closeDrawer,
   drawerFromDeepLink,
   handleDrawerKeydown,
+  openDrawer,
   replaceDrawerContent
 } from "./drawers.js";
 import { renderShell } from "./render.js";
 import { discoveryFindingParamsFromForm } from "./discovery.js";
+import {
+  meshHandoffParamsFromForm,
+  meshMessageParamsFromForm,
+  protocolBridgePayloadFromForm,
+  protocolBridgeRoutePayloadFromForm,
+  renderMeshHandoffDetail,
+  renderMeshMessageDetail
+} from "./mesh.js";
 import {
   policyBindingPayloadFromForm,
   policyEditorPayloadFromForm,
@@ -23,6 +32,16 @@ import {
   policyImportPayloadFromForm,
   policyPromotePayloadFromForm
 } from "./policies.js";
+import {
+  trustCardIssuePayloadFromForm,
+  trustCardRevokePayloadFromForm,
+  trustEventParamsFromForm,
+  trustHandshakeParamsFromForm,
+  trustHandshakePayloadFromForm,
+  trustThresholdPatchPayloadFromForm,
+  trustThresholdPayloadFromForm,
+  renderHandshakeDetail
+} from "./trust.js";
 import {
   createLoadingState,
   loadAppContext,
@@ -120,6 +139,74 @@ async function refreshPolicyWorkspace(root, apiClient, selectedPolicyId = null) 
   mount(root, appState);
 }
 
+async function loadTrustState(apiClient, eventParams = {}, handshakeParams = {}) {
+  const [trustScores, trustEvents, trustRules, trustCards, trustThresholds, trustHandshakes] = await Promise.all([
+    apiClient.listTrustScores(),
+    apiClient.listTrustEvents(eventParams),
+    apiClient.listTrustRules(),
+    apiClient.listTrustCards(),
+    apiClient.listTrustThresholds(),
+    apiClient.listTrustHandshakes(handshakeParams)
+  ]);
+  return {
+    ...appState,
+    trustScores,
+    trustEvents,
+    trustRules,
+    trustCards,
+    trustThresholds,
+    trustHandshakes,
+    selectedTrustCard: trustCards[0] ?? null,
+    selectedTrustHandshake: trustHandshakes[0] ?? null,
+    trustEventFilter: eventParams,
+    trustHandshakeFilter: handshakeParams
+  };
+}
+
+async function refreshTrustWorkspace(root, apiClient, eventParams = {}, handshakeParams = appState.trustHandshakeFilter ?? {}) {
+  appState = await loadTrustState(apiClient, eventParams, handshakeParams);
+  mount(root, appState);
+}
+
+async function loadMeshState(apiClient, messageParams = {}, handoffParams = {}, selectedBridgeId = null) {
+  const [meshTopology, meshMessages, meshHandoffs, protocolBridges, agents] = await Promise.all([
+    apiClient.getMeshTopology(),
+    apiClient.listMeshMessages(messageParams),
+    apiClient.listMeshHandoffs(handoffParams),
+    apiClient.listProtocolBridges(),
+    apiClient.listAgents()
+  ]);
+  const activeBridgeId =
+    selectedBridgeId ?? appState.selectedProtocolBridge?.id ?? protocolBridges[0]?.id ?? null;
+  const selectedProtocolBridge = activeBridgeId ? await apiClient.getProtocolBridge(activeBridgeId) : null;
+  return {
+    ...appState,
+    meshTopology,
+    meshMessages,
+    meshHandoffs,
+    protocolBridges: selectedProtocolBridge
+      ? protocolBridges.map((bridge) =>
+          bridge.id === selectedProtocolBridge.id ? selectedProtocolBridge : bridge
+        )
+      : protocolBridges,
+    selectedProtocolBridge,
+    protocolBridgeAgents: agents,
+    meshMessageFilter: messageParams,
+    meshHandoffFilter: handoffParams
+  };
+}
+
+async function refreshMeshWorkspace(
+  root,
+  apiClient,
+  messageParams = {},
+  handoffParams = appState.meshHandoffFilter ?? {},
+  selectedBridgeId = appState.selectedProtocolBridge?.id ?? null
+) {
+  appState = await loadMeshState(apiClient, messageParams, handoffParams, selectedBridgeId);
+  mount(root, appState);
+}
+
 export function installNavigation(root = document.getElementById("app"), apiClient = null) {
   document.addEventListener("click", async (event) => {
     const link = event.target.closest("[data-route]");
@@ -137,6 +224,12 @@ export function installNavigation(root = document.getElementById("app"), apiClie
     }
     if (apiClient && normalizePath(targetPath) === "/policies") {
       await refreshPolicyWorkspace(root, apiClient);
+    }
+    if (apiClient && normalizePath(targetPath) === "/trust") {
+      await refreshTrustWorkspace(root, apiClient);
+    }
+    if (apiClient && normalizePath(targetPath) === "/mesh") {
+      await refreshMeshWorkspace(root, apiClient);
     }
   });
   document.addEventListener("change", (event) => {
@@ -315,6 +408,126 @@ export function installNavigation(root = document.getElementById("app"), apiClie
     appState = withDrawer(appState, replaceDrawerContent(appState.drawer, nextDrawer));
     mount(root, appState);
   });
+  document.addEventListener("click", async (event) => {
+    const recalculateButton = event.target.closest("[data-trust-recalculate]");
+    if (!recalculateButton || !apiClient) {
+      return;
+    }
+    await apiClient.recalculateTrust({});
+    await refreshTrustWorkspace(root, apiClient, appState.trustEventFilter ?? {});
+  });
+  document.addEventListener("click", async (event) => {
+    const verifyButton = event.target.closest("[data-trust-card-verify]");
+    if (!verifyButton || !apiClient) {
+      return;
+    }
+    const cardId = verifyButton.getAttribute("data-trust-card-verify");
+    if (!cardId) {
+      return;
+    }
+    appState = {
+      ...appState,
+      selectedTrustCard: await apiClient.getTrustCard(cardId),
+      trustCardVerification: await apiClient.verifyTrustCard(cardId)
+    };
+    mount(root, appState);
+  });
+  document.addEventListener("click", async (event) => {
+    const detailButton = event.target.closest("[data-handshake-detail-open]");
+    if (!detailButton) {
+      return;
+    }
+    const handshakeId = detailButton.getAttribute("data-handshake-detail-open");
+    const handshake = appState.trustHandshakes?.find((item) => item.id === handshakeId);
+    if (!handshake) {
+      return;
+    }
+    appState = withDrawer(
+      appState,
+      openDrawer({
+        kind: "trust-handshake",
+        resourceId: handshake.id,
+        title: "Trust Handshake",
+        subtitle: `${handshake.source_agent_id} -> ${handshake.target_agent_id}`,
+        status: handshake.result,
+        content: renderHandshakeDetail(handshake)
+      })
+    );
+    mount(root, appState);
+  });
+  document.addEventListener("click", async (event) => {
+    const bridgeOpenButton = event.target.closest("[data-protocol-bridge-open]");
+    if (bridgeOpenButton && apiClient) {
+      const bridgeId = bridgeOpenButton.getAttribute("data-protocol-bridge-open");
+      if (!bridgeId) {
+        return;
+      }
+      appState = {
+        ...appState,
+        selectedProtocolBridge: await apiClient.getProtocolBridge(bridgeId)
+      };
+      mount(root, appState);
+      return;
+    }
+    const bridgeHealthButton = event.target.closest("[data-protocol-bridge-health-check]");
+    if (bridgeHealthButton && apiClient) {
+      const bridgeId = bridgeHealthButton.getAttribute("data-protocol-bridge-health-check");
+      if (!bridgeId) {
+        return;
+      }
+      await apiClient.runProtocolBridgeHealthCheck(bridgeId);
+      await refreshMeshWorkspace(
+        root,
+        apiClient,
+        appState.meshMessageFilter ?? {},
+        appState.meshHandoffFilter ?? {},
+        bridgeId
+      );
+      return;
+    }
+    const messageButton = event.target.closest("[data-mesh-message-detail-open]");
+    if (messageButton) {
+      const messageId = messageButton.getAttribute("data-mesh-message-detail-open");
+      const message = appState.meshMessages?.find((item) => item.id === messageId);
+      if (!message) {
+        return;
+      }
+      appState = withDrawer(
+        appState,
+        openDrawer({
+          kind: "mesh-message",
+          resourceId: message.id,
+          title: "Mesh Message",
+          subtitle: `${message.source_agent_id} -> ${message.target_agent_id}`,
+          status: message.decision,
+          content: renderMeshMessageDetail(message)
+        })
+      );
+      mount(root, appState);
+      return;
+    }
+    const handoffButton = event.target.closest("[data-mesh-handoff-detail-open]");
+    if (!handoffButton) {
+      return;
+    }
+    const handoffId = handoffButton.getAttribute("data-mesh-handoff-detail-open");
+    const handoff = appState.meshHandoffs?.find((item) => item.id === handoffId);
+    if (!handoff) {
+      return;
+    }
+    appState = withDrawer(
+      appState,
+      openDrawer({
+        kind: "mesh-handoff",
+        resourceId: handoff.id,
+        title: "Mesh Handoff",
+        subtitle: `${handoff.source_agent_id} -> ${handoff.target_agent_id}`,
+        status: handoff.status,
+        content: renderMeshHandoffDetail(handoff)
+      })
+    );
+    mount(root, appState);
+  });
   document.addEventListener("keydown", (event) => {
     const nextDrawer = handleDrawerKeydown(event, appState.drawer);
     if (nextDrawer !== appState.drawer) {
@@ -470,6 +683,136 @@ export function installNavigation(root = document.getElementById("app"), apiClie
       await refreshPolicyWorkspace(root, apiClient, appState.selectedPolicy?.id ?? null);
       return;
     }
+    const trustEventsFilterForm = event.target.closest("[data-trust-events-filter]");
+    if (trustEventsFilterForm && apiClient) {
+      event.preventDefault();
+      await refreshTrustWorkspace(root, apiClient, trustEventParamsFromForm(trustEventsFilterForm));
+      return;
+    }
+    const trustCardIssueForm = event.target.closest("[data-trust-card-issue-form]");
+    if (trustCardIssueForm && apiClient) {
+      event.preventDefault();
+      await apiClient.issueTrustCard(trustCardIssuePayloadFromForm(trustCardIssueForm));
+      await refreshTrustWorkspace(root, apiClient, appState.trustEventFilter ?? {});
+      return;
+    }
+    const trustCardRevokeForm = event.target.closest("[data-trust-card-revoke-form]");
+    if (trustCardRevokeForm && apiClient) {
+      event.preventDefault();
+      const cardId = trustCardRevokeForm.getAttribute("data-card-id");
+      if (!cardId) {
+        return;
+      }
+      await apiClient.revokeTrustCard(cardId, trustCardRevokePayloadFromForm(trustCardRevokeForm));
+      await refreshTrustWorkspace(root, apiClient, appState.trustEventFilter ?? {});
+      return;
+    }
+    const trustThresholdForm = event.target.closest("[data-trust-threshold-form]");
+    if (trustThresholdForm && apiClient) {
+      event.preventDefault();
+      await apiClient.createTrustThreshold(trustThresholdPayloadFromForm(trustThresholdForm));
+      await refreshTrustWorkspace(root, apiClient, appState.trustEventFilter ?? {});
+      return;
+    }
+    const trustThresholdPatchForm = event.target.closest("[data-trust-threshold-patch-form]");
+    if (trustThresholdPatchForm && apiClient) {
+      event.preventDefault();
+      const thresholdId = trustThresholdPatchForm.getAttribute("data-threshold-id");
+      if (!thresholdId) {
+        return;
+      }
+      await apiClient.patchTrustThreshold(
+        thresholdId,
+        trustThresholdPatchPayloadFromForm(trustThresholdPatchForm)
+      );
+      await refreshTrustWorkspace(root, apiClient, appState.trustEventFilter ?? {});
+      return;
+    }
+    const trustHandshakeFilterForm = event.target.closest("[data-trust-handshake-filter]");
+    if (trustHandshakeFilterForm && apiClient) {
+      event.preventDefault();
+      await refreshTrustWorkspace(
+        root,
+        apiClient,
+        appState.trustEventFilter ?? {},
+        trustHandshakeParamsFromForm(trustHandshakeFilterForm)
+      );
+      return;
+    }
+    const trustHandshakeSimulateForm = event.target.closest("[data-trust-handshake-simulate-form]");
+    if (trustHandshakeSimulateForm && apiClient) {
+      event.preventDefault();
+      const simulation = await apiClient.simulateTrustHandshake(
+        trustHandshakePayloadFromForm(trustHandshakeSimulateForm)
+      );
+      const nextState = await loadTrustState(
+        apiClient,
+        appState.trustEventFilter ?? {},
+        appState.trustHandshakeFilter ?? {}
+      );
+      appState = {
+        ...nextState,
+        trustHandshakeSimulation: simulation,
+        selectedTrustHandshake: simulation
+      };
+      mount(root, appState);
+      return;
+    }
+    const meshMessageFilterForm = event.target.closest("[data-mesh-message-filter]");
+    if (meshMessageFilterForm && apiClient) {
+      event.preventDefault();
+      await refreshMeshWorkspace(
+        root,
+        apiClient,
+        meshMessageParamsFromForm(meshMessageFilterForm),
+        appState.meshHandoffFilter ?? {}
+      );
+      return;
+    }
+    const meshHandoffFilterForm = event.target.closest("[data-mesh-handoff-filter]");
+    if (meshHandoffFilterForm && apiClient) {
+      event.preventDefault();
+      await refreshMeshWorkspace(
+        root,
+        apiClient,
+        appState.meshMessageFilter ?? {},
+        meshHandoffParamsFromForm(meshHandoffFilterForm)
+      );
+      return;
+    }
+    const bridgeCreateForm = event.target.closest("[data-protocol-bridge-create-form]");
+    if (bridgeCreateForm && apiClient) {
+      event.preventDefault();
+      const bridge = await apiClient.createProtocolBridge(protocolBridgePayloadFromForm(bridgeCreateForm));
+      await refreshMeshWorkspace(
+        root,
+        apiClient,
+        appState.meshMessageFilter ?? {},
+        appState.meshHandoffFilter ?? {},
+        bridge.id
+      );
+      return;
+    }
+    const bridgeRouteForm = event.target.closest("[data-protocol-bridge-route-form]");
+    if (bridgeRouteForm && apiClient) {
+      event.preventDefault();
+      const bridgeId = bridgeRouteForm.getAttribute("data-bridge-id");
+      if (!bridgeId) {
+        return;
+      }
+      await apiClient.createProtocolBridgeRoute(
+        bridgeId,
+        protocolBridgeRoutePayloadFromForm(bridgeRouteForm)
+      );
+      await refreshMeshWorkspace(
+        root,
+        apiClient,
+        appState.meshMessageFilter ?? {},
+        appState.meshHandoffFilter ?? {},
+        bridgeId
+      );
+      return;
+    }
     const filterForm = event.target.closest("[data-agent-inventory-filter]");
     if (filterForm && apiClient) {
       event.preventDefault();
@@ -549,6 +892,10 @@ export async function bootstrap({
     }
     if (currentPath() === "/policies") {
       appState = await loadPolicyState(apiClient);
+      mount(root, appState);
+    }
+    if (currentPath() === "/trust") {
+      appState = await loadTrustState(apiClient);
       mount(root, appState);
     }
     if (appState.drawer.open && appState.drawer.kind === "audit-event" && appState.drawer.resourceId) {
