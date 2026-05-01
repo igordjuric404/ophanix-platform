@@ -1,0 +1,33 @@
+name: Product Platform Images
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "packages/product-platform/**"
+      - ".github/workflows/product-platform-images.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: frontend
+            dockerfile: packages/product-platform/deploy/cloud/Dockerfile.frontend
+          - name: api
+            dockerfile: packages/product-platform/deploy/cloud/Dockerfile.api
+          - name: worker
+            dockerfile: packages/product-platform/deploy/cloud/Dockerfile.worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build product platform image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.image.dockerfile }}
+          push: false
+          tags: ophanix/product-platform-${{ matrix.image.name }}:${{ github.sha }}
+          provenance: false
