@@ -1,0 +1,18 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: product-platform-migrate
+  annotations:
+    ophanix.io/run-once-per-deploy: "true"
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: product-platform-api:CHANGE_ME
+          command: ["python", "-m", "product_platform.cli", "db", "migrate"]
+          envFrom:
+            - secretRef:
+                name: product-platform-runtime
