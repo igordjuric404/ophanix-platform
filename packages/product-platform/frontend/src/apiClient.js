@@ -476,6 +476,20 @@ export function createApiClient({
       request("/runtime/kill-switch", { method: "POST", body }),
     listRuntimeKillSwitchEvents: (params = {}) =>
       request(`/runtime/kill-switch/events${queryString(params)}`),
+    listDemoScenarios: (params = {}) => request(`/demo/scenarios${queryString(params)}`),
+    getDemoScenario: (scenarioId) =>
+      request(`/demo/scenarios/${encodeURIComponent(scenarioId)}`),
+    getDemoBaselineStatus: () => request("/demo/baseline-status"),
+    resetDemoEnvironment: (body = {}) => request("/demo/reset", { method: "POST", body }),
+    listDemoResetRuns: (params = {}) => request(`/demo/reset-runs${queryString(params)}`),
+    getDemoResetRun: (resetId) => request(`/demo/reset-runs/${encodeURIComponent(resetId)}`),
+    startDemoRun: (scenarioId) =>
+      request(`/demo/scenarios/${encodeURIComponent(scenarioId)}/runs`, { method: "POST" }),
+    getDemoRun: (runId) => request(`/demo/runs/${encodeURIComponent(runId)}`),
+    continueDemoRun: (runId) =>
+      request(`/demo/runs/${encodeURIComponent(runId)}/continue`, { method: "POST" }),
+    cancelDemoRun: (runId) =>
+      request(`/demo/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),
     issueTrustCard: (body) => request("/trust/cards", { method: "POST", body }),
     listTrustCards: (params = {}) => request(`/trust/cards${queryString(params)}`),
     getTrustCard: (cardId) => request(`/trust/cards/${encodeURIComponent(cardId)}`),

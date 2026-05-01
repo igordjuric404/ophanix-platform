@@ -48,6 +48,9 @@ EXPECTED_MIGRATIONS = [
     "0036",
     "0037",
     "0038",
+    "0039",
+    "0040",
+    "0041",
 ]
 
 
@@ -147,6 +150,11 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertIn("provider_credentials", tables)
             self.assertIn("integration_health_checks", tables)
             self.assertIn("workflow_definitions", tables)
+            self.assertIn("demo_scenarios", tables)
+            self.assertIn("demo_steps", tables)
+            self.assertIn("demo_runs", tables)
+            self.assertIn("demo_step_runs", tables)
+            self.assertIn("demo_reset_runs", tables)
             self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS)
         finally:
             connection.close()
@@ -166,10 +174,53 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
                 ).fetchall()
             }
 
+            self.assertEqual(rolled_back, "0041")
+            self.assertNotIn("demo_reset_runs", tables)
+            self.assertIn("demo_runs", tables)
+            self.assertIn("demo_step_runs", tables)
+            self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-1])
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0040")
+            self.assertNotIn("demo_runs", tables)
+            self.assertNotIn("demo_step_runs", tables)
+            self.assertIn("demo_scenarios", tables)
+            self.assertIn("demo_steps", tables)
+            self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-2])
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0039")
+            self.assertNotIn("demo_scenarios", tables)
+            self.assertNotIn("demo_steps", tables)
+            self.assertIn("workflow_definitions", tables)
+            self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-3])
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
             self.assertEqual(rolled_back, "0038")
             self.assertNotIn("workflow_definitions", tables)
             self.assertIn("integration_health_checks", tables)
-            self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-1])
+            self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-4])
 
             rolled_back = runner.rollback_last()
             tables = {
@@ -182,7 +233,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(rolled_back, "0037")
             self.assertNotIn("integration_health_checks", tables)
             self.assertIn("provider_credentials", tables)
-            self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-2])
+            self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-5])
 
             rolled_back = runner.rollback_last()
             tables = {
@@ -195,7 +246,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(rolled_back, "0036")
             self.assertNotIn("provider_credentials", tables)
             self.assertIn("framework_agents", tables)
-            self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-3])
+            self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-6])
 
             rolled_back = runner.rollback_last()
             tables = {
@@ -208,7 +259,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(rolled_back, "0035")
             self.assertNotIn("framework_agents", tables)
             self.assertIn("integration_instances", tables)
-            self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-4])
+            self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-7])
 
             rolled_back = runner.rollback_last()
             tables = {
@@ -221,7 +272,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(rolled_back, "0034")
             self.assertNotIn("integration_instances", tables)
             self.assertIn("integrations", tables)
-            self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-5])
+            self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-8])
 
             rolled_back = runner.rollback_last()
             tables = {
@@ -235,7 +286,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertNotIn("integrations", tables)
             self.assertIn("rollout_events", tables)
             self.assertIn("rollouts", tables)
-            self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-6])
+            self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-9])
 
             rolled_back = runner.rollback_last()
             tables = {

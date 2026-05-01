@@ -1,0 +1,24 @@
+# syntax=docker/dockerfile:1.7
+
+FROM python:3.11-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    OPHANIX_ENVIRONMENT=production
+
+WORKDIR /app
+
+COPY packages/product-platform/pyproject.toml ./pyproject.toml
+COPY packages/product-platform/src ./src
+
+RUN python -m pip install --upgrade pip \
+    && python -m pip install .
+
+EXPOSE 8088
+
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8088/ready', timeout=2).read()"
+
+ENTRYPOINT ["python", "-m", "product_platform.cli"]
+CMD ["serve", "--host", "0.0.0.0", "--port", "8088"]

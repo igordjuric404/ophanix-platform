@@ -100,6 +100,27 @@ from product_platform.agents.lifecycle import AgentLifecycleTransitionError
 from product_platform.agents.simulation import simulate_registration_action
 from product_platform.db.connection import Database
 from product_platform.db.seed import seed_demo_data
+from product_platform.demo.baseline import demo_baseline_status
+from product_platform.demo.models import (
+    DemoBaselineStatusResponse,
+    DemoResetRequest,
+    DemoResetRunResponse,
+    DemoRunResponse,
+    DemoScenarioDetailResponse,
+    DemoScenarioSummaryResponse,
+)
+from product_platform.demo.repository import (
+    DemoScenarioNotFoundError,
+    DemoScenarioRepository,
+    demo_run_response,
+    demo_scenario_summary_response,
+)
+from product_platform.demo.reset import (
+    DemoEnvironmentResetService,
+    DemoResetRepository,
+    demo_reset_run_response,
+)
+from product_platform.demo.runner import DemoScenarioRunner, demo_run_audit_event
 from product_platform.discovery.models import (
     DiscoveryAssignOwnerRequest,
     DiscoveryFindingResponse,
@@ -505,7 +526,7 @@ def create_app(
     """Create and configure the FastAPI product API."""
 
     resolved_settings = settings or load_settings()
-    registry = dependency_registry or create_default_dependency_registry()
+    registry = dependency_registry or create_default_dependency_registry(resolved_settings)
     auth_service = AuthService(resolved_settings)
     tenants = tenant_store or TenantStore()
     api_keys = api_key_store or ApiKeyStore(resolved_settings.session_secret)
@@ -719,6 +740,270 @@ def create_app(
             workflow_definition_response(row)
             for row in repository.list_definitions(enabled=enabled, workflow_type=workflow_type)
         ]
+
+    @app.get(
+        "/api/v1/demo/scenarios",
+        response_model=list[DemoScenarioSummaryResponse],
+        tags=["demo"],
+    )
+    async def list_demo_scenarios(
+        status: str | None = Query(default=None),
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[DemoScenarioSummaryResponse]:
+        """List Demo Lab scenarios available in the selected environment."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = DemoScenarioRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        return [
+            demo_scenario_summary_response(row)
+            for row in repository.list_scenarios(status=status)
+        ]
+
+    @app.get(
+        "/api/v1/demo/scenarios/{scenario_id}",
+        response_model=DemoScenarioDetailResponse,
+        tags=["demo"],
+    )
+    async def get_demo_scenario(
+        scenario_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> DemoScenarioDetailResponse:
+        """Return one Demo Lab scenario with ordered steps."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = DemoScenarioRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        detail = repository.get_detail(scenario_id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="Scenario not found.")
+        return detail
+
+    @app.post(
+        "/api/v1/demo/scenarios/{scenario_id}/runs",
+        response_model=DemoRunResponse,
+        status_code=201,
+        tags=["demo"],
+    )
+    async def start_demo_run(
+        scenario_id: str,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> DemoRunResponse:
+        """Start a Demo Lab scenario run."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = DemoScenarioRepository(connection, organization_id, environment_id)
+                run = repository.create_run(scenario_id, started_by=current_user.id)
+                AuditEventRepository(connection).insert(
+                    demo_run_audit_event(
+                        event_type="demo.run.started",
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        run_id=run["id"],
+                        scenario_id=run["scenario_id"],
+                        status=run["status"],
+                        summary_json=run["summary_json"],
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return demo_run_response(repository, run)
+        except DemoScenarioNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/demo/runs/{run_id}",
+        response_model=DemoRunResponse,
+        tags=["demo"],
+    )
+    async def get_demo_run(
+        run_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> DemoRunResponse:
+        """Get one Demo Lab scenario run."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = DemoScenarioRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        run = repository.get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Run not found.")
+        return demo_run_response(repository, run)
+
+    @app.post(
+        "/api/v1/demo/runs/{run_id}/continue",
+        response_model=DemoRunResponse,
+        tags=["demo"],
+    )
+    async def continue_demo_run(
+        run_id: str,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> DemoRunResponse:
+        """Execute the next pending Demo Lab scenario step."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = DemoScenarioRepository(connection, organization_id, environment_id)
+                audit_repository = AuditEventRepository(connection)
+                run = DemoScenarioRunner(
+                    repository,
+                    audit_repository=audit_repository,
+                    actor_id=current_user.id,
+                ).continue_run(run_id, correlation_id=context.correlation_id)
+                return demo_run_response(repository, run)
+        except DemoScenarioNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/demo/runs/{run_id}/cancel",
+        response_model=DemoRunResponse,
+        tags=["demo"],
+    )
+    async def cancel_demo_run(
+        run_id: str,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_CANCEL)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> DemoRunResponse:
+        """Cancel a non-terminal Demo Lab scenario run."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = DemoScenarioRepository(connection, organization_id, environment_id)
+                run = repository.cancel_run(run_id, reason="Cancelled from Demo Lab.")
+                AuditEventRepository(connection).insert(
+                    demo_run_audit_event(
+                        event_type="demo.run.canceled",
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        run_id=run["id"],
+                        scenario_id=run["scenario_id"],
+                        status=run["status"],
+                        summary_json=run["summary_json"],
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return demo_run_response(repository, run)
+        except DemoScenarioNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/demo/reset",
+        response_model=DemoResetRunResponse,
+        status_code=201,
+        tags=["demo"],
+    )
+    async def reset_demo_environment(
+        body: DemoResetRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_CANCEL)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> DemoResetRunResponse:
+        """Reset the selected local demo environment to a known baseline."""
+
+        if body.confirmation != "RESET":
+            raise HTTPException(status_code=400, detail="Type RESET to confirm demo reset.")
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        with _audit_database().transaction() as connection:
+            reset_run = DemoEnvironmentResetService(
+                connection,
+                organization_id,
+                environment_id,
+            ).reset(
+                requested_by=current_user.id,
+                correlation_id=context.correlation_id,
+            )
+            return demo_reset_run_response(reset_run)
+
+    @app.get(
+        "/api/v1/demo/reset-runs",
+        response_model=list[DemoResetRunResponse],
+        tags=["demo"],
+    )
+    async def list_demo_reset_runs(
+        limit: int = Query(default=20, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[DemoResetRunResponse]:
+        """List reset history for the selected demo environment."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = DemoResetRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        return [
+            demo_reset_run_response(row)
+            for row in repository.list_runs(limit=limit, offset=offset)
+        ]
+
+    @app.get(
+        "/api/v1/demo/reset-runs/{reset_id}",
+        response_model=DemoResetRunResponse,
+        tags=["demo"],
+    )
+    async def get_demo_reset_run(
+        reset_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> DemoResetRunResponse:
+        """Get one demo reset run."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = DemoResetRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        row = repository.get_optional(reset_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Reset run not found.")
+        return demo_reset_run_response(row)
+
+    @app.get(
+        "/api/v1/demo/baseline-status",
+        response_model=DemoBaselineStatusResponse,
+        tags=["demo"],
+    )
+    async def get_demo_baseline_status(
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> DemoBaselineStatusResponse:
+        """Return Demo Lab baseline prerequisite health."""
+
+        organization_id = _require_organization_id(current_user)
+        return demo_baseline_status(
+            _audit_database().connect(),
+            organization_id=organization_id,
+            environment_id=environment_id,
+        )
 
     def _agent_registration_audit_event(
         *,

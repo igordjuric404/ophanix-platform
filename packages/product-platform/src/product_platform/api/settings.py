@@ -53,6 +53,23 @@ class Settings:
     enable_production_chaos: bool = field(
         default_factory=lambda: _bool_env("OPHANIX_ENABLE_PRODUCTION_CHAOS", False)
     )
+    deployment_mode: str = field(default_factory=lambda: os.environ.get("OPHANIX_DEPLOYMENT_MODE", "local"))
+    redis_url: str | None = field(default_factory=lambda: os.environ.get("OPHANIX_REDIS_URL"))
+    object_storage_bucket: str | None = field(
+        default_factory=lambda: os.environ.get("OPHANIX_OBJECT_STORAGE_BUCKET")
+    )
+    object_storage_endpoint: str | None = field(
+        default_factory=lambda: os.environ.get("OPHANIX_OBJECT_STORAGE_ENDPOINT")
+    )
+    secret_manager_ref: str | None = field(
+        default_factory=lambda: os.environ.get("OPHANIX_SECRET_MANAGER_REF")
+    )
+    idp_issuer_url: str | None = field(default_factory=lambda: os.environ.get("OPHANIX_IDP_ISSUER_URL"))
+    idp_audience: str | None = field(default_factory=lambda: os.environ.get("OPHANIX_IDP_AUDIENCE"))
+    tls_certificate_ref: str | None = field(default_factory=lambda: os.environ.get("OPHANIX_TLS_CERTIFICATE_REF"))
+    internal_cidrs: list[str] = field(
+        default_factory=lambda: _csv_env("OPHANIX_INTERNAL_CIDRS", "10.0.0.0/8")
+    )
 
 
 def load_settings() -> Settings:

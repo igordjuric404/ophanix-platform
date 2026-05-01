@@ -13,6 +13,7 @@ import { renderMarketplacePage } from "./marketplace.js";
 import { renderObservabilityPage } from "./observability.js";
 import { renderIntegrationsPage } from "./integrations.js";
 import { renderRuntimePage } from "./runtime.js";
+import { renderDemoLabPage } from "./demo.js";
 
 export { escapeHtml };
 
@@ -219,6 +220,8 @@ export function renderShell({ currentPath = DEFAULT_ROUTE, state = createInitial
         ? renderIntegrationsPage(state)
       : route?.path === "/runtime"
         ? renderRuntimePage(state)
+      : route?.path === "/demo-lab"
+        ? renderDemoLabPage(state)
       : route?.path === "/discovery"
         ? renderDiscoveryPage(state)
       : route

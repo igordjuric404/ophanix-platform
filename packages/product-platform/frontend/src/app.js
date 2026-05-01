@@ -15,6 +15,7 @@ import {
   replaceDrawerContent
 } from "./drawers.js";
 import { renderShell } from "./render.js";
+import { demoResetPayloadFromForm } from "./demo.js";
 import { discoveryFindingParamsFromForm } from "./discovery.js";
 import {
   meshHandoffParamsFromForm,
@@ -449,6 +450,43 @@ async function refreshRuntimeWorkspace(root, apiClient, selectedSagaId = appStat
   mount(root, appState);
 }
 
+async function loadDemoState(
+  apiClient,
+  selectedScenarioId = appState.selectedDemoScenario?.id ?? null,
+  selectedRunId = appState.selectedDemoRun?.id ?? null
+) {
+  const [demoScenarios, demoBaselineStatus, demoResetRuns] = await Promise.all([
+    apiClient.listDemoScenarios(),
+    apiClient.getDemoBaselineStatus(),
+    apiClient.listDemoResetRuns()
+  ]);
+  const scenarioId = selectedScenarioId ?? demoScenarios[0]?.id ?? null;
+  const selectedDemoScenario = scenarioId ? await apiClient.getDemoScenario(scenarioId) : null;
+  const selectedDemoRun = selectedRunId ? await apiClient.getDemoRun(selectedRunId) : null;
+  return {
+    ...appState,
+    demoScenarios: selectedDemoScenario
+      ? demoScenarios.map((scenario) =>
+          scenario.id === selectedDemoScenario.id ? selectedDemoScenario : scenario
+        )
+      : demoScenarios,
+    demoBaselineStatus,
+    demoResetRuns,
+    selectedDemoScenario,
+    selectedDemoRun
+  };
+}
+
+async function refreshDemoWorkspace(
+  root,
+  apiClient,
+  selectedScenarioId = appState.selectedDemoScenario?.id ?? null,
+  selectedRunId = appState.selectedDemoRun?.id ?? null
+) {
+  appState = await loadDemoState(apiClient, selectedScenarioId, selectedRunId);
+  mount(root, appState);
+}
+
 export function installNavigation(root = document.getElementById("app"), apiClient = null) {
   document.addEventListener("click", async (event) => {
     const link = event.target.closest("[data-route]");
@@ -487,6 +525,9 @@ export function installNavigation(root = document.getElementById("app"), apiClie
     }
     if (apiClient && normalizePath(targetPath) === "/runtime") {
       await refreshRuntimeWorkspace(root, apiClient);
+    }
+    if (apiClient && normalizePath(targetPath) === "/demo-lab") {
+      await refreshDemoWorkspace(root, apiClient);
     }
   });
   document.addEventListener("change", (event) => {
@@ -1051,6 +1092,47 @@ export function installNavigation(root = document.getElementById("app"), apiClie
     );
     mount(root, appState);
   });
+  document.addEventListener("click", async (event) => {
+    const openScenarioButton = event.target.closest("[data-demo-scenario-open]");
+    if (openScenarioButton && apiClient) {
+      const scenarioId = openScenarioButton.getAttribute("data-demo-scenario-open");
+      if (!scenarioId) {
+        return;
+      }
+      await refreshDemoWorkspace(root, apiClient, scenarioId, appState.selectedDemoRun?.id ?? null);
+      return;
+    }
+    const startButton = event.target.closest("[data-demo-run-start]");
+    if (startButton && apiClient) {
+      const scenarioId = startButton.getAttribute("data-demo-run-start");
+      if (!scenarioId) {
+        return;
+      }
+      const run = await apiClient.startDemoRun(scenarioId);
+      await refreshDemoWorkspace(root, apiClient, run.scenario_id, run.id);
+      return;
+    }
+    const continueButton = event.target.closest("[data-demo-run-continue]");
+    if (continueButton && apiClient) {
+      const runId = continueButton.getAttribute("data-demo-run-continue");
+      if (!runId) {
+        return;
+      }
+      const run = await apiClient.continueDemoRun(runId);
+      await refreshDemoWorkspace(root, apiClient, run.scenario_id, run.id);
+      return;
+    }
+    const cancelButton = event.target.closest("[data-demo-run-cancel]");
+    if (!cancelButton || !apiClient) {
+      return;
+    }
+    const runId = cancelButton.getAttribute("data-demo-run-cancel");
+    if (!runId) {
+      return;
+    }
+    const run = await apiClient.cancelDemoRun(runId);
+    await refreshDemoWorkspace(root, apiClient, run.scenario_id, run.id);
+  });
   document.addEventListener("keydown", (event) => {
     const nextDrawer = handleDrawerKeydown(event, appState.drawer);
     if (nextDrawer !== appState.drawer) {
@@ -1059,6 +1141,13 @@ export function installNavigation(root = document.getElementById("app"), apiClie
     }
   });
   document.addEventListener("submit", async (event) => {
+    const demoResetForm = event.target.closest("[data-demo-reset-form]");
+    if (demoResetForm && apiClient) {
+      event.preventDefault();
+      await apiClient.resetDemoEnvironment(demoResetPayloadFromForm(demoResetForm));
+      await refreshDemoWorkspace(root, apiClient);
+      return;
+    }
     const discoveryScheduleForm = event.target.closest("[data-discovery-schedule-form]");
     if (discoveryScheduleForm && apiClient) {
       event.preventDefault();
@@ -1902,6 +1991,10 @@ export async function bootstrap({
     }
     if (currentPath() === "/runtime") {
       appState = await loadRuntimeState(apiClient);
+      mount(root, appState);
+    }
+    if (currentPath() === "/demo-lab") {
+      appState = await loadDemoState(apiClient);
       mount(root, appState);
     }
     if (appState.drawer.open && appState.drawer.kind === "audit-event" && appState.drawer.resourceId) {
