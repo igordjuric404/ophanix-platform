@@ -4,8 +4,8 @@
 LangChain Agent with Policy Enforcement — Quickstart
 =====================================================
 
-pip install agent-governance-toolkit[full] langchain langchain-openai
-python examples/quickstart/langchain_governed.py
+python3 -m pip install 'agent-governance-toolkit[full]' langchain langchain-openai
+python3 examples/quickstart/langchain_governed.py
 
 Shows a real policy violation being caught, then a compliant call succeeding,
 with a printed audit trail.
