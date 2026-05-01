@@ -33,6 +33,16 @@ def database_path_from_url(database_url: str) -> str:
     return database_url.removeprefix(prefix)
 
 
+def is_supported_database_url(database_url: str) -> bool:
+    """Return whether the current runtime can connect to this database URL."""
+
+    try:
+        database_path_from_url(database_url)
+    except ValueError:
+        return False
+    return True
+
+
 def connect_database(database_url: str) -> sqlite3.Connection:
     """Open a SQLite connection with product defaults."""
 
@@ -76,6 +86,11 @@ class MigrationRunner:
             return None
         migration = {migration.version: migration for migration in load_migrations()}[row["version"]]
         self.connection.executescript(migration.down_sql)
+        if self._table_exists("schema_migrations"):
+            self.connection.execute(
+                "DELETE FROM schema_migrations WHERE version = ?",
+                (migration.version,),
+            )
         self.connection.commit()
         return migration.version
 
@@ -102,6 +117,13 @@ class MigrationRunner:
         row = self.connection.execute(
             "SELECT 1 FROM schema_migrations WHERE version = ?",
             (version,),
+        ).fetchone()
+        return row is not None
+
+    def _table_exists(self, table_name: str) -> bool:
+        row = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table_name,),
         ).fetchone()
         return row is not None
 

@@ -28,6 +28,17 @@ export function renderPoliciesPage(state = {}) {
         agents: policyBindingTargets.agents ?? state.agents ?? [],
         environments: state.environments ?? []
       })}
+      ${renderPolicySimulatorPanel({
+        policies,
+        selectedPolicy,
+        result: state.policyEvaluationResult ?? null,
+        error: state.policyEvaluationError ?? null
+      })}
+      ${renderPolicyEvaluationFeed({
+        evaluations: state.policyEvaluations ?? [],
+        filters: state.policyEvaluationFilter ?? {},
+        selectedEvaluation: state.selectedPolicyEvaluation ?? null
+      })}
       ${renderPolicyAffectedResourcesPanel(state.policyAffectedResources ?? null)}
       ${renderPolicyImportDialog()}
       ${renderPolicyExportPanel(state.policyExport ?? null)}
@@ -703,6 +714,239 @@ export function renderPolicyExportPanel(exported = null) {
   `;
 }
 
+export function renderPolicySimulatorPanel({
+  policies = [],
+  selectedPolicy = null,
+  result = null,
+  error = null
+} = {}) {
+  const activePolicyId = selectedPolicy?.id ?? policies[0]?.id ?? "";
+  const versions = selectedPolicy?.versions ?? [];
+  return `
+    <section class="workspace-panel policy-simulator" data-policy-simulator>
+      <header class="panel-header">
+        <div>
+          <p class="section-label">Simulator</p>
+          <h2>Policy Simulator</h2>
+        </div>
+      </header>
+      <form class="policy-simulator-form" data-policy-simulator-form>
+        <label>
+          <span>Policy</span>
+          <select name="policy_id">
+            <option value="">Active binding</option>
+            ${policies
+              .map(
+                (policy) => `
+                  <option value="${escapeHtml(policy.id)}" ${policy.id === activePolicyId ? "selected" : ""}>${escapeHtml(policy.name)}</option>
+                `
+              )
+              .join("")}
+          </select>
+        </label>
+        <label>
+          <span>Version</span>
+          <select name="policy_version_id">
+            <option value="">Latest active</option>
+            ${versions
+              .map(
+                (version) => `
+                  <option value="${escapeHtml(version.id)}" ${version.id === selectedPolicy?.active_version_id ? "selected" : ""}>v${escapeHtml(String(version.version_number))} - ${escapeHtml(version.status)}</option>
+                `
+              )
+              .join("")}
+          </select>
+        </label>
+        <label>
+          <span>Target Type</span>
+          <select name="target_type">
+            <option value="">Policy version</option>
+            <option value="agent">agent</option>
+            <option value="environment">environment</option>
+            <option value="mcp-tool">mcp-tool</option>
+            <option value="runtime-action">runtime-action</option>
+            <option value="framework-connector">framework-connector</option>
+          </select>
+        </label>
+        <label>
+          <span>Target</span>
+          <input name="target_id" placeholder="target id">
+        </label>
+        <label>
+          <span>Agent</span>
+          <input name="agent_id" placeholder="agent id">
+        </label>
+        <label>
+          <span>Action</span>
+          <input name="action" required value="mcp.tool_call">
+        </label>
+        <label>
+          <span>Resource Type</span>
+          <input name="resource_type" placeholder="mcp-tool">
+        </label>
+        <label>
+          <span>Resource</span>
+          <input name="resource_id" placeholder="resource id">
+        </label>
+        <label class="full-width code-editor">
+          <span>Context JSON</span>
+          <textarea name="context_json" rows="7" spellcheck="false" data-policy-simulator-context>{}</textarea>
+        </label>
+        <button type="submit">Simulate</button>
+        <output data-policy-simulator-error>${error ? escapeHtml(error) : ""}</output>
+      </form>
+      ${renderPolicyEvaluationResult(result)}
+    </section>
+  `;
+}
+
+export function renderPolicyEvaluationResult(evaluation = null) {
+  if (!evaluation) {
+    return `
+      <section class="lint-panel" data-policy-simulator-result>
+        <h3>Decision Result</h3>
+        <div class="empty-state"><strong>No simulation</strong><span>Pending</span></div>
+      </section>
+    `;
+  }
+  return `
+    <section class="lint-panel" data-policy-simulator-result="${escapeHtml(evaluation.id ?? "transient")}">
+      <h3>Decision Result</h3>
+      <ul class="compact-list">
+        <li><span>Decision</span><strong>${escapeHtml(evaluation.decision)}</strong></li>
+        <li><span>Mode</span><strong>${escapeHtml(evaluation.mode)}</strong></li>
+        <li><span>Matched Rule</span><strong>${escapeHtml(evaluation.matched_rule ?? "default")}</strong></li>
+        <li><span>Latency</span><strong>${escapeHtml(String(evaluation.latency_ms ?? 0))}ms</strong></li>
+      </ul>
+      <p class="drawer-state ${evaluation.decision === "deny" ? "is-warning" : ""}">${escapeHtml(evaluation.reason ?? "")}</p>
+    </section>
+  `;
+}
+
+export function renderPolicyEvaluationFeed({
+  evaluations = [],
+  filters = {},
+  selectedEvaluation = null
+} = {}) {
+  return `
+    <section class="workspace-panel policy-evaluation-feed" data-policy-evaluation-feed>
+      <header class="panel-header">
+        <div>
+          <p class="section-label">Evaluation Feed</p>
+          <h2>Policy Decisions</h2>
+        </div>
+      </header>
+      ${renderPolicyEvaluationFilter(filters)}
+      ${
+        evaluations.length
+          ? renderPolicyEvaluationTable(evaluations)
+          : '<div class="empty-state" data-policy-evaluation-empty><strong>No decisions</strong><span>Run simulator</span></div>'
+      }
+      ${renderPolicyEvaluationDetail(selectedEvaluation)}
+    </section>
+  `;
+}
+
+export function renderPolicyEvaluationFilter(filters = {}) {
+  return `
+    <form class="filter-bar" data-policy-evaluation-filter>
+      <label>
+        <span>Decision</span>
+        <select name="decision">
+          <option value="">Any</option>
+          <option value="allow" ${filters.decision === "allow" ? "selected" : ""}>allow</option>
+          <option value="deny" ${filters.decision === "deny" ? "selected" : ""}>deny</option>
+        </select>
+      </label>
+      <label>
+        <span>Mode</span>
+        <select name="mode">
+          <option value="">Any</option>
+          <option value="simulate" ${filters.mode === "simulate" ? "selected" : ""}>simulate</option>
+          <option value="live" ${filters.mode === "live" ? "selected" : ""}>live</option>
+        </select>
+      </label>
+      <label>
+        <span>Agent</span>
+        <input name="agent_id" value="${escapeHtml(filters.agent_id ?? "")}" placeholder="agent id">
+      </label>
+      <label>
+        <span>Action</span>
+        <input name="action" value="${escapeHtml(filters.action ?? "")}" placeholder="mcp.tool_call">
+      </label>
+      <label>
+        <span>Policy</span>
+        <input name="policy_id" value="${escapeHtml(filters.policy_id ?? "")}" placeholder="policy id">
+      </label>
+      <label>
+        <span>Correlation</span>
+        <input name="correlation_id" value="${escapeHtml(filters.correlation_id ?? "")}" placeholder="correlation id">
+      </label>
+      <button type="submit">Filter</button>
+    </form>
+  `;
+}
+
+export function renderPolicyEvaluationTable(evaluations = []) {
+  const rows = evaluations
+    .map(
+      (evaluation) => `
+        <tr data-policy-evaluation-row="${escapeHtml(evaluation.id)}">
+          <td><span class="status-pill">${escapeHtml(evaluation.decision)}</span><small>${escapeHtml(evaluation.mode)}</small></td>
+          <td><strong>${escapeHtml(evaluation.action)}</strong><small>${escapeHtml(evaluation.agent_id ?? "no agent")}</small></td>
+          <td>${escapeHtml(evaluation.policy_id ?? evaluation.backend ?? "unbound")}</td>
+          <td>${escapeHtml(evaluation.matched_rule ?? "default")}</td>
+          <td>${escapeHtml(String(evaluation.latency_ms ?? 0))}ms</td>
+          <td>${escapeHtml(evaluation.correlation_id ?? "none")}</td>
+          <td class="row-actions">
+            <button type="button" data-policy-evaluation-open="${escapeHtml(evaluation.id)}">Open</button>
+          </td>
+        </tr>
+      `
+    )
+    .join("");
+  return `
+    <table class="data-table" data-policy-evaluation-table>
+      <thead>
+        <tr>
+          <th>Decision</th>
+          <th>Action</th>
+          <th>Policy</th>
+          <th>Rule</th>
+          <th>Latency</th>
+          <th>Correlation</th>
+          <th>Detail</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+export function renderPolicyEvaluationDetail(evaluation = null) {
+  if (!evaluation) {
+    return "";
+  }
+  return `
+    <section class="drawer-panel" data-policy-evaluation-detail="${escapeHtml(evaluation.id)}">
+      <header class="panel-header">
+        <div>
+          <p class="section-label">Decision Detail</p>
+          <h3>${escapeHtml(evaluation.decision)} - ${escapeHtml(evaluation.action)}</h3>
+        </div>
+        <span class="status-pill">${escapeHtml(evaluation.backend)}</span>
+      </header>
+      <ul class="compact-list">
+        <li><span>Reason</span><strong>${escapeHtml(evaluation.reason)}</strong></li>
+        <li><span>Policy</span><strong>${escapeHtml(evaluation.policy_id ?? "unbound")}</strong></li>
+        <li><span>Version</span><strong>${escapeHtml(evaluation.policy_version_id ?? "n/a")}</strong></li>
+        <li><span>Resource</span><strong>${escapeHtml(evaluation.resource_type ?? "n/a")} / ${escapeHtml(evaluation.resource_id ?? "n/a")}</strong></li>
+      </ul>
+      <pre><code>${escapeHtml(JSON.stringify(evaluation.context ?? {}, null, 2))}</code></pre>
+    </section>
+  `;
+}
+
 export function policyFilterParamsFromValues(values = {}) {
   return cleanParams({
     scope: values.scope,
@@ -792,6 +1036,39 @@ export function policyExceptionPayloadFromForm(form) {
   return policyExceptionPayloadFromValues(Object.fromEntries(new FormData(form)));
 }
 
+export function policyEvaluationPayloadFromValues(values = {}) {
+  return cleanParams({
+    policy_id: values.policy_id,
+    policy_version_id: values.policy_version_id,
+    target_type: values.target_type,
+    target_id: values.target_id,
+    agent_id: values.agent_id,
+    action: values.action,
+    resource_type: values.resource_type,
+    resource_id: values.resource_id,
+    context: parseContextJson(values.context_json)
+  });
+}
+
+export function policyEvaluationPayloadFromForm(form) {
+  return policyEvaluationPayloadFromValues(Object.fromEntries(new FormData(form)));
+}
+
+export function policyEvaluationFilterParamsFromValues(values = {}) {
+  return cleanParams({
+    decision: values.decision,
+    mode: values.mode,
+    agent_id: values.agent_id,
+    action: values.action,
+    policy_id: values.policy_id,
+    correlation_id: values.correlation_id
+  });
+}
+
+export function policyEvaluationFilterParamsFromForm(form) {
+  return policyEvaluationFilterParamsFromValues(Object.fromEntries(new FormData(form)));
+}
+
 export function backendHint(backend) {
   if (backend === "opa") {
     return "OPA/Rego backend selected.";
@@ -829,6 +1106,19 @@ function datetimeLocalToIso(value) {
     return text;
   }
   return `${text}:00+00:00`;
+}
+
+function parseContextJson(value) {
+  const text = String(value ?? "{}").trim() || "{}";
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+      throw new Error("Context JSON must be an object.");
+    }
+    return parsed;
+  } catch (error) {
+    throw new Error(error?.message ?? "Context JSON is invalid.");
+  }
 }
 
 function bindingTargetOptions({ agents = [], environments = [] } = {}) {

@@ -65,7 +65,7 @@ def main() -> None:
         if args.db_command == "seed":
             runner.apply_all()
             with runner.connection:
-                seed_demo_data(runner.connection)
+                seed_demo_data(runner.connection, include_baseline=True)
             print("Seeded demo data")
             return
         if args.db_command == "reset-demo":

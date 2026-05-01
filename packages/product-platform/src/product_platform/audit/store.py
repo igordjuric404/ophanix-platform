@@ -22,6 +22,9 @@ class AuditEventQuery:
     organization_id: str
     environment_id: str | None = None
     event_type: str | None = None
+    source_component: str | None = None
+    actor_type: str | None = None
+    actor_id: str | None = None
     agent_id: str | None = None
     decision: str | None = None
     severity: str | None = None
@@ -99,6 +102,9 @@ class AuditEventRepository:
         for column, value in [
             ("environment_id", query.environment_id),
             ("event_type", query.event_type),
+            ("source_component", query.source_component),
+            ("actor_type", query.actor_type),
+            ("actor_id", query.actor_id),
             ("agent_id", query.agent_id),
             ("decision", query.decision),
             ("severity", query.severity),

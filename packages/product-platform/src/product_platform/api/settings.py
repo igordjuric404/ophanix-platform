@@ -61,6 +61,9 @@ class Settings:
     object_storage_endpoint: str | None = field(
         default_factory=lambda: os.environ.get("OPHANIX_OBJECT_STORAGE_ENDPOINT")
     )
+    artifact_storage_path: str = field(
+        default_factory=lambda: os.environ.get("OPHANIX_ARTIFACT_STORAGE_PATH", "/tmp/ophanix-product-artifacts")
+    )
     secret_manager_ref: str | None = field(
         default_factory=lambda: os.environ.get("OPHANIX_SECRET_MANAGER_REF")
     )

@@ -11,9 +11,11 @@ import { renderMeshPage } from "./mesh.js";
 import { renderMcpPage } from "./mcp.js";
 import { renderMarketplacePage } from "./marketplace.js";
 import { renderObservabilityPage } from "./observability.js";
+import { renderCompliancePage } from "./compliance.js";
 import { renderIntegrationsPage } from "./integrations.js";
 import { renderRuntimePage } from "./runtime.js";
 import { renderDemoLabPage } from "./demo.js";
+import { renderWorkflowsPage } from "./workflows.js";
 
 export { escapeHtml };
 
@@ -216,12 +218,16 @@ export function renderShell({ currentPath = DEFAULT_ROUTE, state = createInitial
         ? renderMarketplacePage(state)
       : route?.path === "/observability"
         ? renderObservabilityPage(state)
+      : route?.path === "/compliance"
+        ? renderCompliancePage(state)
       : route?.path === "/integrations"
         ? renderIntegrationsPage(state)
       : route?.path === "/runtime"
         ? renderRuntimePage(state)
       : route?.path === "/demo-lab"
         ? renderDemoLabPage(state)
+      : route?.path === "/workflows"
+        ? renderWorkflowsPage(state)
       : route?.path === "/discovery"
         ? renderDiscoveryPage(state)
       : route

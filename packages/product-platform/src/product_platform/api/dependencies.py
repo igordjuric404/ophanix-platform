@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import socket
+import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from product_platform.api.settings import Settings
 from product_platform.api.models import DependencyStatus
+from product_platform.db.migrator import connect_database, is_supported_database_url
 
 DependencyCheck = Callable[[], DependencyStatus]
+SettingsProbe = Callable[[Settings], DependencyStatus]
 
 
 @dataclass(frozen=True)
@@ -18,6 +25,17 @@ class RegisteredDependency:
     name: str
     required: bool
     check: DependencyCheck
+
+
+@dataclass(frozen=True)
+class ReadinessProbes:
+    """Optional adapter hooks for deterministic readiness checks."""
+
+    database: SettingsProbe | None = None
+    redis: SettingsProbe | None = None
+    object_storage: SettingsProbe | None = None
+    secret_manager: SettingsProbe | None = None
+    worker: SettingsProbe | None = None
 
 
 class DependencyRegistry:
@@ -76,52 +94,56 @@ def static_dependency(
     return check
 
 
-def create_default_dependency_registry(settings: Settings | None = None) -> DependencyRegistry:
+def create_default_dependency_registry(
+    settings: Settings | None = None,
+    probes: ReadinessProbes | None = None,
+) -> DependencyRegistry:
     """Create placeholder dependency checks for the product shell."""
 
     registry = DependencyRegistry()
+    resolved_probes = probes or ReadinessProbes()
     if settings is not None and settings.deployment_mode == "cloud":
         registry.register(
             "database",
-            _configured_dependency(
+            _probe_dependency(
                 "database",
-                settings.database_url.startswith(("postgresql://", "postgres://")),
-                "Managed PostgreSQL URL is configured.",
-                "OPHANIX_DATABASE_URL must be a PostgreSQL URL in cloud mode.",
+                settings,
+                resolved_probes.database or _probe_database,
             ),
             required=True,
         )
         registry.register(
             "redis",
-            _configured_dependency(
+            _probe_dependency(
                 "redis",
-                bool(settings.redis_url and settings.redis_url.startswith("redis://")),
-                "Managed Redis or queue URL is configured.",
-                "OPHANIX_REDIS_URL is required in cloud mode.",
+                settings,
+                resolved_probes.redis or _probe_redis,
             ),
             required=True,
         )
         registry.register(
             "object_storage",
-            _configured_dependency(
+            _probe_dependency(
                 "object_storage",
-                bool(settings.object_storage_bucket),
-                "Object storage bucket is configured.",
-                "OPHANIX_OBJECT_STORAGE_BUCKET is required in cloud mode.",
+                settings,
+                resolved_probes.object_storage or _probe_object_storage,
             ),
             required=True,
         )
         registry.register(
             "secret_manager",
-            _configured_dependency(
+            _probe_dependency(
                 "secret_manager",
-                bool(settings.secret_manager_ref),
-                "Secret manager reference is configured.",
-                "OPHANIX_SECRET_MANAGER_REF is required in cloud mode.",
+                settings,
+                resolved_probes.secret_manager or _probe_secret_manager,
             ),
             required=True,
         )
-        registry.register("worker", static_dependency("worker", required=True), required=True)
+        registry.register(
+            "worker",
+            _probe_dependency("worker", settings, resolved_probes.worker or _probe_worker),
+            required=True,
+        )
         return registry
     for name in ("database", "redis", "worker", "event_store", "model_provider"):
         registry.register(name, static_dependency(name, required=False), required=False)
@@ -143,3 +165,197 @@ def _configured_dependency(
         )
 
     return check
+
+
+def _probe_dependency(name: str, settings: Settings, probe: SettingsProbe) -> DependencyCheck:
+    def check() -> DependencyStatus:
+        status = probe(settings)
+        return DependencyStatus(
+            name=status.name or name,
+            status=status.status,
+            required=True,
+            message=status.message,
+        )
+
+    return check
+
+
+def _probe_database(settings: Settings) -> DependencyStatus:
+    if not is_supported_database_url(settings.database_url):
+        return DependencyStatus(
+            name="database",
+            status="unhealthy",
+            required=True,
+            message=(
+                "OPHANIX_DATABASE_URL must be a sqlite:/// URL; PostgreSQL runtime support "
+                "is not implemented yet."
+            ),
+        )
+    try:
+        connection = connect_database(settings.database_url)
+        try:
+            row = connection.execute(
+                "SELECT COUNT(*) AS count FROM schema_migrations"
+            ).fetchone()
+        finally:
+            connection.close()
+    except sqlite3.Error as exc:
+        return DependencyStatus(
+            name="database",
+            status="unhealthy",
+            required=True,
+            message=f"SQLite database is reachable but migrations are not ready: {exc}",
+        )
+    return DependencyStatus(
+        name="database",
+        status="healthy",
+        required=True,
+        message=f"SQLite database is reachable with {row['count']} applied migrations.",
+    )
+
+
+def _probe_redis(settings: Settings) -> DependencyStatus:
+    if not settings.redis_url:
+        return DependencyStatus(
+            name="redis",
+            status="unhealthy",
+            required=True,
+            message="OPHANIX_REDIS_URL is required in cloud mode.",
+        )
+    parsed = urlparse(settings.redis_url)
+    if parsed.scheme not in {"redis", "rediss"} or not parsed.hostname:
+        return DependencyStatus(
+            name="redis",
+            status="unhealthy",
+            required=True,
+            message="OPHANIX_REDIS_URL must be a redis:// or rediss:// URL.",
+        )
+    port = parsed.port or 6379
+    try:
+        with socket.create_connection((parsed.hostname, port), timeout=0.5):
+            pass
+    except OSError as exc:
+        return DependencyStatus(
+            name="redis",
+            status="unhealthy",
+            required=True,
+            message=f"Redis endpoint is not reachable: {exc}",
+        )
+    return DependencyStatus(
+        name="redis",
+        status="healthy",
+        required=True,
+        message="Redis endpoint accepted a TCP connection.",
+    )
+
+
+def _probe_object_storage(settings: Settings) -> DependencyStatus:
+    if not settings.object_storage_bucket:
+        return DependencyStatus(
+            name="object_storage",
+            status="unhealthy",
+            required=True,
+            message="OPHANIX_OBJECT_STORAGE_BUCKET is required in cloud mode.",
+        )
+    if not settings.object_storage_endpoint:
+        return DependencyStatus(
+            name="object_storage",
+            status="unchecked",
+            required=True,
+            message="Object storage bucket is configured, but no endpoint was provided for a reachability probe.",
+        )
+    parsed = urlparse(settings.object_storage_endpoint)
+    if parsed.scheme == "file":
+        return _probe_file_path("object_storage", parsed.path, "Object storage path is readable.")
+    if parsed.scheme not in {"http", "https"}:
+        return DependencyStatus(
+            name="object_storage",
+            status="unchecked",
+            required=True,
+            message="Object storage endpoint scheme has no built-in readiness probe.",
+        )
+    request = Request(settings.object_storage_endpoint, method="HEAD")
+    try:
+        with urlopen(request, timeout=1):
+            pass
+    except HTTPError as exc:
+        if exc.code < 500:
+            return DependencyStatus(
+                name="object_storage",
+                status="healthy",
+                required=True,
+                message=f"Object storage endpoint responded with HTTP {exc.code}.",
+            )
+        return DependencyStatus(
+            name="object_storage",
+            status="unhealthy",
+            required=True,
+            message=f"Object storage endpoint returned HTTP {exc.code}.",
+        )
+    except (OSError, URLError) as exc:
+        return DependencyStatus(
+            name="object_storage",
+            status="unhealthy",
+            required=True,
+            message=f"Object storage endpoint is not reachable: {exc}",
+        )
+    return DependencyStatus(
+        name="object_storage",
+        status="healthy",
+        required=True,
+        message="Object storage endpoint responded to a HEAD probe.",
+    )
+
+
+def _probe_secret_manager(settings: Settings) -> DependencyStatus:
+    if not settings.secret_manager_ref:
+        return DependencyStatus(
+            name="secret_manager",
+            status="unhealthy",
+            required=True,
+            message="OPHANIX_SECRET_MANAGER_REF is required in cloud mode.",
+        )
+    parsed = urlparse(settings.secret_manager_ref)
+    if parsed.scheme == "file":
+        return _probe_file_path("secret_manager", parsed.path, "Secret manager reference is readable.")
+    return DependencyStatus(
+        name="secret_manager",
+        status="unchecked",
+        required=True,
+        message="Secret manager reference is configured, but no probe adapter is available for this provider.",
+    )
+
+
+def _probe_worker(settings: Settings) -> DependencyStatus:
+    return DependencyStatus(
+        name="worker",
+        status="healthy",
+        required=True,
+        message="Worker readiness is covered by the worker no-op smoke command.",
+    )
+
+
+def _probe_file_path(name: str, path: str, healthy_message: str) -> DependencyStatus:
+    if not path:
+        return DependencyStatus(
+            name=name,
+            status="unhealthy",
+            required=True,
+            message=f"{name} file path is empty.",
+        )
+    try:
+        with open(path, "rb"):
+            pass
+    except OSError as exc:
+        return DependencyStatus(
+            name=name,
+            status="unhealthy",
+            required=True,
+            message=f"{name} file path is not readable: {exc}",
+        )
+    return DependencyStatus(
+        name=name,
+        status="healthy",
+        required=True,
+        message=healthy_message,
+    )

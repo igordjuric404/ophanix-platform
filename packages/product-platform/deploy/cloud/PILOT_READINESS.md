@@ -2,6 +2,10 @@
 
 ## Tenant Provisioning
 
+The MVP cloud preview uses SQLite on a durable application data volume. Managed
+PostgreSQL runtime support is deferred until a PostgreSQL connection and
+migration adapter is implemented.
+
 1. Create the pilot organization and default staging environment.
 2. Assign IdP groups to `Platform Admin`, `Operator`, and `Viewer` roles.
 3. Run `python -m product_platform.cli db migrate`.

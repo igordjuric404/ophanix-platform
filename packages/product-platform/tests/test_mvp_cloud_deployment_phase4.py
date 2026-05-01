@@ -27,7 +27,7 @@ class MVPCloudDeploymentPhase4Tests(unittest.TestCase):
         observability = (CLOUD_DIR / "observability.yml").read_text()
         alerts = (CLOUD_DIR / "alerts.yml").read_text()
 
-        self.assertIn("point-in-time recovery", backup)
+        self.assertIn("Volume snapshot schedule", backup)
         self.assertIn("Restore drill", backup)
         self.assertIn("request_id", observability)
         self.assertIn("correlation_id", observability)

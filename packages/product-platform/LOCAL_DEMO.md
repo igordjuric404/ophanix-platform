@@ -48,6 +48,15 @@ docker compose --env-file .env -f docker-compose.demo.yml down
 docker compose --env-file .env -f docker-compose.demo.yml down --volumes
 ```
 
+To run the end-to-end compose smoke in a Docker-capable environment:
+
+```bash
+sh deploy/local-demo-smoke.sh
+```
+
+The smoke starts the stack, verifies `/ready`, resets Demo Lab, confirms the
+baseline is healthy, and starts the customer-support refund scenario.
+
 Reset the Demo Lab from the UI by typing `RESET` in Demo Lab -> Environment
 Reset. The equivalent local CLI command for the API volume is:
 

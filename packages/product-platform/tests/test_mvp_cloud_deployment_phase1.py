@@ -33,6 +33,16 @@ class MVPCloudDeploymentPhase1Tests(unittest.TestCase):
         self.assertIn("Dockerfile.worker", workflow)
         self.assertIn("docker/build-push-action", workflow)
 
+    def test_image_smoke_script_builds_and_runs_expected_targets(self) -> None:
+        script = (PACKAGE_DIR / "deploy/cloud/smoke-images.sh").read_text()
+
+        self.assertIn("docker build -f \"$SCRIPT_DIR/Dockerfile.api\"", script)
+        self.assertIn("docker build -f \"$SCRIPT_DIR/Dockerfile.worker\"", script)
+        self.assertIn("docker build -f \"$SCRIPT_DIR/Dockerfile.frontend\"", script)
+        self.assertIn("/health", script)
+        self.assertIn("/ready", script)
+        self.assertIn("worker noop", script)
+
     def test_worker_image_smoke_command_executes_noop_job(self) -> None:
         env = dict(os.environ)
         env["PYTHONPATH"] = str(PACKAGE_DIR / "src")

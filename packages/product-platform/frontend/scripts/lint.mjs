@@ -57,6 +57,7 @@ for (const file of [
   "src/render.js",
   "src/app.js",
   "src/apiClient.js",
+  "src/workflows.js",
   "src/mcp.js",
   "src/drawers.js",
   "src/html.js",

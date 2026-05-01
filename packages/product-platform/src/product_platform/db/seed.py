@@ -16,8 +16,8 @@ DEMO_ADMIN_USER_ID = "user_admin"
 DEMO_ADMIN_EMAIL = "admin@ophanix.local"
 
 
-def seed_demo_data(connection: Connection) -> None:
-    """Seed local demo organization, environment, admin user, and policy placeholders."""
+def seed_demo_data(connection: Connection, *, include_baseline: bool = False) -> None:
+    """Seed local demo organization, environment, admin user, and shared catalogs."""
 
     now = utc_now_iso()
     connection.execute(
@@ -65,7 +65,8 @@ def seed_demo_data(connection: Connection) -> None:
     seed_framework_catalog(connection)
     seed_workflow_catalog(connection, DEMO_ORG_ID)
     seed_demo_scenarios(connection, DEMO_ORG_ID, DEMO_ENV_ID)
-    seed_demo_baseline_fixtures(connection)
+    if include_baseline:
+        seed_demo_baseline_fixtures(connection)
 
 
 def seed_demo_baseline_fixtures(connection: Connection) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import json
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 from urllib.parse import parse_qs, urlparse
@@ -12,7 +13,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from product_platform import __version__
@@ -55,6 +56,24 @@ from product_platform.api.tenancy import (
     TenantStore,
     require_environment_context,
 )
+from product_platform.artifacts.models import (
+    ArtifactAttestationCreateRequest,
+    ArtifactAttestationResponse,
+    ArtifactCreateRequest,
+    ArtifactDownloadResponse,
+    ArtifactLinkCreateRequest,
+    ArtifactLinkResponse,
+    ArtifactResponse,
+)
+from product_platform.artifacts.repository import (
+    ArtifactNotFoundError,
+    ArtifactRepository,
+    ArtifactValidationError,
+    artifact_attestation_response,
+    artifact_link_response,
+    artifact_response,
+)
+from product_platform.artifacts.storage import ArtifactStorageError, LocalArtifactProvider
 from product_platform.agents.models import (
     AgentCredentialIssueRequest,
     AgentCredentialIssueResponse,
@@ -100,6 +119,41 @@ from product_platform.agents.lifecycle import AgentLifecycleTransitionError
 from product_platform.agents.simulation import simulate_registration_action
 from product_platform.db.connection import Database
 from product_platform.db.seed import seed_demo_data
+from product_platform.compliance.models import (
+    AuditExportRequest,
+    AuditExportResponse,
+    ComplianceControlResponse,
+    ComplianceFrameworkCreateRequest,
+    ComplianceFrameworkResponse,
+    ComplianceReportAttestationRequest,
+    ComplianceReportAttestationResponse,
+    ComplianceReportCreateRequest,
+    ComplianceReportResponse,
+    ComplianceViolationPatchRequest,
+    ComplianceViolationResponse,
+    ControlMappingCreateRequest,
+    ControlMappingResponse,
+    EvidenceItemResponse,
+    EvidenceRecomputeResponse,
+)
+from product_platform.compliance.repository import (
+    AuditExportRepository,
+    ComplianceRepository,
+    ComplianceReportNotFoundError,
+    ComplianceReportValidationError,
+    ComplianceResourceNotFoundError,
+    ComplianceViolationNotFoundError,
+    ComplianceViolationStateError,
+    DuplicateComplianceResourceError,
+    audit_export_response,
+    control_mapping_response,
+    control_response,
+    evidence_response,
+    framework_response,
+    report_attestation_response,
+    report_response,
+    violation_response,
+)
 from product_platform.demo.baseline import demo_baseline_status
 from product_platform.demo.models import (
     DemoBaselineStatusResponse,
@@ -329,6 +383,8 @@ from product_platform.policies.models import (
     PolicyAffectedResourcesResponse,
     PolicyExceptionCreateRequest,
     PolicyExceptionResponse,
+    PolicyEvaluationRequest,
+    PolicyEvaluationResponse,
     PolicyImportRequest,
     PolicyImportResponse,
     PolicyLintIssue,
@@ -345,6 +401,12 @@ from product_platform.policies.bindings import (
     policy_binding_response,
     policy_exception_response,
 )
+from product_platform.policies.evaluation_repository import (
+    PolicyEvaluationQuery,
+    PolicyEvaluationRepository,
+    policy_evaluation_response,
+)
+from product_platform.policies.evaluations import PolicyEvaluationAdapter
 from product_platform.policies.importer import prepare_policy_import
 from product_platform.policies.linting import lint_policy_body
 from product_platform.policies.repository import (
@@ -470,11 +532,18 @@ from product_platform.worker.api_models import (
 )
 from product_platform.worker.scheduler import JobScheduleRepository
 from product_platform.worker.store import JobStateRepository
-from product_platform.workflows.models import WorkflowDefinitionResponse
+from product_platform.workflows.models import (
+    WorkflowDefinitionResponse,
+    WorkflowInputValidationError,
+    WorkflowRunCreateRequest,
+    WorkflowRunResponse,
+)
 from product_platform.workflows.repository import (
     WorkflowRepository,
     workflow_definition_response,
+    workflow_run_response,
 )
+from product_platform.workflows.runner import WorkflowRunnerError, build_default_workflow_runner_registry
 
 
 def _request_context_from_request(request: Request) -> RequestContext:
@@ -707,6 +776,18 @@ def create_app(
         row = repository.get_job(job_id)
         return job_response(row, repository.runs_for_job(job_id))
 
+    def _artifact_repository(
+        connection: Any,
+        organization_id: str,
+        environment_id: str,
+    ) -> ArtifactRepository:
+        return ArtifactRepository(
+            connection,
+            organization_id,
+            environment_id,
+            LocalArtifactProvider(Path(resolved_settings.artifact_storage_path)),
+        )
+
     def _insert_job_audit_event(
         repository: AuditEventRepository,
         *,
@@ -740,6 +821,315 @@ def create_app(
             workflow_definition_response(row)
             for row in repository.list_definitions(enabled=enabled, workflow_type=workflow_type)
         ]
+
+    @app.post(
+        "/api/v1/workflows/{workflow_id}/runs",
+        response_model=WorkflowRunResponse,
+        status_code=201,
+        tags=["workflows"],
+    )
+    async def create_workflow_run(
+        workflow_id: str,
+        body: WorkflowRunCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> WorkflowRunResponse:
+        """Create and optionally execute a workflow run."""
+
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = WorkflowRepository(connection, organization_id)
+            definition = repository.get_definition(workflow_id)
+            if definition is None:
+                raise HTTPException(status_code=404, detail="Workflow not found.")
+            try:
+                run = repository.create_run(
+                    definition,
+                    environment_id=environment_id,
+                    inputs=body.inputs,
+                    started_by=current_user.id,
+                )
+            except WorkflowInputValidationError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            audit = AuditEventRepository(connection)
+            _insert_job_audit_event(
+                audit,
+                organization_id=organization_id,
+                environment_id=environment_id,
+                job_id=run["id"],
+                job_type=definition["workflow_type"],
+                status=run["status"],
+            )
+            if body.run_immediately:
+                started = repository.start_run(run["id"], environment_id=environment_id)
+                _insert_job_audit_event(
+                    audit,
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    job_id=started["id"],
+                    job_type=definition["workflow_type"],
+                    status=started["status"],
+                )
+                try:
+                    result = build_default_workflow_runner_registry().run(
+                        definition["command_ref"],
+                        body.inputs,
+                    )
+                except WorkflowRunnerError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                run = repository.complete_run(
+                    run["id"],
+                    environment_id=environment_id,
+                    result=result,
+                )
+                _insert_job_audit_event(
+                    audit,
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    job_id=run["id"],
+                    job_type=definition["workflow_type"],
+                    status=run["status"],
+                )
+            return workflow_run_response(repository, run)
+
+    @app.get(
+        "/api/v1/workflow-runs",
+        response_model=list[WorkflowRunResponse],
+        tags=["workflows"],
+    )
+    async def list_workflow_runs(
+        status: str | None = None,
+        workflow_definition_id: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[WorkflowRunResponse]:
+        """List workflow runs for the selected environment."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = WorkflowRepository(_audit_database().connect(), organization_id)
+        return [
+            workflow_run_response(repository, row)
+            for row in repository.list_runs(
+                environment_id=environment_id,
+                status=status,
+                workflow_definition_id=workflow_definition_id,
+                limit=limit,
+                offset=offset,
+            )
+        ]
+
+    @app.get(
+        "/api/v1/workflow-runs/{run_id}",
+        response_model=WorkflowRunResponse,
+        tags=["workflows"],
+    )
+    async def get_workflow_run(
+        run_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> WorkflowRunResponse:
+        """Get one workflow run with logs."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = WorkflowRepository(_audit_database().connect(), organization_id)
+        row = repository.get_run(run_id, environment_id=environment_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Workflow run not found.")
+        return workflow_run_response(repository, row)
+
+    @app.post(
+        "/api/v1/workflow-runs/{run_id}/cancel",
+        response_model=WorkflowRunResponse,
+        tags=["workflows"],
+    )
+    async def cancel_workflow_run(
+        run_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_CANCEL)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> WorkflowRunResponse:
+        """Cancel a queued workflow run."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = WorkflowRepository(connection, organization_id)
+                run = repository.cancel_run(run_id, environment_id=environment_id)
+                _insert_job_audit_event(
+                    AuditEventRepository(connection),
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    job_id=run["id"],
+                    job_type=run["workflow_type"],
+                    status=run["status"],
+                )
+                return workflow_run_response(repository, run)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/artifacts",
+        response_model=ArtifactResponse,
+        status_code=201,
+        tags=["artifacts"],
+    )
+    async def create_artifact(
+        body: ArtifactCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ArtifactResponse:
+        """Upload artifact content and persist metadata."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = _artifact_repository(connection, organization_id, environment_id)
+                row = repository.create(body, actor_id=current_user.id)
+                return artifact_response(repository, row)
+        except (ArtifactStorageError, ArtifactValidationError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/artifacts",
+        response_model=list[ArtifactResponse],
+        tags=["artifacts"],
+    )
+    async def list_artifacts(
+        artifact_type: str | None = Query(default=None),
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[ArtifactResponse]:
+        """List artifacts for the selected environment."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = _artifact_repository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        return [artifact_response(repository, row) for row in repository.list(artifact_type=artifact_type)]
+
+    @app.get(
+        "/api/v1/artifacts/{artifact_id}",
+        response_model=ArtifactResponse,
+        tags=["artifacts"],
+    )
+    async def get_artifact(
+        artifact_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ArtifactResponse:
+        """Get one artifact and its target links."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = _artifact_repository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        row = repository.get(artifact_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Artifact not found.")
+        return artifact_response(repository, row)
+
+    @app.get(
+        "/api/v1/artifacts/{artifact_id}/download",
+        response_model=ArtifactDownloadResponse,
+        tags=["artifacts"],
+    )
+    async def download_artifact(
+        artifact_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ArtifactDownloadResponse:
+        """Download artifact content as base64 with checksum verification metadata."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = _artifact_repository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        try:
+            return repository.download(artifact_id)
+        except ArtifactNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ArtifactStorageError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/artifacts/{artifact_id}/links",
+        response_model=ArtifactLinkResponse,
+        status_code=201,
+        tags=["artifacts"],
+    )
+    async def create_artifact_link(
+        artifact_id: str,
+        body: ArtifactLinkCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ArtifactLinkResponse:
+        """Attach an artifact to a workflow, audit, compliance, evidence, or plugin target."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = _artifact_repository(connection, organization_id, environment_id)
+                row = repository.create_link(artifact_id, body)
+                return artifact_link_response(row)
+        except ArtifactNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ArtifactValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/artifacts/{artifact_id}/attest",
+        response_model=ArtifactAttestationResponse,
+        status_code=201,
+        tags=["artifacts"],
+    )
+    async def attest_artifact(
+        artifact_id: str,
+        body: ArtifactAttestationCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AUDIT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ArtifactAttestationResponse:
+        """Attest an artifact with a signer statement and optional signature reference."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = _artifact_repository(connection, organization_id, environment_id)
+                artifact = repository.get(artifact_id)
+                if artifact is None:
+                    raise ArtifactNotFoundError("Artifact not found.")
+                row = repository.create_attestation(artifact_id, body, actor_id=current_user.id)
+                AuditEventRepository(connection).insert(
+                    AuditEventEnvelope(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        event_type="artifact.attested",
+                        source_component="artifact-store",
+                        actor_type="user",
+                        actor_id=current_user.id,
+                        resource_type="artifact",
+                        resource_id=artifact_id,
+                        decision="attested",
+                        severity="info",
+                        payload_json={
+                            "attestation_id": row["id"],
+                            "artifact_type": artifact["artifact_type"],
+                            "checksum": artifact["checksum"],
+                            "signature_ref": row["signature_ref"],
+                        },
+                    )
+                )
+                return artifact_attestation_response(row)
+        except ArtifactNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get(
         "/api/v1/demo/scenarios",
@@ -1154,6 +1544,169 @@ def create_app(
             correlation_id=correlation_id,
             payload_json=payload,
         )
+
+    def _policy_evaluation_audit_event(
+        *,
+        evaluation: PolicyEvaluationResponse,
+        actor_id: str,
+    ) -> AuditEventEnvelope:
+        payload = {
+            "evaluation_id": evaluation.id,
+            "policy_id": evaluation.policy_id,
+            "policy_version_id": evaluation.policy_version_id,
+            "binding_id": evaluation.binding_id,
+            "binding_mode": evaluation.binding_mode,
+            "target_type": evaluation.target_type,
+            "target_id": evaluation.target_id,
+            "action": evaluation.action,
+            "resource_type": evaluation.resource_type,
+            "resource_id": evaluation.resource_id,
+            "matched_rule": evaluation.matched_rule,
+            "reason": evaluation.reason,
+            "latency_ms": evaluation.latency_ms,
+            "mode": evaluation.mode,
+            "backend": evaluation.backend,
+            "error": evaluation.error,
+        }
+        return AuditEventEnvelope(
+            organization_id=evaluation.organization_id,
+            environment_id=evaluation.environment_id,
+            event_type="policy.decision",
+            source_component="policy-engine",
+            actor_type="user",
+            actor_id=actor_id,
+            agent_id=evaluation.agent_id,
+            resource_type="policy_evaluation",
+            resource_id=evaluation.id,
+            decision=evaluation.decision,
+            severity="warning" if evaluation.decision == "deny" or evaluation.error else "info",
+            correlation_id=evaluation.correlation_id,
+            policy_id=evaluation.policy_id,
+            policy_version_id=evaluation.policy_version_id,
+            payload_json=payload,
+        )
+
+    def _record_mcp_policy_evaluation(
+        *,
+        connection: Any,
+        organization_id: str,
+        environment_id: str,
+        call: MCPToolCallResponse,
+    ) -> None:
+        try:
+            matched_policy_ref = call.matched_policy_id
+            policy_id = matched_policy_ref
+            if policy_id and PolicyRepository(connection, organization_id).get_policy(policy_id) is None:
+                policy_id = None
+            PolicyEvaluationRepository(connection).create(
+                PolicyEvaluationResponse(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    policy_id=policy_id,
+                    policy_version_id=call.matched_policy_version_id if policy_id else None,
+                    agent_id=call.source_agent_id,
+                    target_type="mcp-tool",
+                    target_id=call.tool_id,
+                    action="mcp.tool_call",
+                    resource_type="mcp-tool",
+                    resource_id=call.tool_id,
+                    context={
+                        "tool_call_id": call.id,
+                        "server_id": call.server_id,
+                        "server_name": call.server_name,
+                        "tool_id": call.tool_id,
+                        "tool_name": call.tool_name,
+                        "source_agent_id": call.source_agent_id,
+                        "source_agent_name": call.source_agent_name,
+                        "params_summary": call.params_summary,
+                        "gateway_stage": call.gateway_stage,
+                        "matched_policy_ref": matched_policy_ref,
+                        "trust_threshold_id": call.trust_threshold_id,
+                        "trust_score": call.trust_score,
+                        "sanitizer_action": call.sanitizer_action,
+                    },
+                    decision=_policy_feed_decision(call.decision),
+                    policy_action=call.decision,
+                    matched_rule=call.gateway_stage,
+                    reason=call.reason,
+                    latency_ms=float(call.latency_ms),
+                    mode="live",
+                    correlation_id=call.correlation_id,
+                    backend="mcp-proxy",
+                    audit_preview={
+                        "event_type": f"mcp.proxy.call.{call.decision}",
+                        "resource_type": "mcp_tool_call",
+                        "resource_id": call.id,
+                    },
+                )
+            )
+        except Exception:
+            return
+
+    def _record_runtime_policy_evaluation(
+        *,
+        connection: Any,
+        organization_id: str,
+        environment_id: str,
+        action: RuntimeActionResponse,
+    ) -> None:
+        try:
+            ring_decision = action.ring_decision
+            context = {
+                "runtime_action_id": action.id,
+                "session_id": action.session_id,
+                "action_name": action.action_name,
+                "required_ring": action.required_ring,
+            }
+            agent_id = None
+            matched_rule = None
+            if ring_decision is not None:
+                agent_id = ring_decision.agent_id
+                matched_rule = f"ring:{ring_decision.required_ring}"
+                context.update(
+                    {
+                        "agent_id": ring_decision.agent_id,
+                        "agent_trust_score": ring_decision.agent_trust_score,
+                        "assigned_ring": ring_decision.assigned_ring,
+                        "required_ring": ring_decision.required_ring,
+                    }
+                )
+            PolicyEvaluationRepository(connection).create(
+                PolicyEvaluationResponse(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    agent_id=agent_id,
+                    target_type="runtime-action",
+                    target_id=action.action_name,
+                    action=action.action_name,
+                    resource_type=action.resource_type,
+                    resource_id=action.id,
+                    context=context,
+                    decision=_policy_feed_decision(action.decision),
+                    policy_action=action.decision,
+                    matched_rule=matched_rule,
+                    reason=action.reason,
+                    latency_ms=float(action.latency_ms),
+                    mode="live",
+                    correlation_id=action.correlation_id,
+                    backend="runtime-ring",
+                    audit_preview={
+                        "event_type": "runtime.action",
+                        "resource_type": "runtime_action",
+                        "resource_id": action.id,
+                    },
+                )
+            )
+        except Exception:
+            return
+
+    def _policy_feed_decision(decision: str) -> str:
+        normalized = decision.strip().lower()
+        if normalized in {"allowed", "allow", "audit"}:
+            return "allow"
+        if normalized in {"denied", "deny", "blocked", "block"}:
+            return "deny"
+        return normalized
 
     def _trust_card_audit_event(
         *,
@@ -1908,6 +2461,9 @@ def create_app(
     @app.get("/api/v1/audit/events", response_model=list[AuditEventEnvelope], tags=["audit"])
     async def list_audit_events(
         event_type: str | None = None,
+        source_component: str | None = None,
+        actor_type: str | None = None,
+        actor_id: str | None = None,
         agent_id: str | None = None,
         decision: str | None = None,
         severity: str | None = None,
@@ -1929,6 +2485,9 @@ def create_app(
             AuditEventQuery(
                 organization_id=current_user.organization_id,
                 event_type=event_type,
+                source_component=source_component,
+                actor_type=actor_type,
+                actor_id=actor_id,
                 agent_id=agent_id,
                 decision=decision,
                 severity=severity,
@@ -1942,6 +2501,26 @@ def create_app(
                 offset=offset,
             )
         )
+
+    @app.post(
+        "/api/v1/audit/export",
+        response_model=AuditExportResponse,
+        status_code=201,
+        tags=["audit"],
+    )
+    async def export_audit_events(
+        body: AuditExportRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AUDIT_READ)),
+    ) -> AuditExportResponse:
+        """Persist audit export metadata for compliance evidence workflows."""
+
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            row = AuditExportRepository(connection, organization_id).create(
+                body,
+                actor_id=current_user.id,
+            )
+            return audit_export_response(row)
 
     @app.get("/api/v1/audit/events/stream", tags=["audit"])
     async def stream_audit_events(
@@ -2449,6 +3028,488 @@ def create_app(
             policy_exception_response(row)
             for row in repository.list_exceptions(binding_id=binding_id)
         ]
+
+    @app.post(
+        "/api/v1/policy-evaluations/simulate",
+        response_model=PolicyEvaluationResponse,
+        status_code=201,
+        tags=["policies"],
+    )
+    async def simulate_policy_evaluation(
+        body: PolicyEvaluationRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> PolicyEvaluationResponse:
+        """Evaluate policy behavior in simulator mode and persist the result."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        simulate_body = body.model_copy(update={"mode": "simulate"})
+        with _audit_database().transaction() as connection:
+            evaluation = PolicyEvaluationAdapter(
+                connection,
+                organization_id,
+                environment_id,
+            ).evaluate(simulate_body, correlation_id=context.correlation_id)
+            row = PolicyEvaluationRepository(connection).create(evaluation)
+            return policy_evaluation_response(row)
+
+    @app.post(
+        "/api/v1/policy-evaluations/evaluate",
+        response_model=PolicyEvaluationResponse,
+        status_code=201,
+        tags=["policies"],
+    )
+    async def evaluate_policy_live(
+        body: PolicyEvaluationRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> PolicyEvaluationResponse:
+        """Evaluate policy behavior in live mode, persist it, and emit audit history."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        live_body = body.model_copy(update={"mode": "live"})
+        with _audit_database().transaction() as connection:
+            repository = PolicyEvaluationRepository(connection)
+            audit_repository = AuditEventRepository(connection)
+            evaluation = PolicyEvaluationAdapter(
+                connection,
+                organization_id,
+                environment_id,
+            ).evaluate(live_body, correlation_id=context.correlation_id)
+            row = repository.create(evaluation)
+            persisted = policy_evaluation_response(row)
+            audit_repository.insert(
+                _policy_evaluation_audit_event(
+                    evaluation=persisted,
+                    actor_id=current_user.id,
+                )
+            )
+            return persisted
+
+    @app.get(
+        "/api/v1/policy-evaluations",
+        response_model=list[PolicyEvaluationResponse],
+        tags=["policies"],
+    )
+    async def list_policy_evaluations(
+        decision: str | None = None,
+        mode: str | None = None,
+        agent_id: str | None = None,
+        action: str | None = None,
+        policy_id: str | None = None,
+        correlation_id: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[PolicyEvaluationResponse]:
+        """List policy evaluation feed rows for the selected environment."""
+
+        organization_id = _require_organization_id(current_user)
+        rows = PolicyEvaluationRepository(_audit_database().connect()).list(
+            PolicyEvaluationQuery(
+                organization_id=organization_id,
+                environment_id=environment_id,
+                decision=decision,
+                mode=mode,
+                agent_id=agent_id,
+                action=action,
+                policy_id=policy_id,
+                correlation_id=correlation_id,
+                limit=limit,
+                offset=offset,
+            )
+        )
+        return [policy_evaluation_response(row) for row in rows]
+
+    @app.get(
+        "/api/v1/policy-evaluations/{evaluation_id}",
+        response_model=PolicyEvaluationResponse,
+        tags=["policies"],
+    )
+    async def get_policy_evaluation(
+        evaluation_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> PolicyEvaluationResponse:
+        """Get one policy evaluation row in the selected environment."""
+
+        organization_id = _require_organization_id(current_user)
+        row = PolicyEvaluationRepository(_audit_database().connect()).get(
+            evaluation_id,
+            organization_id,
+            environment_id,
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="Policy evaluation not found.")
+        return policy_evaluation_response(row)
+
+    @app.get(
+        "/api/v1/compliance/frameworks",
+        response_model=list[ComplianceFrameworkResponse],
+        tags=["compliance"],
+    )
+    async def list_compliance_frameworks(
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[ComplianceFrameworkResponse]:
+        """List compliance frameworks for the current organization."""
+
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ComplianceRepository(connection, organization_id, environment_id)
+            return [framework_response(row) for row in repository.list_frameworks()]
+
+    @app.post(
+        "/api/v1/compliance/frameworks",
+        response_model=ComplianceFrameworkResponse,
+        status_code=201,
+        tags=["compliance"],
+    )
+    async def create_compliance_framework(
+        body: ComplianceFrameworkCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AUDIT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ComplianceFrameworkResponse:
+        """Create a custom compliance framework for the current organization."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = ComplianceRepository(connection, organization_id, environment_id)
+                return framework_response(repository.create_framework(body))
+        except DuplicateComplianceResourceError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/compliance/controls",
+        response_model=list[ComplianceControlResponse],
+        tags=["compliance"],
+    )
+    async def list_compliance_controls(
+        framework_id: str | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[ComplianceControlResponse]:
+        """List compliance controls and required evidence types."""
+
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ComplianceRepository(connection, organization_id, environment_id)
+            return [
+                control_response(row)
+                for row in repository.list_controls(framework_id=framework_id)
+            ]
+
+    @app.post(
+        "/api/v1/compliance/control-mappings",
+        response_model=ControlMappingResponse,
+        status_code=201,
+        tags=["compliance"],
+    )
+    async def create_compliance_control_mapping(
+        body: ControlMappingCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AUDIT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ControlMappingResponse:
+        """Create an audit-event-to-control mapping."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = ComplianceRepository(connection, organization_id, environment_id)
+                return control_mapping_response(repository.create_mapping(body))
+        except ComplianceResourceNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except DuplicateComplianceResourceError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/compliance/evidence",
+        response_model=list[EvidenceItemResponse],
+        tags=["compliance"],
+    )
+    async def list_compliance_evidence(
+        control_id: str | None = None,
+        status: str | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[EvidenceItemResponse]:
+        """List evidence items for the selected environment."""
+
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ComplianceRepository(connection, organization_id, environment_id)
+            return [
+                evidence_response(row)
+                for row in repository.list_evidence(control_id=control_id, status=status)
+            ]
+
+    @app.post(
+        "/api/v1/compliance/evidence/recompute",
+        response_model=EvidenceRecomputeResponse,
+        status_code=201,
+        tags=["compliance"],
+    )
+    async def recompute_compliance_evidence(
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> EvidenceRecomputeResponse:
+        """Refresh mapped compliance evidence from current audit history."""
+
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ComplianceRepository(connection, organization_id, environment_id)
+            return repository.recompute_evidence()
+
+    @app.get(
+        "/api/v1/compliance/violations",
+        response_model=list[ComplianceViolationResponse],
+        tags=["compliance"],
+    )
+    async def list_compliance_violations(
+        status: str | None = None,
+        severity: str | None = None,
+        control_id: str | None = None,
+        agent_id: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[ComplianceViolationResponse]:
+        """List compliance violations in the selected environment."""
+
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ComplianceRepository(connection, organization_id, environment_id)
+            return [
+                violation_response(row)
+                for row in repository.list_violations(
+                    status=status,
+                    severity=severity,
+                    control_id=control_id,
+                    agent_id=agent_id,
+                    limit=limit,
+                    offset=offset,
+                )
+            ]
+
+    @app.patch(
+        "/api/v1/compliance/violations/{violation_id}",
+        response_model=ComplianceViolationResponse,
+        tags=["compliance"],
+    )
+    async def patch_compliance_violation(
+        violation_id: str,
+        body: ComplianceViolationPatchRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AUDIT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ComplianceViolationResponse:
+        """Acknowledge or resolve a compliance violation."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = ComplianceRepository(connection, organization_id, environment_id)
+                row = repository.update_violation(violation_id, body, actor_id=current_user.id)
+                AuditEventRepository(connection).insert(
+                    AuditEventEnvelope(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        event_type=f"compliance.violation.{row['status']}",
+                        source_component="compliance",
+                        actor_type="user",
+                        actor_id=current_user.id,
+                        agent_id=row["agent_id"],
+                        resource_type="compliance_violation",
+                        resource_id=row["id"],
+                        decision=row["status"],
+                        severity=row["severity"],
+                        payload_json={
+                            "control_id": row["control_id"],
+                            "source_type": row["source_type"],
+                            "source_id": row["source_id"],
+                            "reason": body.reason,
+                        },
+                    )
+                )
+                return violation_response(row)
+        except ComplianceViolationNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ComplianceViolationStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/compliance/reports",
+        response_model=ComplianceReportResponse,
+        status_code=201,
+        tags=["compliance"],
+    )
+    async def create_compliance_report(
+        body: ComplianceReportCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AUDIT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ComplianceReportResponse:
+        """Create a draft compliance report."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = ComplianceRepository(connection, organization_id, environment_id)
+                return report_response(
+                    repository,
+                    repository.create_report(body, actor_id=current_user.id),
+                )
+        except ComplianceResourceNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/compliance/reports",
+        response_model=list[ComplianceReportResponse],
+        tags=["compliance"],
+    )
+    async def list_compliance_reports(
+        status: str | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[ComplianceReportResponse]:
+        """List compliance reports."""
+
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ComplianceRepository(connection, organization_id, environment_id)
+            return [report_response(repository, row) for row in repository.list_reports(status=status)]
+
+    @app.get(
+        "/api/v1/compliance/reports/{report_id}",
+        response_model=ComplianceReportResponse,
+        tags=["compliance"],
+    )
+    async def get_compliance_report(
+        report_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ComplianceReportResponse:
+        """Get a compliance report."""
+
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ComplianceRepository(connection, organization_id, environment_id)
+            row = repository.get_report(report_id)
+            if row is None:
+                raise HTTPException(status_code=404, detail="Compliance report not found.")
+            return report_response(repository, row)
+
+    @app.post(
+        "/api/v1/compliance/reports/{report_id}/generate",
+        response_model=ComplianceReportResponse,
+        tags=["compliance"],
+    )
+    async def generate_compliance_report(
+        report_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ComplianceReportResponse:
+        """Generate report content from current evidence and violations."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = ComplianceRepository(connection, organization_id, environment_id)
+                row = repository.generate_report(report_id, actor_id=current_user.id)
+                AuditEventRepository(connection).insert(
+                    AuditEventEnvelope(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        event_type="compliance.report.generated",
+                        source_component="compliance",
+                        actor_type="user",
+                        actor_id=current_user.id,
+                        resource_type="compliance_report",
+                        resource_id=row["id"],
+                        decision="generated",
+                        severity="info",
+                        payload_json={
+                            "framework_id": row["framework_id"],
+                            "artifact_uri": row["artifact_uri"],
+                        },
+                    )
+                )
+                return report_response(repository, row)
+        except ComplianceReportNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/compliance/reports/{report_id}/download",
+        tags=["compliance"],
+    )
+    async def download_compliance_report(
+        report_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> Response:
+        """Download generated Markdown report content."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                markdown = ComplianceRepository(
+                    connection,
+                    organization_id,
+                    environment_id,
+                ).report_markdown(report_id)
+                return Response(content=markdown, media_type="text/markdown")
+        except ComplianceReportNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ComplianceReportValidationError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/compliance/reports/{report_id}/attest",
+        response_model=ComplianceReportAttestationResponse,
+        status_code=201,
+        tags=["compliance"],
+    )
+    async def attest_compliance_report(
+        report_id: str,
+        body: ComplianceReportAttestationRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AUDIT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ComplianceReportAttestationResponse:
+        """Attest a generated compliance report."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = ComplianceRepository(connection, organization_id, environment_id)
+                row = repository.attest_report(report_id, body, actor_id=current_user.id)
+                AuditEventRepository(connection).insert(
+                    AuditEventEnvelope(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        event_type="compliance.report.attested",
+                        source_component="compliance",
+                        actor_type="user",
+                        actor_id=current_user.id,
+                        resource_type="compliance_report",
+                        resource_id=report_id,
+                        decision="attested",
+                        severity="info",
+                        payload_json={
+                            "attestation_id": row["id"],
+                            "signature_ref": row["signature_ref"],
+                        },
+                    )
+                )
+                return report_attestation_response(row)
+        except ComplianceReportNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ComplianceReportValidationError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get(
         "/api/v1/trust/scores",
@@ -3671,6 +4732,12 @@ def create_app(
                             correlation_id=context.correlation_id,
                         )
                     )
+                _record_mcp_policy_evaluation(
+                    connection=connection,
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    call=response,
+                )
                 return response
         except MCPProxyReferenceError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -4970,6 +6037,12 @@ def create_app(
                         action=action,
                         correlation_id=context.correlation_id,
                     )
+                )
+                _record_runtime_policy_evaluation(
+                    connection=connection,
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    action=action,
                 )
                 return action
         except RuntimeSessionNotFoundError as exc:

@@ -211,6 +211,14 @@ export function createApiClient({
         body
       }),
     listPolicyExceptions: (params = {}) => request(`/policy-exceptions${queryString(params)}`),
+    simulatePolicyEvaluation: (body) =>
+      request("/policy-evaluations/simulate", { method: "POST", body }),
+    evaluatePolicy: (body) =>
+      request("/policy-evaluations/evaluate", { method: "POST", body }),
+    listPolicyEvaluations: (params = {}) =>
+      request(`/policy-evaluations${queryString(params)}`),
+    getPolicyEvaluation: (evaluationId) =>
+      request(`/policy-evaluations/${encodeURIComponent(evaluationId)}`),
     listTrustScores: () => request("/trust/scores"),
     getTrustScore: (agentId) => request(`/trust/scores/${encodeURIComponent(agentId)}`),
     listTrustEvents: (params = {}) => request(`/trust/events${queryString(params)}`),
@@ -529,7 +537,67 @@ export function createApiClient({
         }
       }
       return request(`/audit/events${search.size > 0 ? `?${search.toString()}` : ""}`);
-    }
+    },
+    exportAuditEvents: (body) => request("/audit/export", { method: "POST", body }),
+    listComplianceFrameworks: () => request("/compliance/frameworks"),
+    createComplianceFramework: (body) =>
+      request("/compliance/frameworks", { method: "POST", body }),
+    listComplianceControls: (params = {}) =>
+      request(`/compliance/controls${queryString(params)}`),
+    createComplianceControlMapping: (body) =>
+      request("/compliance/control-mappings", { method: "POST", body }),
+    listComplianceEvidence: (params = {}) =>
+      request(`/compliance/evidence${queryString(params)}`),
+    recomputeComplianceEvidence: () =>
+      request("/compliance/evidence/recompute", { method: "POST" }),
+    listComplianceViolations: (params = {}) =>
+      request(`/compliance/violations${queryString(params)}`),
+    patchComplianceViolation: (violationId, body) =>
+      request(`/compliance/violations/${encodeURIComponent(violationId)}`, {
+        method: "PATCH",
+        body
+      }),
+    createComplianceReport: (body) => request("/compliance/reports", { method: "POST", body }),
+    listComplianceReports: (params = {}) =>
+      request(`/compliance/reports${queryString(params)}`),
+    getComplianceReport: (reportId) =>
+      request(`/compliance/reports/${encodeURIComponent(reportId)}`),
+    generateComplianceReport: (reportId) =>
+      request(`/compliance/reports/${encodeURIComponent(reportId)}/generate`, {
+        method: "POST"
+      }),
+    downloadComplianceReport: (reportId) =>
+      request(`/compliance/reports/${encodeURIComponent(reportId)}/download`),
+    attestComplianceReport: (reportId, body) =>
+      request(`/compliance/reports/${encodeURIComponent(reportId)}/attest`, {
+        method: "POST",
+        body
+      }),
+    listWorkflows: (params = {}) => request(`/workflows${queryString(params)}`),
+    createWorkflowRun: (workflowId, body) =>
+      request(`/workflows/${encodeURIComponent(workflowId)}/runs`, {
+        method: "POST",
+        body
+      }),
+    listWorkflowRuns: (params = {}) => request(`/workflow-runs${queryString(params)}`),
+    getWorkflowRun: (runId) => request(`/workflow-runs/${encodeURIComponent(runId)}`),
+    cancelWorkflowRun: (runId) =>
+      request(`/workflow-runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),
+    createArtifact: (body) => request("/artifacts", { method: "POST", body }),
+    listArtifacts: (params = {}) => request(`/artifacts${queryString(params)}`),
+    getArtifact: (artifactId) => request(`/artifacts/${encodeURIComponent(artifactId)}`),
+    downloadArtifact: (artifactId) =>
+      request(`/artifacts/${encodeURIComponent(artifactId)}/download`),
+    createArtifactLink: (artifactId, body) =>
+      request(`/artifacts/${encodeURIComponent(artifactId)}/links`, {
+        method: "POST",
+        body
+      }),
+    attestArtifact: (artifactId, body) =>
+      request(`/artifacts/${encodeURIComponent(artifactId)}/attest`, {
+        method: "POST",
+        body
+      })
   };
 }
 

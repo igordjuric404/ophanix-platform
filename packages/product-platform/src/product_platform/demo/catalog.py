@@ -36,7 +36,7 @@ CUSTOMER_SUPPORT_REFUND_SCENARIO: dict[str, Any] = {
         },
         {
             "key": "database",
-            "label": "SQLite/PostgreSQL database",
+            "label": "SQLite database",
             "required": True,
             "health_endpoint": "/ready",
             "evidence_route": "/settings",

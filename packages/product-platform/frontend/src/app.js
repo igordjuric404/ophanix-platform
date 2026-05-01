@@ -62,8 +62,24 @@ import {
   renderIncidentDetail
 } from "./observability.js";
 import {
+  auditEventFilterParamsFromForm,
+  auditExportPayloadFromForm,
+  complianceEvidenceFilterParamsFromForm,
+  complianceReportAttestationPayloadFromForm,
+  complianceReportPayloadFromForm,
+  complianceViolationFilterParamsFromForm,
+  complianceViolationPatchPayloadFromForm
+} from "./compliance.js";
+import {
+  artifactAttestationPayloadFromForm,
+  artifactUploadPayloadFromForm,
+  workflowRunPayloadFromForm
+} from "./workflows.js";
+import {
   policyBindingPayloadFromForm,
   policyEditorPayloadFromForm,
+  policyEvaluationFilterParamsFromForm,
+  policyEvaluationPayloadFromForm,
   policyExceptionPayloadFromForm,
   policyFilterParamsFromForm,
   policyImportPayloadFromForm,
@@ -159,11 +175,12 @@ async function refreshDiscoveryWorkspace(root, apiClient, selectedRunId = null) 
 }
 
 async function loadPolicyState(apiClient, selectedPolicyId = null) {
-  const [policies, policyBindings, policyExceptions, agents] = await Promise.all([
+  const [policies, policyBindings, policyExceptions, agents, policyEvaluations] = await Promise.all([
     apiClient.listPolicies(),
     apiClient.listPolicyBindings(),
     apiClient.listPolicyExceptions(),
-    apiClient.listAgents()
+    apiClient.listAgents(),
+    apiClient.listPolicyEvaluations()
   ]);
   const policyId = selectedPolicyId ?? policies[0]?.id ?? null;
   const selectedPolicy = policyId ? await apiClient.getPolicy(policyId) : null;
@@ -180,12 +197,75 @@ async function loadPolicyState(apiClient, selectedPolicyId = null) {
     policyAffectedResources,
     policyBindings,
     policyExceptions,
+    policyEvaluations,
     policyBindingTargets: { agents }
   };
 }
 
 async function refreshPolicyWorkspace(root, apiClient, selectedPolicyId = null) {
   appState = await loadPolicyState(apiClient, selectedPolicyId);
+  mount(root, appState);
+}
+
+async function loadComplianceState(
+  apiClient,
+  auditFilters = {},
+  evidenceFilters = {},
+  violationFilters = {}
+) {
+  const [
+    complianceAuditEvents,
+    complianceFrameworks,
+    complianceControls,
+    complianceEvidence,
+    complianceViolations,
+    complianceReports
+  ] = await Promise.all([
+    apiClient.listAuditEvents(auditFilters),
+    apiClient.listComplianceFrameworks(),
+    apiClient.listComplianceControls(),
+    apiClient.listComplianceEvidence(evidenceFilters),
+    apiClient.listComplianceViolations(violationFilters),
+    apiClient.listComplianceReports()
+  ]);
+  const selectedComplianceAuditEvent = complianceAuditEvents[0] ?? null;
+  const selectedReportId = appState.selectedComplianceReport?.id ?? null;
+  const selectedComplianceReport =
+    complianceReports.find((report) => report.id === selectedReportId) ?? complianceReports[0] ?? null;
+  const [complianceAuditVerification, complianceRelatedAuditEvents] = selectedComplianceAuditEvent
+    ? await Promise.all([
+        apiClient.verifyAuditEvent(selectedComplianceAuditEvent.id),
+        selectedComplianceAuditEvent.correlation_id
+          ? apiClient.listAuditEvents({ correlation_id: selectedComplianceAuditEvent.correlation_id })
+          : Promise.resolve([])
+      ])
+    : [null, []];
+  return {
+    ...appState,
+    complianceAuditEvents,
+    complianceAuditFilters: auditFilters,
+    selectedComplianceAuditEvent,
+    complianceAuditVerification,
+    complianceRelatedAuditEvents,
+    complianceFrameworks,
+    complianceControls,
+    complianceEvidence,
+    complianceEvidenceFilters: evidenceFilters,
+    complianceViolations,
+    complianceViolationFilters: violationFilters,
+    complianceReports,
+    selectedComplianceReport
+  };
+}
+
+async function refreshComplianceWorkspace(
+  root,
+  apiClient,
+  auditFilters = {},
+  evidenceFilters = {},
+  violationFilters = {}
+) {
+  appState = await loadComplianceState(apiClient, auditFilters, evidenceFilters, violationFilters);
   mount(root, appState);
 }
 
@@ -487,6 +567,52 @@ async function refreshDemoWorkspace(
   mount(root, appState);
 }
 
+async function loadWorkflowState(
+  apiClient,
+  selectedRunId = appState.selectedWorkflowRun?.id ?? null,
+  selectedArtifactId = appState.selectedArtifact?.id ?? null
+) {
+  const [workflowDefinitions, workflowRuns, workflowArtifacts] = await Promise.all([
+    apiClient.listWorkflows(),
+    apiClient.listWorkflowRuns(),
+    apiClient.listArtifacts()
+  ]);
+  const selectedWorkflowId = appState.selectedWorkflowDefinition?.id ?? workflowDefinitions[0]?.id ?? null;
+  const selectedWorkflowDefinition =
+    workflowDefinitions.find((workflow) => workflow.id === selectedWorkflowId) ??
+    workflowDefinitions[0] ??
+    null;
+  const runId = selectedRunId ?? workflowRuns[0]?.id ?? null;
+  const selectedWorkflowRun = runId ? await apiClient.getWorkflowRun(runId) : null;
+  const artifactId = selectedArtifactId ?? workflowArtifacts[0]?.id ?? null;
+  const selectedArtifact = artifactId ? await apiClient.getArtifact(artifactId) : null;
+  return {
+    ...appState,
+    workflowDefinitions,
+    selectedWorkflowDefinition,
+    workflowRuns: selectedWorkflowRun
+      ? workflowRuns.map((run) => (run.id === selectedWorkflowRun.id ? selectedWorkflowRun : run))
+      : workflowRuns,
+    selectedWorkflowRun,
+    workflowArtifacts: selectedArtifact
+      ? workflowArtifacts.map((artifact) =>
+          artifact.id === selectedArtifact.id ? selectedArtifact : artifact
+        )
+      : workflowArtifacts,
+    selectedArtifact
+  };
+}
+
+async function refreshWorkflowWorkspace(
+  root,
+  apiClient,
+  selectedRunId = appState.selectedWorkflowRun?.id ?? null,
+  selectedArtifactId = appState.selectedArtifact?.id ?? null
+) {
+  appState = await loadWorkflowState(apiClient, selectedRunId, selectedArtifactId);
+  mount(root, appState);
+}
+
 export function installNavigation(root = document.getElementById("app"), apiClient = null) {
   document.addEventListener("click", async (event) => {
     const link = event.target.closest("[data-route]");
@@ -520,6 +646,9 @@ export function installNavigation(root = document.getElementById("app"), apiClie
     if (apiClient && normalizePath(targetPath) === "/observability") {
       await refreshObservabilityWorkspace(root, apiClient);
     }
+    if (apiClient && normalizePath(targetPath) === "/compliance") {
+      await refreshComplianceWorkspace(root, apiClient);
+    }
     if (apiClient && normalizePath(targetPath) === "/integrations") {
       await refreshIntegrationsWorkspace(root, apiClient);
     }
@@ -528,6 +657,9 @@ export function installNavigation(root = document.getElementById("app"), apiClie
     }
     if (apiClient && normalizePath(targetPath) === "/demo-lab") {
       await refreshDemoWorkspace(root, apiClient);
+    }
+    if (apiClient && normalizePath(targetPath) === "/workflows") {
+      await refreshWorkflowWorkspace(root, apiClient);
     }
   });
   document.addEventListener("change", (event) => {
@@ -551,6 +683,84 @@ export function installNavigation(root = document.getElementById("app"), apiClie
       return;
     }
     appState = withDrawer(appState, backDrawer(appState.drawer));
+    mount(root, appState);
+  });
+  document.addEventListener("click", async (event) => {
+    const workflowButton = event.target.closest("[data-workflow-open]");
+    if (!workflowButton) {
+      return;
+    }
+    const workflowId = workflowButton.getAttribute("data-workflow-open");
+    const selectedWorkflowDefinition =
+      appState.workflowDefinitions?.find((workflow) => workflow.id === workflowId) ?? null;
+    if (!selectedWorkflowDefinition) {
+      return;
+    }
+    appState = {
+      ...appState,
+      selectedWorkflowDefinition,
+      workflowRunError: null,
+      workflowRunResult: null
+    };
+    mount(root, appState);
+  });
+  document.addEventListener("click", async (event) => {
+    const runOpenButton = event.target.closest("[data-workflow-run-open]");
+    if (!runOpenButton || !apiClient) {
+      return;
+    }
+    const runId = runOpenButton.getAttribute("data-workflow-run-open");
+    if (!runId) {
+      return;
+    }
+    appState = {
+      ...appState,
+      selectedWorkflowRun: await apiClient.getWorkflowRun(runId)
+    };
+    mount(root, appState);
+  });
+  document.addEventListener("click", async (event) => {
+    const cancelButton = event.target.closest("[data-workflow-run-cancel]");
+    if (!cancelButton || !apiClient) {
+      return;
+    }
+    const runId = cancelButton.getAttribute("data-workflow-run-cancel");
+    if (!runId) {
+      return;
+    }
+    await apiClient.cancelWorkflowRun(runId);
+    await refreshWorkflowWorkspace(root, apiClient, runId, appState.selectedArtifact?.id ?? null);
+  });
+  document.addEventListener("click", async (event) => {
+    const artifactOpenButton = event.target.closest("[data-workflow-artifact-open]");
+    if (!artifactOpenButton || !apiClient) {
+      return;
+    }
+    const artifactId = artifactOpenButton.getAttribute("data-workflow-artifact-open");
+    if (!artifactId) {
+      return;
+    }
+    appState = {
+      ...appState,
+      selectedArtifact: await apiClient.getArtifact(artifactId),
+      workflowArtifactDownload: null,
+      workflowArtifactAttestationError: null
+    };
+    mount(root, appState);
+  });
+  document.addEventListener("click", async (event) => {
+    const artifactDownloadButton = event.target.closest("[data-workflow-artifact-download]");
+    if (!artifactDownloadButton || !apiClient) {
+      return;
+    }
+    const artifactId = artifactDownloadButton.getAttribute("data-workflow-artifact-download");
+    if (!artifactId) {
+      return;
+    }
+    appState = {
+      ...appState,
+      workflowArtifactDownload: await apiClient.downloadArtifact(artifactId)
+    };
     mount(root, appState);
   });
   document.addEventListener("click", async (event) => {
@@ -694,6 +904,61 @@ export function installNavigation(root = document.getElementById("app"), apiClie
     await refreshPolicyWorkspace(root, apiClient, appState.selectedPolicy?.id ?? null);
   });
   document.addEventListener("click", async (event) => {
+    const openEvaluationButton = event.target.closest("[data-policy-evaluation-open]");
+    if (!openEvaluationButton || !apiClient) {
+      return;
+    }
+    const evaluationId = openEvaluationButton.getAttribute("data-policy-evaluation-open");
+    if (!evaluationId) {
+      return;
+    }
+    appState = {
+      ...appState,
+      selectedPolicyEvaluation: await apiClient.getPolicyEvaluation(evaluationId)
+    };
+    mount(root, appState);
+  });
+  document.addEventListener("click", async (event) => {
+    const auditOpenButton = event.target.closest("[data-compliance-audit-open]");
+    if (!auditOpenButton || !apiClient) {
+      const violationAckButton = event.target.closest("[data-compliance-violation-ack]");
+      if (!violationAckButton || !apiClient) {
+        return;
+      }
+      const violationId = violationAckButton.getAttribute("data-compliance-violation-ack");
+      if (!violationId) {
+        return;
+      }
+      await apiClient.patchComplianceViolation(violationId, { status: "acknowledged" });
+      await refreshComplianceWorkspace(
+        root,
+        apiClient,
+        appState.complianceAuditFilters ?? {},
+        appState.complianceEvidenceFilters ?? {},
+        appState.complianceViolationFilters ?? {}
+      );
+      return;
+    }
+    const eventId = auditOpenButton.getAttribute("data-compliance-audit-open");
+    if (!eventId) {
+      return;
+    }
+    const selected = await apiClient.getAuditEvent(eventId);
+    const [verification, relatedEvents] = await Promise.all([
+      apiClient.verifyAuditEvent(eventId),
+      selected.correlation_id
+        ? apiClient.listAuditEvents({ correlation_id: selected.correlation_id })
+        : Promise.resolve([])
+    ]);
+    appState = {
+      ...appState,
+      selectedComplianceAuditEvent: selected,
+      complianceAuditVerification: verification,
+      complianceRelatedAuditEvents: relatedEvents
+    };
+    mount(root, appState);
+  });
+  document.addEventListener("click", async (event) => {
     const relatedButton = event.target.closest("[data-related-event-id]");
     if (!relatedButton || !apiClient) {
       return;
@@ -727,6 +992,33 @@ export function installNavigation(root = document.getElementById("app"), apiClie
       ...appState,
       selectedTrustCard: await apiClient.getTrustCard(cardId),
       trustCardVerification: await apiClient.verifyTrustCard(cardId)
+    };
+    mount(root, appState);
+  });
+  document.addEventListener("click", async (event) => {
+    const openReportButton = event.target.closest("[data-compliance-report-open]");
+    const generateReportButton = event.target.closest("[data-compliance-report-generate]");
+    if ((!openReportButton && !generateReportButton) || !apiClient) {
+      return;
+    }
+    const reportId =
+      openReportButton?.getAttribute("data-compliance-report-open") ??
+      generateReportButton?.getAttribute("data-compliance-report-generate");
+    if (!reportId) {
+      return;
+    }
+    const selectedReport = generateReportButton
+      ? await apiClient.generateComplianceReport(reportId)
+      : await apiClient.getComplianceReport(reportId);
+    appState = await loadComplianceState(
+      apiClient,
+      appState.complianceAuditFilters ?? {},
+      appState.complianceEvidenceFilters ?? {},
+      appState.complianceViolationFilters ?? {}
+    );
+    appState = {
+      ...appState,
+      selectedComplianceReport: selectedReport
     };
     mount(root, appState);
   });
@@ -1141,6 +1433,83 @@ export function installNavigation(root = document.getElementById("app"), apiClie
     }
   });
   document.addEventListener("submit", async (event) => {
+    const workflowRunForm = event.target.closest("[data-workflow-run-form]");
+    if (workflowRunForm && apiClient) {
+      event.preventDefault();
+      const workflowId = workflowRunForm.getAttribute("data-workflow-id");
+      const workflow =
+        appState.workflowDefinitions?.find((definition) => definition.id === workflowId) ?? null;
+      if (!workflowId || !workflow) {
+        return;
+      }
+      try {
+        const run = await apiClient.createWorkflowRun(
+          workflowId,
+          workflowRunPayloadFromForm(workflowRunForm, workflow)
+        );
+        appState = await loadWorkflowState(apiClient, run.id, appState.selectedArtifact?.id ?? null);
+        appState = {
+          ...appState,
+          workflowRunResult: run,
+          workflowRunError: null
+        };
+      } catch (error) {
+        appState = {
+          ...appState,
+          workflowRunError: error?.message ?? "Workflow run failed."
+        };
+      }
+      mount(root, appState);
+      return;
+    }
+    const artifactUploadForm = event.target.closest("[data-artifact-upload-form]");
+    if (artifactUploadForm && apiClient) {
+      event.preventDefault();
+      try {
+        const artifact = await apiClient.createArtifact(artifactUploadPayloadFromForm(artifactUploadForm));
+        appState = await loadWorkflowState(apiClient, appState.selectedWorkflowRun?.id ?? null, artifact.id);
+        appState = {
+          ...appState,
+          workflowArtifactUpload: artifact
+        };
+      } catch (error) {
+        appState = {
+          ...appState,
+          workflowArtifactAttestationError: error?.message ?? "Artifact upload failed."
+        };
+      }
+      mount(root, appState);
+      return;
+    }
+    const artifactAttestForm = event.target.closest("[data-artifact-attest-form]");
+    if (artifactAttestForm && apiClient) {
+      event.preventDefault();
+      const artifactId = artifactAttestForm.getAttribute("data-artifact-id");
+      if (!artifactId) {
+        return;
+      }
+      try {
+        const attestation = await apiClient.attestArtifact(
+          artifactId,
+          artifactAttestationPayloadFromForm(artifactAttestForm)
+        );
+        const selectedArtifact = await apiClient.getArtifact(artifactId);
+        appState = await loadWorkflowState(apiClient, appState.selectedWorkflowRun?.id ?? null, artifactId);
+        appState = {
+          ...appState,
+          selectedArtifact,
+          workflowArtifactAttestation: attestation,
+          workflowArtifactAttestationError: null
+        };
+      } catch (error) {
+        appState = {
+          ...appState,
+          workflowArtifactAttestationError: error?.message ?? "Artifact attestation failed."
+        };
+      }
+      mount(root, appState);
+      return;
+    }
     const demoResetForm = event.target.closest("[data-demo-reset-form]");
     if (demoResetForm && apiClient) {
       event.preventDefault();
@@ -1293,6 +1662,170 @@ export function installNavigation(root = document.getElementById("app"), apiClie
         dialog.close();
       }
       await refreshPolicyWorkspace(root, apiClient, appState.selectedPolicy?.id ?? null);
+      return;
+    }
+    const policySimulatorForm = event.target.closest("[data-policy-simulator-form]");
+    if (policySimulatorForm && apiClient) {
+      event.preventDefault();
+      try {
+        const result = await apiClient.simulatePolicyEvaluation(
+          policyEvaluationPayloadFromForm(policySimulatorForm)
+        );
+        appState = {
+          ...appState,
+          policyEvaluationError: null,
+          policyEvaluationResult: result,
+          policyEvaluations: await apiClient.listPolicyEvaluations()
+        };
+      } catch (error) {
+        appState = {
+          ...appState,
+          policyEvaluationError: error?.message ?? "Simulation failed"
+        };
+      }
+      mount(root, appState);
+      return;
+    }
+    const policyEvaluationFilterForm = event.target.closest("[data-policy-evaluation-filter]");
+    if (policyEvaluationFilterForm && apiClient) {
+      event.preventDefault();
+      const params = policyEvaluationFilterParamsFromForm(policyEvaluationFilterForm);
+      appState = {
+        ...appState,
+        policyEvaluationFilter: params,
+        policyEvaluations: await apiClient.listPolicyEvaluations(params),
+        selectedPolicyEvaluation: null
+      };
+      mount(root, appState);
+      return;
+    }
+    const complianceAuditFilterForm = event.target.closest("[data-compliance-audit-filter]");
+    if (complianceAuditFilterForm && apiClient) {
+      event.preventDefault();
+      await refreshComplianceWorkspace(
+        root,
+        apiClient,
+        auditEventFilterParamsFromForm(complianceAuditFilterForm),
+        appState.complianceEvidenceFilters ?? {},
+        appState.complianceViolationFilters ?? {}
+      );
+      return;
+    }
+    const auditExportForm = event.target.closest("[data-audit-export-form]");
+    if (auditExportForm && apiClient) {
+      event.preventDefault();
+      const exported = await apiClient.exportAuditEvents(auditExportPayloadFromForm(auditExportForm));
+      appState = {
+        ...appState,
+        complianceAuditExport: exported
+      };
+      mount(root, appState);
+      return;
+    }
+    const evidenceFilterForm = event.target.closest("[data-compliance-evidence-filter]");
+    if (evidenceFilterForm && apiClient) {
+      event.preventDefault();
+      await refreshComplianceWorkspace(
+        root,
+        apiClient,
+        appState.complianceAuditFilters ?? {},
+        complianceEvidenceFilterParamsFromForm(evidenceFilterForm),
+        appState.complianceViolationFilters ?? {}
+      );
+      return;
+    }
+    const evidenceRecomputeForm = event.target.closest("[data-compliance-evidence-recompute]");
+    if (evidenceRecomputeForm && apiClient) {
+      event.preventDefault();
+      const recomputeResult = await apiClient.recomputeComplianceEvidence();
+      appState = await loadComplianceState(
+        apiClient,
+        appState.complianceAuditFilters ?? {},
+        appState.complianceEvidenceFilters ?? {},
+        appState.complianceViolationFilters ?? {}
+      );
+      appState = {
+        ...appState,
+        complianceEvidenceRecompute: recomputeResult
+      };
+      mount(root, appState);
+      return;
+    }
+    const violationFilterForm = event.target.closest("[data-compliance-violation-filter]");
+    if (violationFilterForm && apiClient) {
+      event.preventDefault();
+      await refreshComplianceWorkspace(
+        root,
+        apiClient,
+        appState.complianceAuditFilters ?? {},
+        appState.complianceEvidenceFilters ?? {},
+        complianceViolationFilterParamsFromForm(violationFilterForm)
+      );
+      return;
+    }
+    const violationResolveForm = event.target.closest("[data-compliance-violation-resolve-form]");
+    if (violationResolveForm && apiClient) {
+      event.preventDefault();
+      const violationId = violationResolveForm.getAttribute("data-violation-id");
+      if (!violationId) {
+        return;
+      }
+      await apiClient.patchComplianceViolation(
+        violationId,
+        complianceViolationPatchPayloadFromForm(violationResolveForm, "resolved")
+      );
+      await refreshComplianceWorkspace(
+        root,
+        apiClient,
+        appState.complianceAuditFilters ?? {},
+        appState.complianceEvidenceFilters ?? {},
+        appState.complianceViolationFilters ?? {}
+      );
+      return;
+    }
+    const reportCreateForm = event.target.closest("[data-compliance-report-create-form]");
+    if (reportCreateForm && apiClient) {
+      event.preventDefault();
+      const created = await apiClient.createComplianceReport(
+        complianceReportPayloadFromForm(reportCreateForm)
+      );
+      appState = await loadComplianceState(
+        apiClient,
+        appState.complianceAuditFilters ?? {},
+        appState.complianceEvidenceFilters ?? {},
+        appState.complianceViolationFilters ?? {}
+      );
+      appState = {
+        ...appState,
+        selectedComplianceReport: created
+      };
+      mount(root, appState);
+      return;
+    }
+    const reportAttestForm = event.target.closest("[data-compliance-report-attest-form]");
+    if (reportAttestForm && apiClient) {
+      event.preventDefault();
+      const reportId = reportAttestForm.getAttribute("data-report-id");
+      if (!reportId) {
+        return;
+      }
+      const attestation = await apiClient.attestComplianceReport(
+        reportId,
+        complianceReportAttestationPayloadFromForm(reportAttestForm)
+      );
+      const selectedReport = await apiClient.getComplianceReport(reportId);
+      appState = await loadComplianceState(
+        apiClient,
+        appState.complianceAuditFilters ?? {},
+        appState.complianceEvidenceFilters ?? {},
+        appState.complianceViolationFilters ?? {}
+      );
+      appState = {
+        ...appState,
+        complianceReportAttestation: attestation,
+        selectedComplianceReport: selectedReport
+      };
+      mount(root, appState);
       return;
     }
     const trustEventsFilterForm = event.target.closest("[data-trust-events-filter]");
@@ -1985,6 +2518,10 @@ export async function bootstrap({
       appState = await loadObservabilityState(apiClient);
       mount(root, appState);
     }
+    if (currentPath() === "/compliance") {
+      appState = await loadComplianceState(apiClient);
+      mount(root, appState);
+    }
     if (currentPath() === "/integrations") {
       appState = await loadIntegrationsState(apiClient);
       mount(root, appState);
@@ -1995,6 +2532,10 @@ export async function bootstrap({
     }
     if (currentPath() === "/demo-lab") {
       appState = await loadDemoState(apiClient);
+      mount(root, appState);
+    }
+    if (currentPath() === "/workflows") {
+      appState = await loadWorkflowState(apiClient);
       mount(root, appState);
     }
     if (appState.drawer.open && appState.drawer.kind === "audit-event" && appState.drawer.resourceId) {

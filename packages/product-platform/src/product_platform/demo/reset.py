@@ -193,7 +193,7 @@ class DemoEnvironmentResetService:
         reset_run = self.repository.create_run(requested_by=requested_by)
         try:
             cleared = self._clear_demo_state()
-            seed_demo_data(self.connection)
+            seed_demo_data(self.connection, include_baseline=True)
             seeded = self._seeded_counts()
             preserved = self._preserved_counts()
             summary = {
@@ -312,6 +312,18 @@ class DemoEnvironmentResetService:
                     """,
                     (self.organization_id, self.environment_id),
                 ).fetchone()["count"]
+            ),
+            "agents": _count(
+                self.connection,
+                "agents",
+                "organization_id = ? AND environment_id = ? AND id LIKE 'agent_demo_%'",
+                (self.organization_id, self.environment_id),
+            ),
+            "mcp_servers": _count(
+                self.connection,
+                "mcp_servers",
+                "organization_id = ? AND environment_id = ? AND id LIKE 'mcp_demo_%'",
+                (self.organization_id, self.environment_id),
             ),
         }
 
