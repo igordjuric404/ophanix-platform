@@ -30,9 +30,10 @@ jobs:
   ai-review:
     name: Deep AI Code Review
     runs-on: ubuntu-latest
-    # Skip bots and draft PRs
+    # Skip bot-authored and draft PRs
     if: >-
       github.event.pull_request.draft == false &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
       github.actor != 'dependabot[bot]' &&
       github.actor != 'github-actions[bot]'
     continue-on-error: true
