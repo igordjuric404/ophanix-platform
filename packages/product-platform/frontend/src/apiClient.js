@@ -288,6 +288,153 @@ export function createApiClient({
     createMcpRateLimit: (body = {}) => request("/mcp/rate-limits", { method: "POST", body }),
     listMcpTools: (params = {}) => request(`/mcp/tools${queryString(params)}`),
     getMcpTool: (toolId) => request(`/mcp/tools/${encodeURIComponent(toolId)}`),
+    importMarketplacePlugin: (body = {}) =>
+      request("/marketplace/plugins/import", { method: "POST", body }),
+    listMarketplacePlugins: (params = {}) =>
+      request(`/marketplace/plugins${queryString(params)}`),
+    getMarketplacePlugin: (pluginId) =>
+      request(`/marketplace/plugins/${encodeURIComponent(pluginId)}`),
+    checkMarketplacePluginPolicy: (versionId, body = {}) =>
+      request(`/marketplace/plugins/${encodeURIComponent(versionId)}/check-policy`, {
+        method: "POST",
+        body
+      }),
+    submitMarketplacePluginReview: (versionId, body = {}) =>
+      request(`/marketplace/plugins/${encodeURIComponent(versionId)}/submit-review`, {
+        method: "POST",
+        body
+      }),
+    listMarketplaceReviews: (params = {}) =>
+      request(`/marketplace/reviews${queryString(params)}`),
+    approveMarketplaceReview: (reviewId, body = {}) =>
+      request(`/marketplace/reviews/${encodeURIComponent(reviewId)}/approve`, {
+        method: "POST",
+        body
+      }),
+    rejectMarketplaceReview: (reviewId, body = {}) =>
+      request(`/marketplace/reviews/${encodeURIComponent(reviewId)}/reject`, {
+        method: "POST",
+        body
+      }),
+    createMarketplaceSigningKey: (body = {}) =>
+      request("/marketplace/signing-keys", { method: "POST", body }),
+    listMarketplaceSigningKeys: () => request("/marketplace/signing-keys"),
+    revokeMarketplaceSigningKey: (keyId) =>
+      request(`/marketplace/signing-keys/${encodeURIComponent(keyId)}/revoke`, {
+        method: "POST"
+      }),
+    assessMarketplacePluginQuality: (versionId) =>
+      request(`/marketplace/plugins/${encodeURIComponent(versionId)}/assess-quality`, {
+        method: "POST"
+      }),
+    recomputeMarketplacePluginTrust: (versionId, body = {}) =>
+      request(`/marketplace/plugins/${encodeURIComponent(versionId)}/recompute-trust`, {
+        method: "POST",
+        body
+      }),
+    createMarketplaceInstallation: (body = {}) =>
+      request("/marketplace/installations", { method: "POST", body }),
+    listMarketplaceInstallations: (params = {}) =>
+      request(`/marketplace/installations${queryString(params)}`),
+    uninstallMarketplacePlugin: (installationId) =>
+      request(`/marketplace/installations/${encodeURIComponent(installationId)}/uninstall`, {
+        method: "POST"
+      }),
+    listIntegrationFrameworks: (params = {}) =>
+      request(`/integrations/frameworks${queryString(params)}`),
+    createObservabilitySlo: (body = {}) =>
+      request("/observability/slo", { method: "POST", body }),
+    listObservabilitySlos: (params = {}) =>
+      request(`/observability/slo${queryString(params)}`),
+    createObservabilitySloMeasurement: (sloId, body = {}) =>
+      request(`/observability/slo/${encodeURIComponent(sloId)}/measurements`, {
+        method: "POST",
+        body
+      }),
+    createObservabilityCostBudget: (body = {}) =>
+      request("/observability/cost-budgets", { method: "POST", body }),
+    listObservabilityCostBudgets: (params = {}) =>
+      request(`/observability/cost-budgets${queryString(params)}`),
+    createObservabilityCostEvent: (body = {}) =>
+      request("/observability/cost-events", { method: "POST", body }),
+    getObservabilityCosts: () => request("/observability/costs"),
+    createObservabilityIncident: (body = {}) =>
+      request("/observability/incidents", { method: "POST", body }),
+    createObservabilityIncidentFromEvent: (body = {}) =>
+      request("/observability/incidents/from-event", { method: "POST", body }),
+    listObservabilityIncidents: (params = {}) =>
+      request(`/observability/incidents${queryString(params)}`),
+    acknowledgeObservabilityIncident: (incidentId) =>
+      request(`/observability/incidents/${encodeURIComponent(incidentId)}/ack`, {
+        method: "POST"
+      }),
+    resolveObservabilityIncident: (incidentId, body = {}) =>
+      request(`/observability/incidents/${encodeURIComponent(incidentId)}/resolve`, {
+        method: "POST",
+        body
+      }),
+    createObservabilityChaosExperiment: (body = {}) =>
+      request("/observability/chaos/experiments", { method: "POST", body }),
+    listObservabilityChaosExperiments: (params = {}) =>
+      request(`/observability/chaos/experiments${queryString(params)}`),
+    runObservabilityChaosExperiment: (experimentId, body = {}) =>
+      request(`/observability/chaos/experiments/${encodeURIComponent(experimentId)}/run`, {
+        method: "POST",
+        body
+      }),
+    stopObservabilityChaosRun: (runId) =>
+      request(`/observability/chaos/runs/${encodeURIComponent(runId)}/stop`, {
+        method: "POST"
+      }),
+    createObservabilityRollout: (body = {}) =>
+      request("/observability/rollouts", { method: "POST", body }),
+    listObservabilityRollouts: (params = {}) =>
+      request(`/observability/rollouts${queryString(params)}`),
+    advanceObservabilityRollout: (rolloutId, body = {}) =>
+      request(`/observability/rollouts/${encodeURIComponent(rolloutId)}/advance`, {
+        method: "POST",
+        body
+      }),
+    rollbackObservabilityRollout: (rolloutId, body = {}) =>
+      request(`/observability/rollouts/${encodeURIComponent(rolloutId)}/rollback`, {
+        method: "POST",
+        body
+      }),
+    listIntegrationFrameworks: (params = {}) =>
+      request(`/integrations/frameworks${queryString(params)}`),
+    createIntegrationFrameworkInstance: (body = {}) =>
+      request("/integrations/framework-instances", { method: "POST", body }),
+    listIntegrationFrameworkInstances: (params = {}) =>
+      request(`/integrations/framework-instances${queryString(params)}`),
+    patchIntegrationFrameworkInstance: (instanceId, body = {}) =>
+      request(`/integrations/framework-instances/${encodeURIComponent(instanceId)}`, {
+        method: "PATCH",
+        body
+      }),
+    linkIntegrationFrameworkAgent: (instanceId, body = {}) =>
+      request(`/integrations/framework-instances/${encodeURIComponent(instanceId)}/link-agent`, {
+        method: "POST",
+        body
+      }),
+    listIntegrationFrameworkAgents: (params = {}) =>
+      request(`/integrations/framework-agents${queryString(params)}`),
+    unlinkIntegrationFrameworkAgent: (linkId) =>
+      request(`/integrations/framework-agents/${encodeURIComponent(linkId)}`, {
+        method: "DELETE"
+      }),
+    createProviderCredential: (body = {}) =>
+      request("/integrations/provider-credentials", { method: "POST", body }),
+    listProviderCredentials: (params = {}) =>
+      request(`/integrations/provider-credentials${queryString(params)}`),
+    testProviderCredential: (credentialId) =>
+      request(`/integrations/provider-credentials/${encodeURIComponent(credentialId)}/test`, {
+        method: "POST"
+      }),
+    createIntegrationHealthCheck: (body = {}) =>
+      request("/integrations/health-checks", { method: "POST", body }),
+    listIntegrationHealthChecks: (params = {}) =>
+      request(`/integrations/health-checks${queryString(params)}`),
+    listLatestIntegrationHealthChecks: () => request("/integrations/health-checks/latest"),
     createRuntimeSession: (body = {}) => request("/runtime/sessions", { method: "POST", body }),
     listRuntimeSessions: (params = {}) => request(`/runtime/sessions${queryString(params)}`),
     getRuntimeSession: (sessionId) => request(`/runtime/sessions/${encodeURIComponent(sessionId)}`),

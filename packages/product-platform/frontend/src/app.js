@@ -35,6 +35,32 @@ import {
   renderMcpToolDetail
 } from "./mcp.js";
 import {
+  marketplaceInstallPayloadFromForm,
+  marketplacePolicyPayloadFromForm,
+  marketplaceReviewDecisionPayloadFromForm,
+  marketplaceReviewSubmitPayloadFromForm,
+  marketplaceSigningKeyPayloadFromForm,
+  marketplaceTrustPayloadFromForm
+} from "./marketplace.js";
+import {
+  integrationAgentLinkPayloadFromForm,
+  integrationInstancePayloadFromForm,
+  providerCredentialPayloadFromForm
+} from "./integrations.js";
+import {
+  observabilityChaosExperimentPayloadFromForm,
+  observabilityChaosRunPayloadFromForm,
+  observabilityCostBudgetPayloadFromForm,
+  observabilityCostEventPayloadFromForm,
+  observabilityIncidentPayloadFromForm,
+  observabilityIncidentResolvePayloadFromForm,
+  observabilityRolloutAdvancePayloadFromForm,
+  observabilityRolloutPayloadFromForm,
+  observabilityRolloutRollbackPayloadFromForm,
+  observabilitySloPayloadFromForm,
+  renderIncidentDetail
+} from "./observability.js";
+import {
   policyBindingPayloadFromForm,
   policyEditorPayloadFromForm,
   policyExceptionPayloadFromForm,
@@ -276,6 +302,106 @@ async function refreshMcpWorkspace(
   mount(root, appState);
 }
 
+async function loadMarketplaceState(apiClient, selectedPluginId = appState.selectedMarketplacePlugin?.id ?? null) {
+  const [marketplacePlugins, marketplaceInstallations, marketplaceReviews, marketplaceSigningKeys] = await Promise.all([
+    apiClient.listMarketplacePlugins(),
+    apiClient.listMarketplaceInstallations(),
+    apiClient.listMarketplaceReviews(),
+    apiClient.listMarketplaceSigningKeys()
+  ]);
+  const pluginId = selectedPluginId ?? marketplacePlugins[0]?.id ?? null;
+  const selectedMarketplacePlugin = pluginId ? await apiClient.getMarketplacePlugin(pluginId) : null;
+  const sameSelectedPlugin = selectedMarketplacePlugin?.id === appState.selectedMarketplacePlugin?.id;
+  return {
+    ...appState,
+    marketplacePlugins: selectedMarketplacePlugin
+      ? marketplacePlugins.map((plugin) =>
+          plugin.id === selectedMarketplacePlugin.id ? selectedMarketplacePlugin : plugin
+        )
+      : marketplacePlugins,
+    selectedMarketplacePlugin,
+    marketplaceInstallations,
+    marketplaceReviews,
+    marketplaceSigningKeys,
+    marketplacePolicyResult:
+      sameSelectedPlugin
+        ? appState.marketplacePolicyResult ?? null
+        : null,
+    marketplaceQualityAssessment: sameSelectedPlugin
+      ? appState.marketplaceQualityAssessment ?? null
+      : null,
+    marketplaceTrustEvents: sameSelectedPlugin ? appState.marketplaceTrustEvents ?? [] : []
+  };
+}
+
+async function refreshMarketplaceWorkspace(
+  root,
+  apiClient,
+  selectedPluginId = appState.selectedMarketplacePlugin?.id ?? null
+) {
+  appState = await loadMarketplaceState(apiClient, selectedPluginId);
+  mount(root, appState);
+}
+
+async function loadObservabilityState(apiClient) {
+  const [
+    observabilitySlos,
+    observabilityCosts,
+    observabilityIncidents,
+    observabilityChaosExperiments,
+    observabilityRollouts
+  ] = await Promise.all([
+    apiClient.listObservabilitySlos(),
+    apiClient.getObservabilityCosts(),
+    apiClient.listObservabilityIncidents(),
+    apiClient.listObservabilityChaosExperiments(),
+    apiClient.listObservabilityRollouts()
+  ]);
+  return {
+    ...appState,
+    observabilitySlos,
+    observabilityCosts,
+    observabilityIncidents,
+    observabilityChaosExperiments,
+    observabilityChaosRuns: appState.observabilityChaosRuns ?? [],
+    observabilityRollouts
+  };
+}
+
+async function refreshObservabilityWorkspace(root, apiClient) {
+  appState = await loadObservabilityState(apiClient);
+  mount(root, appState);
+}
+
+async function loadIntegrationsState(apiClient) {
+  const [
+    integrationFrameworks,
+    integrationFrameworkInstances,
+    integrationFrameworkAgents,
+    providerCredentials,
+    integrationHealthChecks
+  ] = await Promise.all([
+    apiClient.listIntegrationFrameworks(),
+    apiClient.listIntegrationFrameworkInstances(),
+    apiClient.listIntegrationFrameworkAgents(),
+    apiClient.listProviderCredentials(),
+    apiClient.listLatestIntegrationHealthChecks()
+  ]);
+  return {
+    ...appState,
+    integrationFrameworks,
+    integrationFrameworkInstances,
+    integrationFrameworkAgents,
+    providerCredentials,
+    integrationHealthChecks
+  };
+}
+
+async function refreshIntegrationsWorkspace(root, apiClient) {
+  appState = await loadIntegrationsState(apiClient);
+  mount(root, appState);
+}
+
 async function loadRuntimeState(apiClient) {
   const [
     runtimeSessions,
@@ -349,6 +475,15 @@ export function installNavigation(root = document.getElementById("app"), apiClie
     }
     if (apiClient && normalizePath(targetPath) === "/mcp") {
       await refreshMcpWorkspace(root, apiClient);
+    }
+    if (apiClient && normalizePath(targetPath) === "/marketplace") {
+      await refreshMarketplaceWorkspace(root, apiClient);
+    }
+    if (apiClient && normalizePath(targetPath) === "/observability") {
+      await refreshObservabilityWorkspace(root, apiClient);
+    }
+    if (apiClient && normalizePath(targetPath) === "/integrations") {
+      await refreshIntegrationsWorkspace(root, apiClient);
     }
     if (apiClient && normalizePath(targetPath) === "/runtime") {
       await refreshRuntimeWorkspace(root, apiClient);
@@ -578,6 +713,28 @@ export function installNavigation(root = document.getElementById("app"), apiClie
     mount(root, appState);
   });
   document.addEventListener("click", async (event) => {
+    const unlinkButton = event.target.closest("[data-integration-unlink-agent]");
+    if (unlinkButton && apiClient) {
+      const linkId = unlinkButton.getAttribute("data-integration-unlink-agent");
+      if (!linkId) {
+        return;
+      }
+      await apiClient.unlinkIntegrationFrameworkAgent(linkId);
+      await refreshIntegrationsWorkspace(root, apiClient);
+      return;
+    }
+    const testCredentialButton = event.target.closest("[data-provider-credential-test]");
+    if (!testCredentialButton || !apiClient) {
+      return;
+    }
+    const credentialId = testCredentialButton.getAttribute("data-provider-credential-test");
+    if (!credentialId) {
+      return;
+    }
+    await apiClient.testProviderCredential(credentialId);
+    await refreshIntegrationsWorkspace(root, apiClient);
+  });
+  document.addEventListener("click", async (event) => {
     const discoverButton = event.target.closest("[data-mcp-discover-tools]");
     if (discoverButton && apiClient) {
       const serverId = discoverButton.getAttribute("data-mcp-discover-tools");
@@ -741,6 +898,119 @@ export function installNavigation(root = document.getElementById("app"), apiClie
         subtitle: `${handoff.source_agent_id} -> ${handoff.target_agent_id}`,
         status: handoff.status,
         content: renderMeshHandoffDetail(handoff)
+      })
+    );
+    mount(root, appState);
+  });
+  document.addEventListener("click", async (event) => {
+    const pluginButton = event.target.closest("[data-marketplace-plugin-open]");
+    if (pluginButton && apiClient) {
+      const pluginId = pluginButton.getAttribute("data-marketplace-plugin-open");
+      if (!pluginId) {
+        return;
+      }
+      await refreshMarketplaceWorkspace(root, apiClient, pluginId);
+      return;
+    }
+    const uninstallButton = event.target.closest("[data-marketplace-uninstall]");
+    if (uninstallButton && apiClient) {
+      const installationId = uninstallButton.getAttribute("data-marketplace-uninstall");
+      if (!installationId) {
+        return;
+      }
+      await apiClient.uninstallMarketplacePlugin(installationId);
+      await refreshMarketplaceWorkspace(root, apiClient);
+      return;
+    }
+    const revokeSigningKeyButton = event.target.closest("[data-marketplace-signing-key-revoke]");
+    if (revokeSigningKeyButton && apiClient) {
+      const keyId = revokeSigningKeyButton.getAttribute("data-marketplace-signing-key-revoke");
+      if (!keyId) {
+        return;
+      }
+      await apiClient.revokeMarketplaceSigningKey(keyId);
+      await refreshMarketplaceWorkspace(root, apiClient);
+      return;
+    }
+    const assessQualityButton = event.target.closest("[data-marketplace-assess-quality]");
+    if (assessQualityButton && apiClient) {
+      const versionId = assessQualityButton.getAttribute("data-marketplace-assess-quality");
+      if (!versionId) {
+        return;
+      }
+      const marketplaceQualityAssessment = await apiClient.assessMarketplacePluginQuality(versionId);
+      const selectedPluginId = appState.selectedMarketplacePlugin?.id ?? null;
+      appState = await loadMarketplaceState(apiClient, selectedPluginId);
+      appState = {
+        ...appState,
+        marketplaceQualityAssessment
+      };
+      mount(root, appState);
+      return;
+    }
+  });
+  document.addEventListener("click", async (event) => {
+    const ackButton = event.target.closest("[data-observability-incident-ack]");
+    if (ackButton && apiClient) {
+      const incidentId = ackButton.getAttribute("data-observability-incident-ack");
+      if (!incidentId) {
+        return;
+      }
+      await apiClient.acknowledgeObservabilityIncident(incidentId);
+      await refreshObservabilityWorkspace(root, apiClient);
+      return;
+    }
+    const chaosRunButton = event.target.closest("[data-observability-chaos-run-open]");
+    if (chaosRunButton) {
+      const experimentId = chaosRunButton.getAttribute("data-observability-chaos-run-open");
+      const dialog = experimentId
+        ? document.querySelector(`[data-observability-chaos-run-modal="${experimentId}"]`)
+        : null;
+      if (dialog?.showModal) {
+        dialog.showModal();
+      }
+      return;
+    }
+    const rolloutAdvanceButton = event.target.closest("[data-observability-rollout-advance-open]");
+    if (rolloutAdvanceButton) {
+      const rolloutId = rolloutAdvanceButton.getAttribute("data-observability-rollout-advance-open");
+      const dialog = rolloutId
+        ? document.querySelector(`[data-observability-rollout-advance-modal="${rolloutId}"]`)
+        : null;
+      if (dialog?.showModal) {
+        dialog.showModal();
+      }
+      return;
+    }
+    const rolloutRollbackButton = event.target.closest("[data-observability-rollout-rollback-open]");
+    if (rolloutRollbackButton) {
+      const rolloutId = rolloutRollbackButton.getAttribute("data-observability-rollout-rollback-open");
+      const dialog = rolloutId
+        ? document.querySelector(`[data-observability-rollout-rollback-modal="${rolloutId}"]`)
+        : null;
+      if (dialog?.showModal) {
+        dialog.showModal();
+      }
+      return;
+    }
+    const openButton = event.target.closest("[data-observability-incident-open]");
+    if (!openButton) {
+      return;
+    }
+    const incidentId = openButton.getAttribute("data-observability-incident-open");
+    const incident = appState.observabilityIncidents?.find((item) => item.id === incidentId);
+    if (!incident) {
+      return;
+    }
+    appState = withDrawer(
+      appState,
+      openDrawer({
+        kind: "observability-incident",
+        resourceId: incident.id,
+        title: "Incident",
+        subtitle: incident.title,
+        status: incident.status,
+        content: renderIncidentDetail(incident)
       })
     );
     mount(root, appState);
@@ -1132,6 +1402,271 @@ export function installNavigation(root = document.getElementById("app"), apiClie
       await refreshMcpWorkspace(root, apiClient);
       return;
     }
+    const marketplacePolicyForm = event.target.closest("[data-marketplace-policy-check-form]");
+    if (marketplacePolicyForm && apiClient) {
+      event.preventDefault();
+      const versionId = marketplacePolicyForm.getAttribute("data-version-id");
+      if (!versionId) {
+        return;
+      }
+      const marketplacePolicyResult = await apiClient.checkMarketplacePluginPolicy(
+        versionId,
+        marketplacePolicyPayloadFromForm(marketplacePolicyForm)
+      );
+      appState = {
+        ...appState,
+        marketplacePolicyResult
+      };
+      mount(root, appState);
+      return;
+    }
+    const marketplaceInstallForm = event.target.closest("[data-marketplace-install-form]");
+    if (marketplaceInstallForm && apiClient) {
+      event.preventDefault();
+      await apiClient.createMarketplaceInstallation(
+        marketplaceInstallPayloadFromForm(marketplaceInstallForm)
+      );
+      await refreshMarketplaceWorkspace(root, apiClient);
+      return;
+    }
+    const marketplaceReviewSubmitForm = event.target.closest("[data-marketplace-submit-review-form]");
+    if (marketplaceReviewSubmitForm && apiClient) {
+      event.preventDefault();
+      const versionId = marketplaceReviewSubmitForm.getAttribute("data-version-id");
+      if (!versionId) {
+        return;
+      }
+      await apiClient.submitMarketplacePluginReview(
+        versionId,
+        marketplaceReviewSubmitPayloadFromForm(marketplaceReviewSubmitForm)
+      );
+      await refreshMarketplaceWorkspace(root, apiClient);
+      return;
+    }
+    const marketplaceReviewApproveForm = event.target.closest("[data-marketplace-review-approve-form]");
+    if (marketplaceReviewApproveForm && apiClient) {
+      event.preventDefault();
+      const reviewId = marketplaceReviewApproveForm.getAttribute("data-review-id");
+      if (!reviewId) {
+        return;
+      }
+      await apiClient.approveMarketplaceReview(
+        reviewId,
+        marketplaceReviewDecisionPayloadFromForm(marketplaceReviewApproveForm)
+      );
+      await refreshMarketplaceWorkspace(root, apiClient);
+      return;
+    }
+    const marketplaceReviewRejectForm = event.target.closest("[data-marketplace-review-reject-form]");
+    if (marketplaceReviewRejectForm && apiClient) {
+      event.preventDefault();
+      const reviewId = marketplaceReviewRejectForm.getAttribute("data-review-id");
+      if (!reviewId) {
+        return;
+      }
+      await apiClient.rejectMarketplaceReview(
+        reviewId,
+        marketplaceReviewDecisionPayloadFromForm(marketplaceReviewRejectForm)
+      );
+      await refreshMarketplaceWorkspace(root, apiClient);
+      return;
+    }
+    const marketplaceSigningKeyForm = event.target.closest("[data-marketplace-signing-key-form]");
+    if (marketplaceSigningKeyForm && apiClient) {
+      event.preventDefault();
+      await apiClient.createMarketplaceSigningKey(
+        marketplaceSigningKeyPayloadFromForm(marketplaceSigningKeyForm)
+      );
+      await refreshMarketplaceWorkspace(root, apiClient);
+      return;
+    }
+    const marketplaceTrustForm = event.target.closest("[data-marketplace-trust-recompute-form]");
+    if (marketplaceTrustForm && apiClient) {
+      event.preventDefault();
+      const versionId = marketplaceTrustForm.getAttribute("data-version-id");
+      if (!versionId) {
+        return;
+      }
+      const marketplaceTrustEvent = await apiClient.recomputeMarketplacePluginTrust(
+        versionId,
+        marketplaceTrustPayloadFromForm(marketplaceTrustForm)
+      );
+      const selectedPluginId = appState.selectedMarketplacePlugin?.id ?? null;
+      const previousEvents = appState.marketplaceTrustEvents ?? [];
+      appState = await loadMarketplaceState(apiClient, selectedPluginId);
+      appState = {
+        ...appState,
+        marketplaceTrustEvents: [marketplaceTrustEvent, ...previousEvents]
+      };
+      mount(root, appState);
+      return;
+    }
+    const observabilitySloForm = event.target.closest("[data-observability-slo-form]");
+    if (observabilitySloForm && apiClient) {
+      event.preventDefault();
+      await apiClient.createObservabilitySlo(observabilitySloPayloadFromForm(observabilitySloForm));
+      await refreshObservabilityWorkspace(root, apiClient);
+      return;
+    }
+    const observabilityCostBudgetForm = event.target.closest("[data-observability-cost-budget-form]");
+    if (observabilityCostBudgetForm && apiClient) {
+      event.preventDefault();
+      await apiClient.createObservabilityCostBudget(
+        observabilityCostBudgetPayloadFromForm(observabilityCostBudgetForm)
+      );
+      await refreshObservabilityWorkspace(root, apiClient);
+      return;
+    }
+    const observabilityCostEventForm = event.target.closest("[data-observability-cost-event-form]");
+    if (observabilityCostEventForm && apiClient) {
+      event.preventDefault();
+      await apiClient.createObservabilityCostEvent(
+        observabilityCostEventPayloadFromForm(observabilityCostEventForm)
+      );
+      await refreshObservabilityWorkspace(root, apiClient);
+      return;
+    }
+    const observabilityIncidentForm = event.target.closest("[data-observability-incident-form]");
+    if (observabilityIncidentForm && apiClient) {
+      event.preventDefault();
+      await apiClient.createObservabilityIncident(
+        observabilityIncidentPayloadFromForm(observabilityIncidentForm)
+      );
+      await refreshObservabilityWorkspace(root, apiClient);
+      return;
+    }
+    const observabilityIncidentResolveForm = event.target.closest(
+      "[data-observability-incident-resolve-form]"
+    );
+    if (observabilityIncidentResolveForm && apiClient) {
+      event.preventDefault();
+      const incidentId = observabilityIncidentResolveForm.getAttribute("data-incident-id");
+      if (!incidentId) {
+        return;
+      }
+      await apiClient.resolveObservabilityIncident(
+        incidentId,
+        observabilityIncidentResolvePayloadFromForm(observabilityIncidentResolveForm)
+      );
+      await refreshObservabilityWorkspace(root, apiClient);
+      return;
+    }
+    const observabilityChaosExperimentForm = event.target.closest(
+      "[data-observability-chaos-experiment-form]"
+    );
+    if (observabilityChaosExperimentForm && apiClient) {
+      event.preventDefault();
+      await apiClient.createObservabilityChaosExperiment(
+        observabilityChaosExperimentPayloadFromForm(observabilityChaosExperimentForm)
+      );
+      await refreshObservabilityWorkspace(root, apiClient);
+      return;
+    }
+    const observabilityChaosRunForm = event.target.closest("[data-observability-chaos-run-form]");
+    if (observabilityChaosRunForm && apiClient) {
+      event.preventDefault();
+      const experimentId = observabilityChaosRunForm.getAttribute("data-experiment-id");
+      if (!experimentId) {
+        return;
+      }
+      const previousRuns = appState.observabilityChaosRuns ?? [];
+      const chaosRun = await apiClient.runObservabilityChaosExperiment(
+        experimentId,
+        observabilityChaosRunPayloadFromForm(observabilityChaosRunForm)
+      );
+      const dialog = document.querySelector(`[data-observability-chaos-run-modal="${experimentId}"]`);
+      if (dialog?.close) {
+        dialog.close();
+      }
+      appState = await loadObservabilityState(apiClient);
+      appState = {
+        ...appState,
+        observabilityChaosRuns: [chaosRun, ...previousRuns]
+      };
+      mount(root, appState);
+      return;
+    }
+    const observabilityRolloutForm = event.target.closest("[data-observability-rollout-form]");
+    if (observabilityRolloutForm && apiClient) {
+      event.preventDefault();
+      await apiClient.createObservabilityRollout(
+        observabilityRolloutPayloadFromForm(observabilityRolloutForm)
+      );
+      await refreshObservabilityWorkspace(root, apiClient);
+      return;
+    }
+    const observabilityRolloutAdvanceForm = event.target.closest(
+      "[data-observability-rollout-advance-form]"
+    );
+    if (observabilityRolloutAdvanceForm && apiClient) {
+      event.preventDefault();
+      const rolloutId = observabilityRolloutAdvanceForm.getAttribute("data-rollout-id");
+      if (!rolloutId) {
+        return;
+      }
+      await apiClient.advanceObservabilityRollout(
+        rolloutId,
+        observabilityRolloutAdvancePayloadFromForm(observabilityRolloutAdvanceForm)
+      );
+      const dialog = document.querySelector(`[data-observability-rollout-advance-modal="${rolloutId}"]`);
+      if (dialog?.close) {
+        dialog.close();
+      }
+      await refreshObservabilityWorkspace(root, apiClient);
+      return;
+    }
+    const observabilityRolloutRollbackForm = event.target.closest(
+      "[data-observability-rollout-rollback-form]"
+    );
+    if (observabilityRolloutRollbackForm && apiClient) {
+      event.preventDefault();
+      const rolloutId = observabilityRolloutRollbackForm.getAttribute("data-rollout-id");
+      if (!rolloutId) {
+        return;
+      }
+      await apiClient.rollbackObservabilityRollout(
+        rolloutId,
+        observabilityRolloutRollbackPayloadFromForm(observabilityRolloutRollbackForm)
+      );
+      const dialog = document.querySelector(`[data-observability-rollout-rollback-modal="${rolloutId}"]`);
+      if (dialog?.close) {
+        dialog.close();
+      }
+      await refreshObservabilityWorkspace(root, apiClient);
+      return;
+    }
+    const integrationInstanceForm = event.target.closest("[data-integration-instance-form]");
+    if (integrationInstanceForm && apiClient) {
+      event.preventDefault();
+      await apiClient.createIntegrationFrameworkInstance(
+        integrationInstancePayloadFromForm(integrationInstanceForm)
+      );
+      await refreshIntegrationsWorkspace(root, apiClient);
+      return;
+    }
+    const integrationLinkAgentForm = event.target.closest("[data-integration-link-agent-form]");
+    if (integrationLinkAgentForm && apiClient) {
+      event.preventDefault();
+      const instanceId = integrationLinkAgentForm.getAttribute("data-instance-id");
+      if (!instanceId) {
+        return;
+      }
+      await apiClient.linkIntegrationFrameworkAgent(
+        instanceId,
+        integrationAgentLinkPayloadFromForm(integrationLinkAgentForm)
+      );
+      await refreshIntegrationsWorkspace(root, apiClient);
+      return;
+    }
+    const providerCredentialForm = event.target.closest("[data-provider-credential-form]");
+    if (providerCredentialForm && apiClient) {
+      event.preventDefault();
+      await apiClient.createProviderCredential(
+        providerCredentialPayloadFromForm(providerCredentialForm)
+      );
+      await refreshIntegrationsWorkspace(root, apiClient);
+      return;
+    }
     const runtimeSessionForm = event.target.closest("[data-runtime-session-form]");
     if (runtimeSessionForm && apiClient) {
       event.preventDefault();
@@ -1351,6 +1886,18 @@ export async function bootstrap({
     }
     if (currentPath() === "/mcp") {
       appState = await loadMcpState(apiClient);
+      mount(root, appState);
+    }
+    if (currentPath() === "/marketplace") {
+      appState = await loadMarketplaceState(apiClient);
+      mount(root, appState);
+    }
+    if (currentPath() === "/observability") {
+      appState = await loadObservabilityState(apiClient);
+      mount(root, appState);
+    }
+    if (currentPath() === "/integrations") {
+      appState = await loadIntegrationsState(apiClient);
       mount(root, appState);
     }
     if (currentPath() === "/runtime") {

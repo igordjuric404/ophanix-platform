@@ -5,6 +5,8 @@ from __future__ import annotations
 from sqlite3 import Connection
 
 from product_platform.db.time import utc_now_iso
+from product_platform.integrations.catalog import seed_framework_catalog
+from product_platform.workflows.catalog import seed_workflow_catalog
 
 DEMO_ORG_ID = "org_default"
 DEMO_ENV_ID = "env_default"
@@ -58,6 +60,8 @@ def seed_demo_data(connection: Connection) -> None:
             """,
             (policy_id, DEMO_ORG_ID, DEMO_ENV_ID, name, description, now, now),
         )
+    seed_framework_catalog(connection)
+    seed_workflow_catalog(connection, DEMO_ORG_ID)
 
 
 def reset_demo_data(connection: Connection, *, remove_admin: bool = False) -> None:
@@ -73,4 +77,3 @@ def reset_demo_data(connection: Connection, *, remove_admin: bool = False) -> No
     connection.execute("DELETE FROM organizations WHERE id = ?", (DEMO_ORG_ID,))
     if remove_admin:
         connection.execute("DELETE FROM users WHERE id = ?", (DEMO_ADMIN_USER_ID,))
-

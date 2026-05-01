@@ -11,6 +11,13 @@ def _csv_env(name: str, default: str) -> list[str]:
     return [value.strip() for value in raw.split(",") if value.strip()]
 
 
+def _bool_env(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class Settings:
     """Settings loaded from environment variables.
@@ -42,6 +49,9 @@ class Settings:
             "CORS_ALLOWED_ORIGINS",
             "http://localhost:3000,http://localhost:5173,http://localhost:8080",
         )
+    )
+    enable_production_chaos: bool = field(
+        default_factory=lambda: _bool_env("OPHANIX_ENABLE_PRODUCTION_CHAOS", False)
     )
 
 

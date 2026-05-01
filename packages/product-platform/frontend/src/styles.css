@@ -893,6 +893,54 @@ input {
   padding: 14px;
 }
 
+.detail-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  margin: 0 0 14px;
+}
+
+.detail-list div {
+  min-width: 0;
+}
+
+.detail-list dt {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.detail-list dd {
+  min-width: 0;
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.tag-list,
+.finding-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 14px;
+  padding: 0;
+}
+
+.tag-list span,
+.finding-list li {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-muted);
+  color: var(--text);
+  padding: 6px 8px;
+}
+
+.finding-list li {
+  display: grid;
+  gap: 3px;
+  min-width: min(260px, 100%);
+}
+
 .agent-detail {
   grid-column: 1 / -1;
 }
@@ -913,7 +961,10 @@ input {
 
 .mesh-workspace,
 .mcp-workspace,
-.runtime-workspace {
+.runtime-workspace,
+.marketplace-workspace,
+.observability-workspace,
+.integrations-workspace {
   display: grid;
   gap: 16px;
 }
@@ -935,6 +986,26 @@ input {
 .mcp-traffic,
 .mcp-approvals,
 .mcp-rate-limits,
+.marketplace-catalog,
+.marketplace-detail,
+.marketplace-install,
+.marketplace-installed,
+.marketplace-reviews,
+.marketplace-signing-keys,
+.marketplace-quality,
+.marketplace-trust,
+.observability-overview,
+.observability-slos,
+.observability-costs,
+.observability-incidents,
+.observability-chaos,
+.observability-rollouts,
+.integration-frameworks,
+.integration-instances,
+.integration-linked-agents,
+.integration-setup,
+.integration-credentials,
+.integration-health,
 .runtime-sessions,
 .runtime-session-detail,
 .runtime-sagas,
@@ -971,6 +1042,97 @@ input {
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+}
+
+.marketplace-governance-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.marketplace-gate-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  list-style: none;
+  margin: 12px 0;
+  padding: 0;
+}
+
+.marketplace-gate-list li {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-muted);
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+}
+
+.observability-rollups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.observability-bars {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.observability-bars li {
+  display: grid;
+  grid-template-columns: minmax(100px, 0.7fr) minmax(120px, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.chaos-run-detail {
+  border-top: 1px solid var(--line);
+  margin-top: 14px;
+  padding-top: 14px;
+}
+
+.rollout-timeline {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(52px, 1fr));
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  min-width: 180px;
+}
+
+.rollout-timeline li {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-muted);
+  padding: 6px;
+  text-align: center;
+}
+
+.rollout-timeline li.is-complete {
+  background: var(--surface);
+  border-color: var(--accent);
+}
+
+.integration-snippet-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.integration-snippet-grid section {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-muted);
+  display: grid;
+  gap: 6px;
+  padding: 10px;
 }
 
 .mcp-finding-actions {

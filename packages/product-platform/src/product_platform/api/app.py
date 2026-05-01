@@ -125,6 +125,34 @@ from product_platform.discovery.repository import (
     discovery_target_response,
 )
 from product_platform.discovery.runner import DiscoveryScanRunner
+from product_platform.integrations.models import (
+    FrameworkAgentLinkRequest,
+    FrameworkAgentResponse,
+    FrameworkInstanceCreateRequest,
+    FrameworkInstancePatchRequest,
+    FrameworkInstanceResponse,
+    FrameworkIntegrationResponse,
+    IntegrationHealthCheckCreateRequest,
+    IntegrationHealthCheckResponse,
+    ProviderCredentialCreateRequest,
+    ProviderCredentialResponse,
+)
+from product_platform.integrations.repository import (
+    FrameworkAgentNotFoundError,
+    FrameworkAgentValidationError,
+    FrameworkInstanceConfigError,
+    FrameworkInstanceNotFoundError,
+    FrameworkIntegrationNotFoundError,
+    IntegrationRegistryRepository,
+    ProviderCredentialNotFoundError,
+    framework_agent_response,
+    framework_instance_response,
+    framework_integration_response,
+    integration_health_check_response,
+    provider_credential_response,
+)
+from product_platform.integrations.health import run_provider_health_test
+from product_platform.integrations.secrets import DEFAULT_SECRET_PROVIDER, SecretProvider
 from product_platform.mesh.models import (
     MeshHandoffCreateRequest,
     MeshHandoffResponse,
@@ -193,6 +221,82 @@ from product_platform.mcp.repository import (
     mcp_server_response,
 )
 from product_platform.mcp.scans import MCPScannerAdapter
+from product_platform.marketplace.models import (
+    PluginInstallationCreateRequest,
+    PluginInstallationResponse,
+    PluginImportRequest,
+    PluginPolicyCheckRequest,
+    PluginPolicyResultResponse,
+    PluginQualityAssessmentResponse,
+    PluginResponse,
+    PluginReviewDecisionRequest,
+    PluginReviewResponse,
+    PluginReviewSubmitRequest,
+    PluginSigningKeyCreateRequest,
+    PluginSigningKeyResponse,
+    PluginTrustEventResponse,
+    PluginTrustRecomputeRequest,
+)
+from product_platform.marketplace.repository import (
+    MarketplaceCatalogRepository,
+    MarketplaceManifestError,
+    PluginInstallationBlockedError,
+    PluginInstallationNotFoundError,
+    PluginInstallationStateError,
+    PluginNotFoundError,
+    PluginReviewNotFoundError,
+    PluginReviewStateError,
+    PluginSigningKeyNotFoundError,
+    plugin_installation_response,
+    plugin_policy_result_response,
+    plugin_quality_assessment_response,
+    plugin_response,
+    plugin_review_response,
+    plugin_signing_key_response,
+    plugin_trust_event_response,
+)
+from product_platform.observability.models import (
+    ChaosExperimentCreateRequest,
+    ChaosExperimentResponse,
+    ChaosRunCreateRequest,
+    ChaosRunResponse,
+    CostBudgetCreateRequest,
+    CostBudgetResponse,
+    CostDashboardResponse,
+    CostEventCreateRequest,
+    CostEventResponse,
+    IncidentCreateRequest,
+    IncidentFromEventRequest,
+    IncidentResolveRequest,
+    IncidentResponse,
+    RolloutAdvanceRequest,
+    RolloutCreateRequest,
+    RolloutRollbackRequest,
+    RolloutResponse,
+    SloMeasurementCreateRequest,
+    SloMeasurementResponse,
+    SloObjectiveCreateRequest,
+    SloObjectiveResponse,
+)
+from product_platform.observability.repository import (
+    ChaosExperimentValidationError,
+    ChaosExperimentNotFoundError,
+    ChaosRunNotFoundError,
+    IncidentNotFoundError,
+    IncidentStateError,
+    ObservabilityRepository,
+    RolloutNotFoundError,
+    SloObjectiveNotFoundError,
+    chaos_experiment_response,
+    chaos_run_response,
+    cost_budget_response,
+    cost_dashboard_response,
+    cost_event_response,
+    incident_response,
+    rollout_response,
+    slo_measurement_response,
+    slo_objective_response,
+)
 from product_platform.policies.models import (
     PolicyBindingCreateRequest,
     PolicyBindingPatchRequest,
@@ -345,6 +449,11 @@ from product_platform.worker.api_models import (
 )
 from product_platform.worker.scheduler import JobScheduleRepository
 from product_platform.worker.store import JobStateRepository
+from product_platform.workflows.models import WorkflowDefinitionResponse
+from product_platform.workflows.repository import (
+    WorkflowRepository,
+    workflow_definition_response,
+)
 
 
 def _request_context_from_request(request: Request) -> RequestContext:
@@ -557,6 +666,13 @@ def create_app(
         app.state.database = created
         return created
 
+    def _secret_provider() -> SecretProvider:
+        provider = getattr(app.state, "secret_provider", None)
+        if provider is None:
+            provider = DEFAULT_SECRET_PROVIDER
+            app.state.secret_provider = provider
+        return provider
+
     def _require_organization_id(current_user: UserPrincipal) -> str:
         if current_user.organization_id is None:
             raise HTTPException(status_code=400, detail="Organization context is required.")
@@ -588,6 +704,21 @@ def create_app(
                 status=status,
             )
         )
+
+    @app.get("/api/v1/workflows", response_model=list[WorkflowDefinitionResponse], tags=["workflows"])
+    async def list_workflows(
+        enabled: bool | None = Query(default=None),
+        workflow_type: str | None = Query(default=None),
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+    ) -> list[WorkflowDefinitionResponse]:
+        """List registered product workflow definitions."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = WorkflowRepository(_audit_database().connect(), organization_id)
+        return [
+            workflow_definition_response(row)
+            for row in repository.list_definitions(enabled=enabled, workflow_type=workflow_type)
+        ]
 
     def _agent_registration_audit_event(
         *,
@@ -1053,6 +1184,16 @@ def create_app(
             detail="MCP approval decisions require Security Admin or Operator.",
         )
 
+    def _require_marketplace_reviewer(current_user: UserPrincipal) -> None:
+        if has_permission(current_user, Permission.SECURITY_MANAGE) or has_permission(
+            current_user, Permission.POLICY_WRITE
+        ):
+            return
+        raise HTTPException(
+            status_code=403,
+            detail="Marketplace reviews require Security Admin or Policy Admin.",
+        )
+
     def _runtime_session_audit_event(
         *,
         organization_id: str,
@@ -1225,6 +1366,52 @@ def create_app(
                 "scope": event.scope,
                 "reason": event.reason,
             },
+        )
+
+    def _plugin_installation_audit_event(
+        *,
+        organization_id: str,
+        actor_id: str,
+        event_type: str,
+        installation: PluginInstallationResponse,
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=installation.environment_id,
+            event_type=event_type,
+            source_component="marketplace",
+            actor_type="user",
+            actor_id=actor_id,
+            agent_id=installation.target_agent_id,
+            resource_type="plugin_installation",
+            resource_id=installation.id,
+            severity="info",
+            correlation_id=correlation_id,
+            payload_json=installation.model_dump(),
+        )
+
+    def _plugin_signing_key_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        event_type: str,
+        signing_key: PluginSigningKeyResponse,
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type=event_type,
+            source_component="marketplace-signing",
+            actor_type="user",
+            actor_id=actor_id,
+            resource_type="plugin_signing_key",
+            resource_id=signing_key.id,
+            severity="warning" if signing_key.status == "revoked" else "info",
+            correlation_id=correlation_id,
+            payload_json=signing_key.model_dump(),
         )
 
     def _mcp_scan_run_response(
@@ -6214,6 +6401,1175 @@ def create_app(
             "created_by": current_user.id,
             "environment_id": environment_id,
         }
+
+    @app.post(
+        "/api/v1/marketplace/plugins/import",
+        response_model=PluginResponse,
+        status_code=201,
+        tags=["marketplace"],
+    )
+    async def import_marketplace_plugin(
+        body: PluginImportRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+    ) -> PluginResponse:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = MarketplaceCatalogRepository(connection, organization_id)
+            try:
+                row = repository.import_plugin(body)
+            except MarketplaceManifestError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return plugin_response(repository, row)
+
+    @app.get(
+        "/api/v1/marketplace/plugins",
+        response_model=list[PluginResponse],
+        tags=["marketplace"],
+    )
+    async def list_marketplace_plugins(
+        plugin_type: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+    ) -> list[PluginResponse]:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = MarketplaceCatalogRepository(connection, organization_id)
+            return [
+                plugin_response(repository, row)
+                for row in repository.list_plugins(plugin_type=plugin_type, status=status)
+            ]
+
+    @app.get(
+        "/api/v1/marketplace/plugins/{plugin_id}",
+        response_model=PluginResponse,
+        tags=["marketplace"],
+    )
+    async def get_marketplace_plugin(
+        plugin_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+    ) -> PluginResponse:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = MarketplaceCatalogRepository(connection, organization_id)
+            row = repository.get_plugin(plugin_id)
+            if row is None:
+                raise HTTPException(status_code=404, detail="Plugin not found.")
+            return plugin_response(repository, row)
+
+    @app.post(
+        "/api/v1/marketplace/plugins/{version_id}/check-policy",
+        response_model=PluginPolicyResultResponse,
+        status_code=201,
+        tags=["marketplace"],
+    )
+    async def check_marketplace_plugin_policy(
+        version_id: str,
+        body: PluginPolicyCheckRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+    ) -> PluginPolicyResultResponse:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = MarketplaceCatalogRepository(connection, organization_id)
+            try:
+                row = repository.check_policy(version_id, body)
+            except PluginNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            return plugin_policy_result_response(row)
+
+    @app.post(
+        "/api/v1/marketplace/plugins/{version_id}/submit-review",
+        response_model=PluginReviewResponse,
+        status_code=201,
+        tags=["marketplace"],
+    )
+    async def submit_marketplace_plugin_review(
+        version_id: str,
+        body: PluginReviewSubmitRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+    ) -> PluginReviewResponse:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = MarketplaceCatalogRepository(connection, organization_id)
+            try:
+                row = repository.submit_review(version_id, body)
+            except PluginNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            return plugin_review_response(row)
+
+    @app.get(
+        "/api/v1/marketplace/reviews",
+        response_model=list[PluginReviewResponse],
+        tags=["marketplace"],
+    )
+    async def list_marketplace_plugin_reviews(
+        status: str | None = Query(default=None),
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+    ) -> list[PluginReviewResponse]:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = MarketplaceCatalogRepository(connection, organization_id)
+            return [plugin_review_response(row) for row in repository.list_reviews(status=status)]
+
+    @app.post(
+        "/api/v1/marketplace/reviews/{review_id}/approve",
+        response_model=PluginReviewResponse,
+        tags=["marketplace"],
+    )
+    async def approve_marketplace_plugin_review(
+        review_id: str,
+        body: PluginReviewDecisionRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+    ) -> PluginReviewResponse:
+        _require_marketplace_reviewer(current_user)
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = MarketplaceCatalogRepository(connection, organization_id)
+            try:
+                row = repository.decide_review(
+                    review_id,
+                    status="approved",
+                    reviewer_id=current_user.id,
+                    body=body,
+                )
+            except PluginReviewNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except PluginReviewStateError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return plugin_review_response(row)
+
+    @app.post(
+        "/api/v1/marketplace/reviews/{review_id}/reject",
+        response_model=PluginReviewResponse,
+        tags=["marketplace"],
+    )
+    async def reject_marketplace_plugin_review(
+        review_id: str,
+        body: PluginReviewDecisionRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+    ) -> PluginReviewResponse:
+        _require_marketplace_reviewer(current_user)
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = MarketplaceCatalogRepository(connection, organization_id)
+            try:
+                row = repository.decide_review(
+                    review_id,
+                    status="rejected",
+                    reviewer_id=current_user.id,
+                    body=body,
+                )
+            except PluginReviewNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except PluginReviewStateError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return plugin_review_response(row)
+
+    @app.post(
+        "/api/v1/marketplace/signing-keys",
+        response_model=PluginSigningKeyResponse,
+        status_code=201,
+        tags=["marketplace"],
+    )
+    async def create_marketplace_signing_key(
+        body: PluginSigningKeyCreateRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+    ) -> PluginSigningKeyResponse:
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        with _audit_database().transaction() as connection:
+            repository = MarketplaceCatalogRepository(connection, organization_id)
+            row = repository.create_signing_key(body, created_by=current_user.id)
+            response = plugin_signing_key_response(row)
+            AuditEventRepository(connection).insert(
+                _plugin_signing_key_audit_event(
+                    organization_id=organization_id,
+                    environment_id=context.environment_id or _default_environment_id_for_org(organization_id),
+                    actor_id=current_user.id,
+                    event_type="marketplace.signing_key.created",
+                    signing_key=response,
+                    correlation_id=context.correlation_id,
+                )
+            )
+            return response
+
+    @app.get(
+        "/api/v1/marketplace/signing-keys",
+        response_model=list[PluginSigningKeyResponse],
+        tags=["marketplace"],
+    )
+    async def list_marketplace_signing_keys(
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+    ) -> list[PluginSigningKeyResponse]:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = MarketplaceCatalogRepository(connection, organization_id)
+            return [plugin_signing_key_response(row) for row in repository.list_signing_keys()]
+
+    @app.post(
+        "/api/v1/marketplace/signing-keys/{key_id}/revoke",
+        response_model=PluginSigningKeyResponse,
+        tags=["marketplace"],
+    )
+    async def revoke_marketplace_signing_key(
+        key_id: str,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+    ) -> PluginSigningKeyResponse:
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        with _audit_database().transaction() as connection:
+            repository = MarketplaceCatalogRepository(connection, organization_id)
+            try:
+                row = repository.revoke_signing_key(key_id)
+            except PluginSigningKeyNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            response = plugin_signing_key_response(row)
+            AuditEventRepository(connection).insert(
+                _plugin_signing_key_audit_event(
+                    organization_id=organization_id,
+                    environment_id=context.environment_id or _default_environment_id_for_org(organization_id),
+                    actor_id=current_user.id,
+                    event_type="marketplace.signing_key.revoked",
+                    signing_key=response,
+                    correlation_id=context.correlation_id,
+                )
+            )
+            return response
+
+    @app.post(
+        "/api/v1/marketplace/plugins/{version_id}/assess-quality",
+        response_model=PluginQualityAssessmentResponse,
+        status_code=201,
+        tags=["marketplace"],
+    )
+    async def assess_marketplace_plugin_quality(
+        version_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+    ) -> PluginQualityAssessmentResponse:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = MarketplaceCatalogRepository(connection, organization_id)
+            try:
+                row = repository.assess_quality(version_id)
+            except PluginNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            return plugin_quality_assessment_response(row)
+
+    @app.post(
+        "/api/v1/marketplace/plugins/{version_id}/recompute-trust",
+        response_model=PluginTrustEventResponse,
+        status_code=201,
+        tags=["marketplace"],
+    )
+    async def recompute_marketplace_plugin_trust(
+        version_id: str,
+        body: PluginTrustRecomputeRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+    ) -> PluginTrustEventResponse:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = MarketplaceCatalogRepository(connection, organization_id)
+            try:
+                row = repository.recompute_trust(version_id, body)
+            except PluginNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            return plugin_trust_event_response(row)
+
+    @app.post(
+        "/api/v1/marketplace/installations",
+        response_model=PluginInstallationResponse,
+        status_code=201,
+        tags=["marketplace"],
+    )
+    async def create_marketplace_installation(
+        body: PluginInstallationCreateRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> PluginInstallationResponse:
+        organization_id = _require_organization_id(current_user)
+        if body.environment_id != environment_id:
+            raise HTTPException(status_code=400, detail="Installation environment must match request context.")
+        context = _request_context_from_request(request)
+        with _audit_database().transaction() as connection:
+            repository = MarketplaceCatalogRepository(connection, organization_id)
+            try:
+                row = repository.create_installation(body, installed_by=current_user.id)
+            except PluginInstallationBlockedError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except PluginNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            response = plugin_installation_response(row)
+            AuditEventRepository(connection).insert(
+                _plugin_installation_audit_event(
+                    organization_id=organization_id,
+                    actor_id=current_user.id,
+                    event_type="marketplace.plugin.installed",
+                    installation=response,
+                    correlation_id=context.correlation_id,
+                )
+            )
+            return response
+
+    @app.get(
+        "/api/v1/marketplace/installations",
+        response_model=list[PluginInstallationResponse],
+        tags=["marketplace"],
+    )
+    async def list_marketplace_installations(
+        status: str | None = Query(default=None),
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[PluginInstallationResponse]:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = MarketplaceCatalogRepository(connection, organization_id)
+            return [
+                plugin_installation_response(row)
+                for row in repository.list_installations(environment_id=environment_id, status=status)
+            ]
+
+    @app.post(
+        "/api/v1/marketplace/installations/{installation_id}/uninstall",
+        response_model=PluginInstallationResponse,
+        tags=["marketplace"],
+    )
+    async def uninstall_marketplace_plugin(
+        installation_id: str,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> PluginInstallationResponse:
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        with _audit_database().transaction() as connection:
+            repository = MarketplaceCatalogRepository(connection, organization_id)
+            try:
+                row = repository.uninstall(installation_id)
+            except PluginInstallationNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except PluginInstallationStateError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            response = plugin_installation_response(row)
+            if response.environment_id != environment_id:
+                raise HTTPException(status_code=404, detail="Plugin installation not found.")
+            AuditEventRepository(connection).insert(
+                _plugin_installation_audit_event(
+                    organization_id=organization_id,
+                    actor_id=current_user.id,
+                    event_type="marketplace.plugin.uninstalled",
+                    installation=response,
+                    correlation_id=context.correlation_id,
+                )
+            )
+            return response
+
+    @app.get(
+        "/api/v1/integrations/frameworks",
+        response_model=list[FrameworkIntegrationResponse],
+        tags=["integrations"],
+    )
+    async def list_integration_frameworks(
+        status: str | None = Query(default=None),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[FrameworkIntegrationResponse]:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = IntegrationRegistryRepository(connection, organization_id, environment_id)
+            return [
+                framework_integration_response(row)
+                for row in repository.list_frameworks(status=status)
+            ]
+
+    @app.post(
+        "/api/v1/integrations/provider-credentials",
+        response_model=ProviderCredentialResponse,
+        status_code=201,
+        tags=["integrations"],
+    )
+    async def create_integration_provider_credential(
+        body: ProviderCredentialCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ProviderCredentialResponse:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = IntegrationRegistryRepository(connection, organization_id, environment_id)
+            row = repository.create_provider_credential(
+                body,
+                created_by=current_user.id,
+                secret_provider=_secret_provider(),
+            )
+            return provider_credential_response(row)
+
+    @app.get(
+        "/api/v1/integrations/provider-credentials",
+        response_model=list[ProviderCredentialResponse],
+        tags=["integrations"],
+    )
+    async def list_integration_provider_credentials(
+        provider_type: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[ProviderCredentialResponse]:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = IntegrationRegistryRepository(connection, organization_id, environment_id)
+            return [
+                provider_credential_response(row)
+                for row in repository.list_provider_credentials(provider_type=provider_type, status=status)
+            ]
+
+    @app.post(
+        "/api/v1/integrations/provider-credentials/{credential_id}/test",
+        response_model=IntegrationHealthCheckResponse,
+        status_code=201,
+        tags=["integrations"],
+    )
+    async def test_integration_provider_credential(
+        credential_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> IntegrationHealthCheckResponse:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = IntegrationRegistryRepository(connection, organization_id, environment_id)
+            credential = repository.get_provider_credential(credential_id)
+            if credential is None:
+                raise HTTPException(status_code=404, detail="Provider credential not found.")
+            secret_value = _secret_provider().retrieve(credential["secret_ref"])
+            result = run_provider_health_test(credential["provider_type"], secret_value)
+            row = repository.create_provider_credential_health_check(credential, result)
+            return integration_health_check_response(row)
+
+    @app.post(
+        "/api/v1/integrations/health-checks",
+        response_model=IntegrationHealthCheckResponse,
+        status_code=201,
+        tags=["integrations"],
+    )
+    async def create_integration_health_check(
+        body: IntegrationHealthCheckCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> IntegrationHealthCheckResponse:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = IntegrationRegistryRepository(connection, organization_id, environment_id)
+            row = repository.create_health_check(body)
+            return integration_health_check_response(row)
+
+    @app.get(
+        "/api/v1/integrations/health-checks",
+        response_model=list[IntegrationHealthCheckResponse],
+        tags=["integrations"],
+    )
+    async def list_integration_health_checks(
+        target_type: str | None = Query(default=None),
+        target_id: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[IntegrationHealthCheckResponse]:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = IntegrationRegistryRepository(connection, organization_id, environment_id)
+            return [
+                integration_health_check_response(row)
+                for row in repository.list_health_checks(
+                    target_type=target_type,
+                    target_id=target_id,
+                    status=status,
+                )
+            ]
+
+    @app.get(
+        "/api/v1/integrations/health-checks/latest",
+        response_model=list[IntegrationHealthCheckResponse],
+        tags=["integrations"],
+    )
+    async def list_latest_integration_health_checks(
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[IntegrationHealthCheckResponse]:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = IntegrationRegistryRepository(connection, organization_id, environment_id)
+            return [integration_health_check_response(row) for row in repository.latest_health_checks()]
+
+    @app.post(
+        "/api/v1/integrations/framework-instances",
+        response_model=FrameworkInstanceResponse,
+        status_code=201,
+        tags=["integrations"],
+    )
+    async def create_integration_framework_instance(
+        body: FrameworkInstanceCreateRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> FrameworkInstanceResponse:
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        with _audit_database().transaction() as connection:
+            repository = IntegrationRegistryRepository(connection, organization_id, environment_id)
+            try:
+                row = repository.create_instance(body, created_by=current_user.id)
+            except FrameworkIntegrationNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except FrameworkInstanceConfigError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            response = framework_instance_response(row)
+            AuditEventRepository(connection).insert(
+                AuditEventEnvelope(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    event_type="integration.instance.created",
+                    source_component="framework-integrations",
+                    actor_type="user",
+                    actor_id=current_user.id,
+                    resource_type="integration_instance",
+                    resource_id=response.id,
+                    correlation_id=context.correlation_id,
+                    payload_json=response.model_dump(),
+                )
+            )
+            return response
+
+    @app.get(
+        "/api/v1/integrations/framework-instances",
+        response_model=list[FrameworkInstanceResponse],
+        tags=["integrations"],
+    )
+    async def list_integration_framework_instances(
+        status: str | None = Query(default=None),
+        integration_id: str | None = Query(default=None),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[FrameworkInstanceResponse]:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = IntegrationRegistryRepository(connection, organization_id, environment_id)
+            return [
+                framework_instance_response(row)
+                for row in repository.list_instances(status=status, integration_id=integration_id)
+            ]
+
+    @app.patch(
+        "/api/v1/integrations/framework-instances/{instance_id}",
+        response_model=FrameworkInstanceResponse,
+        tags=["integrations"],
+    )
+    async def patch_integration_framework_instance(
+        instance_id: str,
+        body: FrameworkInstancePatchRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> FrameworkInstanceResponse:
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        with _audit_database().transaction() as connection:
+            repository = IntegrationRegistryRepository(connection, organization_id, environment_id)
+            try:
+                row = repository.patch_instance(instance_id, body)
+            except FrameworkInstanceNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except FrameworkInstanceConfigError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            response = framework_instance_response(row)
+            AuditEventRepository(connection).insert(
+                AuditEventEnvelope(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    event_type="integration.instance.updated",
+                    source_component="framework-integrations",
+                    actor_type="user",
+                    actor_id=current_user.id,
+                    resource_type="integration_instance",
+                    resource_id=response.id,
+                    correlation_id=context.correlation_id,
+                    payload_json=response.model_dump(),
+                )
+            )
+            return response
+
+    @app.post(
+        "/api/v1/integrations/framework-instances/{instance_id}/link-agent",
+        response_model=FrameworkAgentResponse,
+        status_code=201,
+        tags=["integrations"],
+    )
+    async def link_integration_framework_agent(
+        instance_id: str,
+        body: FrameworkAgentLinkRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> FrameworkAgentResponse:
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        with _audit_database().transaction() as connection:
+            repository = IntegrationRegistryRepository(connection, organization_id, environment_id)
+            try:
+                row = repository.link_agent(instance_id, body)
+            except FrameworkInstanceNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except FrameworkAgentValidationError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            response = framework_agent_response(row)
+            AuditEventRepository(connection).insert(
+                AuditEventEnvelope(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    event_type="integration.framework_agent.linked",
+                    source_component="framework-integrations",
+                    actor_type="user",
+                    actor_id=current_user.id,
+                    resource_type="framework_agent",
+                    resource_id=response.id,
+                    agent_id=response.agent_id,
+                    correlation_id=context.correlation_id,
+                    payload_json=response.model_dump(),
+                )
+            )
+            return response
+
+    @app.get(
+        "/api/v1/integrations/framework-agents",
+        response_model=list[FrameworkAgentResponse],
+        tags=["integrations"],
+    )
+    async def list_integration_framework_agents(
+        integration_instance_id: str | None = Query(default=None),
+        agent_id: str | None = Query(default=None),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[FrameworkAgentResponse]:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = IntegrationRegistryRepository(connection, organization_id, environment_id)
+            return [
+                framework_agent_response(row)
+                for row in repository.list_framework_agents(
+                    integration_instance_id=integration_instance_id,
+                    agent_id=agent_id,
+                )
+            ]
+
+    @app.delete(
+        "/api/v1/integrations/framework-agents/{link_id}",
+        status_code=204,
+        tags=["integrations"],
+    )
+    async def unlink_integration_framework_agent(
+        link_id: str,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> None:
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        with _audit_database().transaction() as connection:
+            repository = IntegrationRegistryRepository(connection, organization_id, environment_id)
+            try:
+                row = repository.unlink_framework_agent(link_id)
+            except FrameworkAgentNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            response = framework_agent_response(row)
+            AuditEventRepository(connection).insert(
+                AuditEventEnvelope(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    event_type="integration.framework_agent.unlinked",
+                    source_component="framework-integrations",
+                    actor_type="user",
+                    actor_id=current_user.id,
+                    resource_type="framework_agent",
+                    resource_id=response.id,
+                    agent_id=response.agent_id,
+                    correlation_id=context.correlation_id,
+                    payload_json=response.model_dump(),
+                )
+            )
+
+    @app.post(
+        "/api/v1/observability/slo",
+        response_model=SloObjectiveResponse,
+        status_code=201,
+        tags=["observability"],
+    )
+    async def create_observability_slo(
+        body: SloObjectiveCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> SloObjectiveResponse:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            row = repository.create_slo(body, created_by=current_user.id)
+            return slo_objective_response(repository, row)
+
+    @app.get(
+        "/api/v1/observability/slo",
+        response_model=list[SloObjectiveResponse],
+        tags=["observability"],
+    )
+    async def list_observability_slos(
+        target_type: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[SloObjectiveResponse]:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            return [
+                slo_objective_response(repository, row)
+                for row in repository.list_slos(target_type=target_type, status=status)
+            ]
+
+    @app.post(
+        "/api/v1/observability/slo/{slo_id}/measurements",
+        response_model=SloMeasurementResponse,
+        status_code=201,
+        tags=["observability"],
+    )
+    async def create_observability_slo_measurement(
+        slo_id: str,
+        body: SloMeasurementCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> SloMeasurementResponse:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            try:
+                row = repository.create_slo_measurement(slo_id, body)
+            except SloObjectiveNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            return slo_measurement_response(row)
+
+    @app.post(
+        "/api/v1/observability/chaos/experiments",
+        response_model=ChaosExperimentResponse,
+        status_code=201,
+        tags=["observability"],
+    )
+    async def create_observability_chaos_experiment(
+        body: ChaosExperimentCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ChaosExperimentResponse:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            try:
+                row = repository.create_chaos_experiment(
+                    body,
+                    created_by=current_user.id,
+                    allow_production_targets=resolved_settings.enable_production_chaos,
+                )
+            except ChaosExperimentValidationError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return chaos_experiment_response(row)
+
+    @app.get(
+        "/api/v1/observability/chaos/experiments",
+        response_model=list[ChaosExperimentResponse],
+        tags=["observability"],
+    )
+    async def list_observability_chaos_experiments(
+        status: str | None = Query(default=None),
+        target_type: str | None = Query(default=None),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[ChaosExperimentResponse]:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            return [
+                chaos_experiment_response(row)
+                for row in repository.list_chaos_experiments(status=status, target_type=target_type)
+            ]
+
+    @app.post(
+        "/api/v1/observability/chaos/experiments/{experiment_id}/run",
+        response_model=ChaosRunResponse,
+        status_code=201,
+        tags=["observability"],
+    )
+    async def run_observability_chaos_experiment(
+        experiment_id: str,
+        body: ChaosRunCreateRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ChaosRunResponse:
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            try:
+                row = repository.create_chaos_run(experiment_id, body)
+            except ChaosExperimentNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            response = chaos_run_response(row)
+            experiment = repository.get_chaos_experiment(experiment_id)
+            event = AuditEventEnvelope(
+                organization_id=organization_id,
+                environment_id=environment_id,
+                event_type=f"chaos.run.{response.status}",
+                source_component="chaos-operations",
+                actor_type="user",
+                actor_id=current_user.id,
+                resource_type="chaos_run",
+                resource_id=response.id,
+                severity="warning" if response.result.get("guardrail_breached") else "info",
+                correlation_id=context.correlation_id,
+                payload_json=response.model_dump(),
+            )
+            AuditEventRepository(connection).insert(event)
+            if experiment is not None and response.result.get("guardrail_breached"):
+                for slo in repository.list_slos(target_type=experiment["target_type"]):
+                    if slo["target_id"] == experiment["target_id"]:
+                        repository.create_slo_measurement(
+                            slo["id"],
+                            SloMeasurementCreateRequest(
+                                value=0.0,
+                                good_events=0,
+                                total_events=1,
+                                metadata={"source": "chaos_run", "chaos_run_id": response.id},
+                            ),
+                        )
+                repository.create_incident(
+                    IncidentCreateRequest(
+                        severity="critical",
+                        title=f"Chaos guardrail tripped: {experiment['name']}",
+                        summary="A chaos experiment stopped because one or more guardrails were breached.",
+                        correlation_id=context.correlation_id,
+                        source_event_id=event.id,
+                    )
+                )
+            return response
+
+    @app.post(
+        "/api/v1/observability/chaos/runs/{run_id}/stop",
+        response_model=ChaosRunResponse,
+        tags=["observability"],
+    )
+    async def stop_observability_chaos_run(
+        run_id: str,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ChaosRunResponse:
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            try:
+                row = repository.stop_chaos_run(run_id)
+            except ChaosRunNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            response = chaos_run_response(row)
+            AuditEventRepository(connection).insert(
+                AuditEventEnvelope(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    event_type="chaos.run.stopped",
+                    source_component="chaos-operations",
+                    actor_type="user",
+                    actor_id=current_user.id,
+                    resource_type="chaos_run",
+                    resource_id=response.id,
+                    severity="warning",
+                    correlation_id=context.correlation_id,
+                    payload_json=response.model_dump(),
+                )
+            )
+            return response
+
+    @app.post(
+        "/api/v1/observability/rollouts",
+        response_model=RolloutResponse,
+        status_code=201,
+        tags=["observability"],
+    )
+    async def create_observability_rollout(
+        body: RolloutCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> RolloutResponse:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            row = repository.create_rollout(body, created_by=current_user.id)
+            return rollout_response(repository, row)
+
+    @app.get(
+        "/api/v1/observability/rollouts",
+        response_model=list[RolloutResponse],
+        tags=["observability"],
+    )
+    async def list_observability_rollouts(
+        status: str | None = Query(default=None),
+        target_type: str | None = Query(default=None),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[RolloutResponse]:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            return [
+                rollout_response(repository, row)
+                for row in repository.list_rollouts(status=status, target_type=target_type)
+            ]
+
+    @app.post(
+        "/api/v1/observability/rollouts/{rollout_id}/advance",
+        response_model=RolloutResponse,
+        tags=["observability"],
+    )
+    async def advance_observability_rollout(
+        rollout_id: str,
+        body: RolloutAdvanceRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> RolloutResponse:
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            try:
+                row = repository.advance_rollout(rollout_id, body)
+            except RolloutNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            response = rollout_response(repository, row)
+            AuditEventRepository(connection).insert(
+                AuditEventEnvelope(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    event_type=f"rollout.{response.status}",
+                    source_component="rollout-operations",
+                    actor_type="user",
+                    actor_id=current_user.id,
+                    resource_type="rollout",
+                    resource_id=response.id,
+                    severity="warning" if response.status == "blocked" else "info",
+                    correlation_id=context.correlation_id,
+                    payload_json=response.model_dump(),
+                )
+            )
+            return response
+
+    @app.post(
+        "/api/v1/observability/rollouts/{rollout_id}/rollback",
+        response_model=RolloutResponse,
+        tags=["observability"],
+    )
+    async def rollback_observability_rollout(
+        rollout_id: str,
+        body: RolloutRollbackRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> RolloutResponse:
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            try:
+                row = repository.rollback_rollout(rollout_id, body)
+            except RolloutNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            response = rollout_response(repository, row)
+            AuditEventRepository(connection).insert(
+                AuditEventEnvelope(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    event_type="rollout.rolled_back",
+                    source_component="rollout-operations",
+                    actor_type="user",
+                    actor_id=current_user.id,
+                    resource_type="rollout",
+                    resource_id=response.id,
+                    severity="warning",
+                    correlation_id=context.correlation_id,
+                    payload_json=response.model_dump(),
+                )
+            )
+            return response
+
+    @app.post(
+        "/api/v1/observability/cost-budgets",
+        response_model=CostBudgetResponse,
+        status_code=201,
+        tags=["observability"],
+    )
+    async def create_observability_cost_budget(
+        body: CostBudgetCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> CostBudgetResponse:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            row = repository.create_cost_budget(body, created_by=current_user.id)
+            return cost_budget_response(row)
+
+    @app.get(
+        "/api/v1/observability/cost-budgets",
+        response_model=list[CostBudgetResponse],
+        tags=["observability"],
+    )
+    async def list_observability_cost_budgets(
+        target_type: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[CostBudgetResponse]:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            return [
+                cost_budget_response(row)
+                for row in repository.list_cost_budgets(target_type=target_type, status=status)
+            ]
+
+    @app.post(
+        "/api/v1/observability/cost-events",
+        response_model=CostEventResponse,
+        status_code=201,
+        tags=["observability"],
+    )
+    async def create_observability_cost_event(
+        body: CostEventCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> CostEventResponse:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            row = repository.create_cost_event(body)
+            return cost_event_response(row)
+
+    @app.get(
+        "/api/v1/observability/costs",
+        response_model=CostDashboardResponse,
+        tags=["observability"],
+    )
+    async def get_observability_costs(
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> CostDashboardResponse:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            return cost_dashboard_response(repository)
+
+    @app.post(
+        "/api/v1/observability/incidents",
+        response_model=IncidentResponse,
+        status_code=201,
+        tags=["observability"],
+    )
+    async def create_observability_incident(
+        body: IncidentCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> IncidentResponse:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            row = repository.create_incident(body)
+            return incident_response(repository, row)
+
+    @app.post(
+        "/api/v1/observability/incidents/from-event",
+        response_model=IncidentResponse,
+        status_code=201,
+        tags=["observability"],
+    )
+    async def create_observability_incident_from_event(
+        body: IncidentFromEventRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> IncidentResponse:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            try:
+                row = repository.create_incident_from_event(body)
+            except IncidentNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            return incident_response(repository, row)
+
+    @app.get(
+        "/api/v1/observability/incidents",
+        response_model=list[IncidentResponse],
+        tags=["observability"],
+    )
+    async def list_observability_incidents(
+        status: str | None = Query(default=None),
+        severity: str | None = Query(default=None),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[IncidentResponse]:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            return [
+                incident_response(repository, row)
+                for row in repository.list_incidents(status=status, severity=severity)
+            ]
+
+    @app.post(
+        "/api/v1/observability/incidents/{incident_id}/ack",
+        response_model=IncidentResponse,
+        tags=["observability"],
+    )
+    async def acknowledge_observability_incident(
+        incident_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> IncidentResponse:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            try:
+                row = repository.acknowledge_incident(incident_id, actor_id=current_user.id)
+            except IncidentNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except IncidentStateError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            return incident_response(repository, row)
+
+    @app.post(
+        "/api/v1/observability/incidents/{incident_id}/resolve",
+        response_model=IncidentResponse,
+        tags=["observability"],
+    )
+    async def resolve_observability_incident(
+        incident_id: str,
+        body: IncidentResolveRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> IncidentResponse:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            try:
+                row = repository.resolve_incident(incident_id, body)
+            except IncidentNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except IncidentStateError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            return incident_response(repository, row)
 
     @app.get("/api/v1/system/dependencies", response_model=list[DependencyStatus], tags=["system"])
     async def system_dependencies(

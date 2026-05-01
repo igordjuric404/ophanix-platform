@@ -32,6 +32,22 @@ EXPECTED_MIGRATIONS = [
     "0020",
     "0021",
     "0022",
+    "0023",
+    "0024",
+    "0025",
+    "0026",
+    "0027",
+    "0028",
+    "0029",
+    "0030",
+    "0031",
+    "0032",
+    "0033",
+    "0034",
+    "0035",
+    "0036",
+    "0037",
+    "0038",
 ]
 
 
@@ -108,6 +124,29 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertIn("sandbox_profiles", tables)
             self.assertIn("sandbox_decisions", tables)
             self.assertIn("kill_switch_events", tables)
+            self.assertIn("plugins", tables)
+            self.assertIn("plugin_versions", tables)
+            self.assertIn("plugin_policy_results", tables)
+            self.assertIn("plugin_installations", tables)
+            self.assertIn("plugin_reviews", tables)
+            self.assertIn("plugin_signing_keys", tables)
+            self.assertIn("plugin_quality_assessments", tables)
+            self.assertIn("plugin_trust_events", tables)
+            self.assertIn("slo_objectives", tables)
+            self.assertIn("slo_measurements", tables)
+            self.assertIn("cost_budgets", tables)
+            self.assertIn("cost_events", tables)
+            self.assertIn("incidents", tables)
+            self.assertIn("chaos_experiments", tables)
+            self.assertIn("chaos_runs", tables)
+            self.assertIn("rollouts", tables)
+            self.assertIn("rollout_events", tables)
+            self.assertIn("integrations", tables)
+            self.assertIn("integration_instances", tables)
+            self.assertIn("framework_agents", tables)
+            self.assertIn("provider_credentials", tables)
+            self.assertIn("integration_health_checks", tables)
+            self.assertIn("workflow_definitions", tables)
             self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS)
         finally:
             connection.close()
@@ -118,6 +157,549 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             connection.row_factory = sqlite3.Row
             runner = MigrationRunner(connection)
             runner.apply_all()
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0038")
+            self.assertNotIn("workflow_definitions", tables)
+            self.assertIn("integration_health_checks", tables)
+            self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-1])
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0037")
+            self.assertNotIn("integration_health_checks", tables)
+            self.assertIn("provider_credentials", tables)
+            self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-2])
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0036")
+            self.assertNotIn("provider_credentials", tables)
+            self.assertIn("framework_agents", tables)
+            self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-3])
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0035")
+            self.assertNotIn("framework_agents", tables)
+            self.assertIn("integration_instances", tables)
+            self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-4])
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0034")
+            self.assertNotIn("integration_instances", tables)
+            self.assertIn("integrations", tables)
+            self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-5])
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0033")
+            self.assertNotIn("integrations", tables)
+            self.assertIn("rollout_events", tables)
+            self.assertIn("rollouts", tables)
+            self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-6])
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0032")
+            self.assertNotIn("rollout_events", tables)
+            self.assertNotIn("rollouts", tables)
+            self.assertIn("chaos_runs", tables)
+            self.assertEqual(
+                runner.applied_versions(),
+                [
+                    "0001",
+                    "0002",
+                    "0003",
+                    "0004",
+                    "0005",
+                    "0006",
+                    "0007",
+                    "0008",
+                    "0009",
+                    "0010",
+                    "0011",
+                    "0012",
+                    "0013",
+                    "0014",
+                    "0015",
+                    "0016",
+                    "0017",
+                    "0018",
+                    "0019",
+                    "0020",
+                    "0021",
+                    "0022",
+                    "0023",
+                    "0024",
+                    "0025",
+                    "0026",
+                    "0027",
+                    "0028",
+                    "0029",
+                    "0030",
+                    "0031",
+                ],
+            )
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0031")
+            self.assertNotIn("chaos_runs", tables)
+            self.assertIn("chaos_experiments", tables)
+            self.assertEqual(
+                runner.applied_versions(),
+                [
+                    "0001",
+                    "0002",
+                    "0003",
+                    "0004",
+                    "0005",
+                    "0006",
+                    "0007",
+                    "0008",
+                    "0009",
+                    "0010",
+                    "0011",
+                    "0012",
+                    "0013",
+                    "0014",
+                    "0015",
+                    "0016",
+                    "0017",
+                    "0018",
+                    "0019",
+                    "0020",
+                    "0021",
+                    "0022",
+                    "0023",
+                    "0024",
+                    "0025",
+                    "0026",
+                    "0027",
+                    "0028",
+                    "0029",
+                    "0030",
+                ],
+            )
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0030")
+            self.assertNotIn("chaos_experiments", tables)
+            self.assertIn("incidents", tables)
+            self.assertEqual(
+                runner.applied_versions(),
+                [
+                    "0001",
+                    "0002",
+                    "0003",
+                    "0004",
+                    "0005",
+                    "0006",
+                    "0007",
+                    "0008",
+                    "0009",
+                    "0010",
+                    "0011",
+                    "0012",
+                    "0013",
+                    "0014",
+                    "0015",
+                    "0016",
+                    "0017",
+                    "0018",
+                    "0019",
+                    "0020",
+                    "0021",
+                    "0022",
+                    "0023",
+                    "0024",
+                    "0025",
+                    "0026",
+                    "0027",
+                    "0028",
+                    "0029",
+                ],
+            )
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0029")
+            self.assertNotIn("incidents", tables)
+            self.assertIn("cost_budgets", tables)
+            self.assertIn("cost_events", tables)
+            self.assertEqual(
+                runner.applied_versions(),
+                [
+                    "0001",
+                    "0002",
+                    "0003",
+                    "0004",
+                    "0005",
+                    "0006",
+                    "0007",
+                    "0008",
+                    "0009",
+                    "0010",
+                    "0011",
+                    "0012",
+                    "0013",
+                    "0014",
+                    "0015",
+                    "0016",
+                    "0017",
+                    "0018",
+                    "0019",
+                    "0020",
+                    "0021",
+                    "0022",
+                    "0023",
+                    "0024",
+                    "0025",
+                    "0026",
+                    "0027",
+                    "0028",
+                ],
+            )
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0028")
+            self.assertNotIn("cost_budgets", tables)
+            self.assertNotIn("cost_events", tables)
+            self.assertIn("slo_objectives", tables)
+            self.assertIn("slo_measurements", tables)
+            self.assertEqual(
+                runner.applied_versions(),
+                [
+                    "0001",
+                    "0002",
+                    "0003",
+                    "0004",
+                    "0005",
+                    "0006",
+                    "0007",
+                    "0008",
+                    "0009",
+                    "0010",
+                    "0011",
+                    "0012",
+                    "0013",
+                    "0014",
+                    "0015",
+                    "0016",
+                    "0017",
+                    "0018",
+                    "0019",
+                    "0020",
+                    "0021",
+                    "0022",
+                    "0023",
+                    "0024",
+                    "0025",
+                    "0026",
+                    "0027",
+                ],
+            )
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0027")
+            self.assertNotIn("slo_objectives", tables)
+            self.assertNotIn("slo_measurements", tables)
+            self.assertIn("plugin_reviews", tables)
+            self.assertIn("plugin_signing_keys", tables)
+            self.assertIn("plugin_quality_assessments", tables)
+            self.assertIn("plugin_trust_events", tables)
+            self.assertEqual(
+                runner.applied_versions(),
+                [
+                    "0001",
+                    "0002",
+                    "0003",
+                    "0004",
+                    "0005",
+                    "0006",
+                    "0007",
+                    "0008",
+                    "0009",
+                    "0010",
+                    "0011",
+                    "0012",
+                    "0013",
+                    "0014",
+                    "0015",
+                    "0016",
+                    "0017",
+                    "0018",
+                    "0019",
+                    "0020",
+                    "0021",
+                    "0022",
+                    "0023",
+                    "0024",
+                    "0025",
+                    "0026",
+                ],
+            )
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0026")
+            self.assertNotIn("plugin_reviews", tables)
+            self.assertNotIn("plugin_signing_keys", tables)
+            self.assertNotIn("plugin_quality_assessments", tables)
+            self.assertNotIn("plugin_trust_events", tables)
+            self.assertIn("plugin_installations", tables)
+            self.assertIn("plugin_policy_results", tables)
+            self.assertIn("plugins", tables)
+            self.assertIn("plugin_versions", tables)
+            self.assertIn("sandbox_profiles", tables)
+            self.assertIn("sandbox_decisions", tables)
+            self.assertIn("kill_switch_events", tables)
+            self.assertEqual(
+                runner.applied_versions(),
+                [
+                    "0001",
+                    "0002",
+                    "0003",
+                    "0004",
+                    "0005",
+                    "0006",
+                    "0007",
+                    "0008",
+                    "0009",
+                    "0010",
+                    "0011",
+                    "0012",
+                    "0013",
+                    "0014",
+                    "0015",
+                    "0016",
+                    "0017",
+                    "0018",
+                    "0019",
+                    "0020",
+                    "0021",
+                    "0022",
+                    "0023",
+                    "0024",
+                    "0025",
+                ],
+            )
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0025")
+            self.assertNotIn("plugin_installations", tables)
+            self.assertIn("plugin_policy_results", tables)
+            self.assertIn("plugins", tables)
+            self.assertIn("plugin_versions", tables)
+            self.assertIn("sandbox_profiles", tables)
+            self.assertIn("sandbox_decisions", tables)
+            self.assertIn("kill_switch_events", tables)
+            self.assertEqual(
+                runner.applied_versions(),
+                [
+                    "0001",
+                    "0002",
+                    "0003",
+                    "0004",
+                    "0005",
+                    "0006",
+                    "0007",
+                    "0008",
+                    "0009",
+                    "0010",
+                    "0011",
+                    "0012",
+                    "0013",
+                    "0014",
+                    "0015",
+                    "0016",
+                    "0017",
+                    "0018",
+                    "0019",
+                    "0020",
+                    "0021",
+                    "0022",
+                    "0023",
+                    "0024",
+                ],
+            )
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0024")
+            self.assertNotIn("plugin_policy_results", tables)
+            self.assertIn("plugins", tables)
+            self.assertIn("plugin_versions", tables)
+            self.assertIn("sandbox_profiles", tables)
+            self.assertIn("sandbox_decisions", tables)
+            self.assertIn("kill_switch_events", tables)
+            self.assertEqual(
+                runner.applied_versions(),
+                [
+                    "0001",
+                    "0002",
+                    "0003",
+                    "0004",
+                    "0005",
+                    "0006",
+                    "0007",
+                    "0008",
+                    "0009",
+                    "0010",
+                    "0011",
+                    "0012",
+                    "0013",
+                    "0014",
+                    "0015",
+                    "0016",
+                    "0017",
+                    "0018",
+                    "0019",
+                    "0020",
+                    "0021",
+                    "0022",
+                    "0023",
+                ],
+            )
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0023")
+            self.assertNotIn("plugins", tables)
+            self.assertNotIn("plugin_versions", tables)
+            self.assertIn("sandbox_profiles", tables)
+            self.assertIn("sandbox_decisions", tables)
+            self.assertIn("kill_switch_events", tables)
+            self.assertEqual(
+                runner.applied_versions(),
+                [
+                    "0001",
+                    "0002",
+                    "0003",
+                    "0004",
+                    "0005",
+                    "0006",
+                    "0007",
+                    "0008",
+                    "0009",
+                    "0010",
+                    "0011",
+                    "0012",
+                    "0013",
+                    "0014",
+                    "0015",
+                    "0016",
+                    "0017",
+                    "0018",
+                    "0019",
+                    "0020",
+                    "0021",
+                    "0022",
+                ],
+            )
 
             rolled_back = runner.rollback_last()
             tables = {

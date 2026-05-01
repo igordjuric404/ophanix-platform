@@ -9,6 +9,9 @@ import { renderPoliciesPage } from "./policies.js";
 import { renderTrustPage } from "./trust.js";
 import { renderMeshPage } from "./mesh.js";
 import { renderMcpPage } from "./mcp.js";
+import { renderMarketplacePage } from "./marketplace.js";
+import { renderObservabilityPage } from "./observability.js";
+import { renderIntegrationsPage } from "./integrations.js";
 import { renderRuntimePage } from "./runtime.js";
 
 export { escapeHtml };
@@ -208,6 +211,12 @@ export function renderShell({ currentPath = DEFAULT_ROUTE, state = createInitial
         ? renderMeshPage(state)
       : route?.path === "/mcp"
         ? renderMcpPage(state)
+      : route?.path === "/marketplace"
+        ? renderMarketplacePage(state)
+      : route?.path === "/observability"
+        ? renderObservabilityPage(state)
+      : route?.path === "/integrations"
+        ? renderIntegrationsPage(state)
       : route?.path === "/runtime"
         ? renderRuntimePage(state)
       : route?.path === "/discovery"

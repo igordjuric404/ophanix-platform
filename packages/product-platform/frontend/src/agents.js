@@ -341,6 +341,9 @@ export function renderAgentDetailTab(detail, activeTab) {
   if (activeTab === "runtime") {
     return renderAgentRuntimeTab(detail);
   }
+  if (activeTab === "integrations") {
+    return renderAgentIntegrationsTab(detail);
+  }
   if (activeTab === "overview") {
     return renderOverviewTab(detail);
   }
@@ -348,6 +351,20 @@ export function renderAgentDetailTab(detail, activeTab) {
     <div class="empty-state" data-agent-detail-placeholder="${escapeHtml(activeTab)}">
       <strong>${escapeHtml(activeTab)}</strong>
       <span>Pending linked feature</span>
+    </div>
+  `;
+}
+
+export function renderAgentIntegrationsTab(detail) {
+  const agent = detail.summary;
+  return `
+    <div data-agent-integrations-tab>
+      <dl class="metadata-grid">
+        <dt>Framework</dt><dd>${escapeHtml(agent.framework ?? "unknown")}</dd>
+        <dt>Agent ID</dt><dd>${escapeHtml(agent.id)}</dd>
+        <dt>Status</dt><dd>${escapeHtml(agent.status)}</dd>
+      </dl>
+      <a class="primary-action" href="/integrations" data-route="/integrations">Open Integrations</a>
     </div>
   `;
 }
