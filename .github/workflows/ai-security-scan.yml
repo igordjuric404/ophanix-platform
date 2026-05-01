@@ -41,6 +41,7 @@ jobs:
     if: >-
       github.event_name == 'pull_request_target' &&
       github.event.pull_request.draft == false &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
       github.actor != 'dependabot[bot]'
     continue-on-error: true
     steps:
