@@ -4,8 +4,8 @@
 AutoGen Agents with Trust Verification — Quickstart
 ====================================================
 
-pip install agent-governance-toolkit[full] pyautogen
-python examples/quickstart/autogen_governed.py
+python3 -m pip install 'agent-governance-toolkit[full]' pyautogen
+python3 examples/quickstart/autogen_governed.py
 
 Shows a real policy violation being caught during message routing,
 then a safe message passing verification, with a printed audit trail.
