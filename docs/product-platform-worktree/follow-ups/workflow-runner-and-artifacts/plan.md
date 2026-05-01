@@ -1,5 +1,86 @@
 # Workflow Runner And Artifact Store Completion
 
+## Second-Pass Status
+
+Status: `Audit finding revised` and `Confirmed gap`.
+
+## Implementation Status
+
+Status: `Completed` on 2026-05-01.
+
+Completed work:
+
+- Added persisted `workflow.run` jobs for queued workflow runs.
+- Added a workflow worker executor that transitions queued runs/jobs, emits audit events, and stores linked `workflow.output` artifacts.
+- Replaced placeholder seeded adapters with deterministic checks for governance, integrity, marketplace, security scan, SBOM, and dependency-confusion workflows.
+- Created linked artifact rows for audit exports and generated compliance reports.
+- Surfaced linked compliance report artifacts in the compliance report preview.
+
+Validation:
+
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_workflow_runner*.py' -v`
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_compliance_phase*.py' -v`
+- `node --test test/workflows.test.js test/compliance.test.js`
+- `npm run typecheck`
+- `npm run lint`
+- `npm test`
+
+The first-audit gap is no longer "missing entirely": `2de9148` added workflow run/log migrations, artifact and attestation migrations, workflow/artifact APIs, a frontend workspace, focused tests, and aggregate passing verification. The remaining issue is product completeness. Current workflow execution runs synchronously in the API when `run_immediately` is true, queued runs have no worker-backed executor, most seeded workflow adapters are placeholder "completed" checks instead of the existing CLI/script checks named by the original plan, and generated outputs such as compliance reports and audit exports are not yet stored as checksumed `artifacts` rows.
+
+## Second-Pass Delta Plan
+
+### Goal
+
+Turn the structurally implemented workflow and artifact surfaces into end-to-end product workflows: queued runs should execute through the existing worker runtime, workflow adapters should call real product checks where available, and artifacts produced by workflows, audit exports, and compliance reports should land in the artifact store with links and attestations.
+
+### Evidence
+
+- Implemented: `packages/product-platform/src/product_platform/workflows/*`, `packages/product-platform/src/product_platform/artifacts/*`, migrations `0047` through `0049`, `/api/v1/workflows/*`, `/api/v1/workflow-runs/*`, `/api/v1/artifacts/*`, `frontend/src/workflows.js`, and related tests.
+- Remaining gap: `create_workflow_run` in `packages/product-platform/src/product_platform/api/app.py` executes the runner inline for immediate runs and only stores queued runs for cancellation.
+- Remaining gap: `build_default_workflow_runner_registry()` uses real policy linting, but governance verify, integrity, marketplace evaluate, security scan, SBOM, and dependency-confusion checks are simple placeholder adapters or print-only shell commands.
+- Remaining gap: compliance reports use `compliance-report://...` and audit exports use `audit-export://...` metadata rather than creating artifact records through `ArtifactRepository`.
+
+### Implementation Approach
+
+1. Register a workflow job type with the existing worker runtime so queued workflow runs can be picked up, started, completed, failed, and audited outside the request path.
+2. Keep a synchronous test adapter or explicit test flag only for deterministic focused tests.
+3. Replace placeholder workflow adapters with real in-process calls or allowlisted CLI/script command vectors for available repo checks.
+4. Allow workflow runs to emit output artifacts and automatically link them to `workflow_run`.
+5. Store audit exports and generated compliance reports through `ArtifactRepository`, then link them to `audit_export` and `compliance_report` targets.
+6. Surface artifact links on compliance report and audit export detail flows as well as workflow detail.
+
+### Likely Files
+
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/worker/runtime.py`
+- `packages/product-platform/src/product_platform/worker/store.py`
+- `packages/product-platform/src/product_platform/workflows/runner.py`
+- `packages/product-platform/src/product_platform/workflows/repository.py`
+- `packages/product-platform/src/product_platform/artifacts/repository.py`
+- `packages/product-platform/src/product_platform/compliance/repository.py`
+- `packages/product-platform/src/product_platform/compliance/models.py`
+- `packages/product-platform/frontend/src/workflows.js`
+- `packages/product-platform/frontend/src/compliance.js`
+- `packages/product-platform/tests/test_workflow_runner_phase*.py`
+- `packages/product-platform/tests/test_compliance_phase*.py`
+
+### Test Plan
+
+- Backend test that a queued workflow run is executed by the worker and transitions through queued/running/succeeded.
+- Backend test that an API-created queued run does not execute inline.
+- Backend tests for real adapters or allowlisted commands for each seeded command ref.
+- Integration test that a workflow output artifact is stored, checksumed, linked to the run, downloadable, and attestable.
+- Integration test that audit export and compliance report generation create artifact rows and links.
+- Frontend tests that linked artifacts appear from workflow and compliance surfaces.
+- Re-run full backend suite with localhost binding and frontend validation.
+
+### Acceptance Criteria
+
+- Workflow execution is worker-backed outside tests.
+- Seeded workflow definitions invoke meaningful product checks, not placeholder success messages.
+- Product-generated artifacts are durable, checksumed, linked, downloadable, and attestable.
+- Existing workflow and artifact APIs remain backward compatible and covered by passing tests.
+
 ## Feature Scope
 
 Complete the unfinished workflow and artifact plans from `05-ecosystem-operations/04-workflows`. Existing workflow definitions should become executable product workflows with safe runner controls, persisted logs, audit history, UI, durable artifacts, artifact links, and attestations.

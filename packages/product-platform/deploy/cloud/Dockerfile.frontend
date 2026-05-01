@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.7
-
 FROM nginx:1.27-alpine AS runtime
 
 COPY packages/product-platform/frontend /usr/share/nginx/html

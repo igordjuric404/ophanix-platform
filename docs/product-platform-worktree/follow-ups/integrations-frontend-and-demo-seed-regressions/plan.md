@@ -1,5 +1,11 @@
 # Integrations Frontend And Demo Seed Regression Recovery
 
+## Second-Pass Status
+
+Status: `Obsolete follow-up`.
+
+The first-audit regression is resolved in `2de9148`: generic seed data no longer inserts demo baseline agents/MCP fixtures by default, Demo Lab reset explicitly restores baseline fixtures, the integrations frontend exports and route are complete enough for the existing app handlers/tests, and the backend/frontend aggregate suites pass when localhost socket binding is allowed for local-demo tests. This plan is retained as historical context only.
+
 ## Feature Scope
 
 Restore HEAD verification after `05-ecosystem-operations` and `06-demo-delivery` by fixing integration frontend completeness and isolating demo baseline seed data so it does not break earlier agent and integration tests. This plan does not add new product scope beyond making the committed features coherent and verifiable.

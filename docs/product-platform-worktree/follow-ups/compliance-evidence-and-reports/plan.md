@@ -1,5 +1,11 @@
 # Compliance Evidence And Reports Completion
 
+## Second-Pass Status
+
+Status: `Obsolete follow-up`.
+
+The compliance-specific gap from the first audit is implemented in `2de9148`: audit explorer/export, control frameworks, controls, mappings, evidence recompute, violations, compliance reports, downloads, attestations, API routes, frontend route, and focused backend/frontend tests now exist and pass in aggregate verification. This plan is retained as historical context only. The remaining artifact-store integration concern is tracked in `follow-ups/workflow-runner-and-artifacts/plan.md`, because it affects audit exports, compliance reports, and workflow outputs together.
+
 ## Feature Scope
 
 Implement the missing compliance surfaces from `02-policy-governance/02-compliance`: Audit Explorer product page/export, Control Map and Evidence Library, Violations, and Compliance Report Builder. The goal is to turn audit events, workflow artifacts, and governance decisions into defensible compliance evidence and reports.

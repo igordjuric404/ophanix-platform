@@ -9,7 +9,11 @@ from typing import Any
 
 from product_platform.db.ids import generate_id
 from product_platform.db.time import utc_now_iso
-from product_platform.policies.models import PolicyEvaluationResponse
+from product_platform.policies.models import (
+    PolicyEvaluationResponse,
+    PolicyEvaluationSummaryResponse,
+    PolicyEvaluationTimeBucket,
+)
 
 
 class PolicyEvaluationNotFoundError(ValueError):
@@ -113,19 +117,7 @@ class PolicyEvaluationRepository:
     def list(self, query: PolicyEvaluationQuery) -> list[Row]:
         """List evaluation rows in scope with feed filters."""
 
-        clauses = ["organization_id = ?", "environment_id = ?"]
-        values: list[object] = [query.organization_id, query.environment_id]
-        for column, value in [
-            ("decision", query.decision),
-            ("mode", query.mode),
-            ("agent_id", query.agent_id),
-            ("action", query.action),
-            ("policy_id", query.policy_id),
-            ("correlation_id", query.correlation_id),
-        ]:
-            if value is not None:
-                clauses.append(f"{column} = ?")
-                values.append(value)
+        clauses, values = _query_clauses(query)
         values.extend([query.limit, query.offset])
         return self.connection.execute(
             f"""
@@ -137,6 +129,85 @@ class PolicyEvaluationRepository:
             """,
             values,
         ).fetchall()
+
+    def summary(self, query: PolicyEvaluationQuery) -> PolicyEvaluationSummaryResponse:
+        """Aggregate feed rows by decision, mode, action, and daily buckets."""
+
+        clauses, values = _query_clauses(query)
+        where_sql = " AND ".join(clauses)
+        total_row = self.connection.execute(
+            f"SELECT COUNT(*) AS total_count FROM policy_evaluations WHERE {where_sql}",
+            values,
+        ).fetchone()
+        decision_counts = self._count_by("decision", where_sql, values)
+        mode_counts = self._count_by("mode", where_sql, values)
+        action_counts = self._count_by("action", where_sql, values)
+        bucket_rows = self.connection.execute(
+            f"""
+            SELECT substr(created_at, 1, 10) AS bucket, decision, COUNT(*) AS count
+            FROM policy_evaluations
+            WHERE {where_sql}
+            GROUP BY bucket, decision
+            ORDER BY bucket ASC
+            """,
+            values,
+        ).fetchall()
+        buckets: dict[str, PolicyEvaluationTimeBucket] = {}
+        for row in bucket_rows:
+            bucket = row["bucket"]
+            current = buckets.setdefault(
+                bucket,
+                PolicyEvaluationTimeBucket(bucket=bucket, total_count=0, decision_counts={}),
+            )
+            count = int(row["count"])
+            current.total_count += count
+            current.decision_counts[row["decision"]] = count
+        return PolicyEvaluationSummaryResponse(
+            total_count=int(total_row["total_count"]) if total_row else 0,
+            decision_counts=decision_counts,
+            mode_counts=mode_counts,
+            action_counts=action_counts,
+            time_buckets=list(buckets.values()),
+        )
+
+    def stream(
+        self,
+        query: PolicyEvaluationQuery,
+        *,
+        last_event_id: str | None = None,
+    ) -> list[Row]:
+        """Return rows in ascending stream order, optionally after an evaluation id."""
+
+        clauses, values = _query_clauses(query)
+        if last_event_id is not None:
+            last_row = self.get(last_event_id, query.organization_id, query.environment_id)
+            if last_row is not None:
+                clauses.append("(created_at > ? OR (created_at = ? AND id > ?))")
+                values.extend([last_row["created_at"], last_row["created_at"], last_row["id"]])
+        values.append(query.limit)
+        return self.connection.execute(
+            f"""
+            SELECT *
+            FROM policy_evaluations
+            WHERE {' AND '.join(clauses)}
+            ORDER BY created_at ASC, id ASC
+            LIMIT ?
+            """,
+            values,
+        ).fetchall()
+
+    def _count_by(self, column: str, where_sql: str, values: list[object]) -> dict[str, int]:
+        rows = self.connection.execute(
+            f"""
+            SELECT {column} AS key, COUNT(*) AS count
+            FROM policy_evaluations
+            WHERE {where_sql}
+            GROUP BY {column}
+            ORDER BY {column} ASC
+            """,
+            values,
+        ).fetchall()
+        return {row["key"]: int(row["count"]) for row in rows if row["key"] is not None}
 
 
 def policy_evaluation_response(row: Row) -> PolicyEvaluationResponse:
@@ -176,3 +247,20 @@ def _loads_mapping(raw: str | None) -> dict[str, Any]:
         return {}
     loaded = json.loads(raw)
     return loaded if isinstance(loaded, dict) else {}
+
+
+def _query_clauses(query: PolicyEvaluationQuery) -> tuple[list[str], list[object]]:
+    clauses = ["organization_id = ?", "environment_id = ?"]
+    values: list[object] = [query.organization_id, query.environment_id]
+    for column, value in [
+        ("decision", query.decision),
+        ("mode", query.mode),
+        ("agent_id", query.agent_id),
+        ("action", query.action),
+        ("policy_id", query.policy_id),
+        ("correlation_id", query.correlation_id),
+    ]:
+        if value is not None:
+            clauses.append(f"{column} = ?")
+            values.append(value)
+    return clauses, values

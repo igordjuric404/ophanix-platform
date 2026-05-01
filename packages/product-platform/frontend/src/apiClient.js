@@ -217,6 +217,16 @@ export function createApiClient({
       request("/policy-evaluations/evaluate", { method: "POST", body }),
     listPolicyEvaluations: (params = {}) =>
       request(`/policy-evaluations${queryString(params)}`),
+    getPolicyEvaluationSummary: (params = {}) =>
+      request(`/policy-evaluations/summary${queryString(params)}`),
+    policyEvaluationStreamUrl: (params = {}) => {
+      const tenant = getTenantContext();
+      const streamParams = { ...params };
+      if (tenant.environmentId && !streamParams.environment_id) {
+        streamParams.environment_id = tenant.environmentId;
+      }
+      return resolveUrl(baseUrl, `/policy-evaluations/stream${queryString(streamParams)}`);
+    },
     getPolicyEvaluation: (evaluationId) =>
       request(`/policy-evaluations/${encodeURIComponent(evaluationId)}`),
     listTrustScores: () => request("/trust/scores"),

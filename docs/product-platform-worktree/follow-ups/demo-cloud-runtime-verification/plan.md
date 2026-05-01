@@ -1,5 +1,59 @@
 # Demo Cloud Runtime Verification Completion
 
+## Second-Pass Status
+
+Status: `Needs verification` and `Audit finding revised`.
+
+The first-audit finding about misleading PostgreSQL/cloud claims has been revised: `2de9148` explicitly documents the MVP cloud preview as SQLite-on-durable-volume, rejects unsupported PostgreSQL database URLs in readiness, and adds deterministic readiness probes plus opt-in smoke scripts. The remaining gap is verification, not another static code path: this environment still cannot run Docker daemon-backed image builds or `docker compose up`, and the original `02-mvp-cloud-deployment.md` managed-PostgreSQL pilot scope is intentionally deferred rather than implemented.
+
+## Second-Pass Delta Plan
+
+### Goal
+
+Produce real runtime evidence for the local compose stack and production images in a Docker-capable environment, and make the cloud deployment scope decision explicit for pilot acceptance.
+
+### Evidence
+
+- Implemented: `packages/product-platform/deploy/cloud/smoke-images.sh`, `packages/product-platform/deploy/local-demo-smoke.sh`, SQLite-aware cloud docs, `ReadinessProbes`, and cloud/local static tests.
+- Verified locally in this audit: backend tests pass with localhost socket binding allowed; frontend validation passes.
+- Not verified locally: `docker build`, API/worker/frontend image smoke runs, and `docker compose up --build --wait` because Docker daemon access is unavailable.
+- Deferred scope: managed PostgreSQL runtime support from the original MVP cloud plan is not implemented.
+
+### Implementation Approach
+
+1. Run the checked-in smoke scripts in an environment where Docker daemon access is available.
+2. Capture command outputs in the follow-up execution log, including image IDs, `/health`, `/ready`, worker no-op output, Demo Lab reset status, and scenario start status.
+3. Decide whether pilot readiness accepts the documented SQLite cloud-preview scope or requires a new PostgreSQL implementation follow-up.
+4. If PostgreSQL is required, create a separate database-runtime follow-up rather than folding it into static deployment verification.
+
+### Likely Files
+
+- `packages/product-platform/deploy/cloud/smoke-images.sh`
+- `packages/product-platform/deploy/local-demo-smoke.sh`
+- `packages/product-platform/LOCAL_DEMO.md`
+- `packages/product-platform/deploy/cloud/PILOT_READINESS.md`
+- `packages/product-platform/deploy/cloud/env.example`
+- `packages/product-platform/src/product_platform/api/dependencies.py`
+- `packages/product-platform/src/product_platform/db/migrator.py`
+- `packages/product-platform/tests/test_mvp_cloud_deployment_phase*.py`
+- `packages/product-platform/tests/test_local_demo_compose_phase*.py`
+
+### Test Plan
+
+- `sh deploy/cloud/smoke-images.sh` in a Docker-capable environment.
+- `sh deploy/local-demo-smoke.sh` in a Docker-capable environment.
+- `docker compose --env-file .env.example -f docker-compose.demo.yml up --build --wait --wait-timeout 120`.
+- Backend deployment/local-demo focused tests, including localhost socket tests.
+- Frontend `npm run validate`.
+
+### Acceptance Criteria
+
+- Production API, worker, and frontend images build successfully.
+- API container responds to `/health` and `/ready`.
+- Worker image can run the no-op smoke command.
+- Compose stack starts cleanly, seeds idempotently, reports healthy baseline, resets Demo Lab, and starts the demo scenario.
+- Pilot readiness explicitly accepts SQLite cloud preview or points to a separate PostgreSQL runtime plan.
+
 ## Feature Scope
 
 Close the runtime verification gaps from `06-demo-delivery`: local compose should either use the database services it declares or clearly scope them as optional parity services, cloud readiness should verify actual configured dependencies where feasible, and production container images should be buildable and smoke tested in an environment with Docker.
@@ -116,3 +170,25 @@ Tests:
 ## Definition Of Done
 
 - Demo delivery is not just structurally tested; it has real runtime smoke evidence for containers, compose, and cloud dependency readiness.
+
+## Implementation Status
+
+Status: `Needs verification`.
+
+Execution log: `docs/product-platform-worktree/second-pass-implementation-logs/demo-cloud-runtime-verification.md`.
+
+Completed in this implementation pass:
+
+- Re-verified the existing SQLite cloud-preview scope, readiness probes, smoke scripts, and focused tests.
+- Started Docker Desktop after approval and confirmed Docker daemon access with Docker Desktop 4.44.3 / Engine 28.3.2.
+- Removed the optional `# syntax=docker/dockerfile:1.7` directive from the three cloud Dockerfiles because they do not use Dockerfile 1.7-only features and the directive introduced an extra external BuildKit frontend resolution step before product image builds.
+- Re-ran `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mvp_cloud_deployment_phase*.py' -v`; result: 18 tests passed.
+- Re-ran local demo focused tests with localhost socket binding allowed; result: 10 tests passed.
+- Confirmed `docker compose --env-file .env.example -f docker-compose.demo.yml config` renders successfully.
+- Confirmed `deploy/cloud/PILOT_READINESS.md` and `LOCAL_DEMO.md` explicitly document SQLite-on-volume as the current preview scope and PostgreSQL as deferred/service-parity, so no new PostgreSQL runtime follow-up was created.
+
+Remaining verification blocker:
+
+- `sh deploy/cloud/smoke-images.sh` now advances to base image metadata resolution for `python:3.11-slim`, but Docker registry/base-image metadata access stalls in this environment. The required base images are not cached locally.
+- `docker compose --env-file .env.example -f docker-compose.demo.yml up --build --wait --wait-timeout 120` and `sh deploy/local-demo-smoke.sh` similarly reach external image pull/metadata for Redis, Postgres, and frontend/nginx images, then stall.
+- The remaining gap is runtime evidence from an environment with working Docker registry/base-image access, not another known product-platform implementation task.

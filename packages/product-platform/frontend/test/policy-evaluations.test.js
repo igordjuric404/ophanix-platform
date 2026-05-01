@@ -3,12 +3,15 @@ import test from "node:test";
 
 import { createApiClient } from "../src/apiClient.js";
 import {
+  policyEvaluationMatchesFilters,
   policyEvaluationFilterParamsFromValues,
   policyEvaluationPayloadFromValues,
   renderPoliciesPage,
   renderPolicyEvaluationFeed,
   renderPolicyEvaluationResult,
-  renderPolicySimulatorPanel
+  renderPolicyEvaluationSummary,
+  renderPolicySimulatorPanel,
+  upsertPolicyEvaluationFeed
 } from "../src/policies.js";
 
 const policy = {
@@ -64,6 +67,20 @@ const deniedEvaluation = {
   created_at: "2026-05-01T00:00:00+00:00"
 };
 
+const evaluationSummary = {
+  total_count: 3,
+  decision_counts: { allow: 2, deny: 1 },
+  mode_counts: { live: 1, simulate: 2 },
+  action_counts: { "mcp.tool_call": 2, "runtime.action": 1 },
+  time_buckets: [
+    {
+      bucket: "2026-05-01",
+      total_count: 3,
+      decision_counts: { allow: 2, deny: 1 }
+    }
+  ]
+};
+
 test("component simulator renders form and blocks invalid context JSON in payload helper", () => {
   const html = renderPolicySimulatorPanel({ policies: [policy], selectedPolicy: policy });
 
@@ -91,14 +108,25 @@ test("component deny result renders matched rule and reason", () => {
 test("component feed renders filters, rows, and detail", () => {
   const html = renderPolicyEvaluationFeed({
     evaluations: [deniedEvaluation],
+    summary: evaluationSummary,
     filters: { decision: "deny", mode: "simulate" },
     selectedEvaluation: deniedEvaluation
   });
 
   assert.match(html, /data-policy-evaluation-filter/);
+  assert.match(html, /data-policy-evaluation-summary/);
   assert.match(html, /data-policy-evaluation-row="peval_1"/);
   assert.match(html, /data-policy-evaluation-detail="peval_1"/);
   assert.match(html, /corr-policy-eval/);
+});
+
+test("component summary renders decision counts and trend buckets", () => {
+  const html = renderPolicyEvaluationSummary(evaluationSummary);
+
+  assert.match(html, /data-policy-evaluation-summary/);
+  assert.match(html, /data-policy-evaluation-trend="2026-05-01"/);
+  assert.match(html, /allow: 2/);
+  assert.match(html, /deny: 1/);
 });
 
 test("component policy page includes simulator and evaluation feed", () => {
@@ -106,11 +134,13 @@ test("component policy page includes simulator and evaluation feed", () => {
     policies: [policy],
     selectedPolicy: policy,
     policyEvaluations: [deniedEvaluation],
+    policyEvaluationSummary: evaluationSummary,
     policyEvaluationResult: deniedEvaluation
   });
 
   assert.match(html, /data-policy-simulator/);
   assert.match(html, /data-policy-evaluation-feed/);
+  assert.match(html, /data-policy-evaluation-summary/);
   assert.match(html, /data-policy-evaluation-table/);
 });
 
@@ -149,9 +179,38 @@ test("payload helpers normalize evaluation request and filters", () => {
   );
 });
 
+test("stream helpers match active filters and upsert new feed rows", () => {
+  const streamedEvaluation = {
+    ...deniedEvaluation,
+    id: "peval_2",
+    correlation_id: "corr-streamed"
+  };
+
+  assert.equal(
+    policyEvaluationMatchesFilters(streamedEvaluation, { decision: "deny", mode: "simulate" }),
+    true
+  );
+  assert.equal(
+    policyEvaluationMatchesFilters(streamedEvaluation, { decision: "allow" }),
+    false
+  );
+  assert.deepEqual(
+    upsertPolicyEvaluationFeed([deniedEvaluation], streamedEvaluation).map((row) => row.id),
+    ["peval_2", "peval_1"]
+  );
+  assert.deepEqual(
+    upsertPolicyEvaluationFeed([deniedEvaluation, streamedEvaluation], {
+      ...streamedEvaluation,
+      reason: "Updated reason"
+    }).map((row) => row.id),
+    ["peval_2", "peval_1"]
+  );
+});
+
 test("api client policy evaluation methods call expected endpoints", async () => {
   const calls = [];
   const client = createApiClient({
+    getTenantContext: () => ({ organizationId: "org_default", environmentId: "env_default" }),
     fetchImpl: async (url, init = {}) => {
       calls.push([url, init.method ?? "GET", init.body ? JSON.parse(init.body) : null]);
       return {
@@ -166,12 +225,16 @@ test("api client policy evaluation methods call expected endpoints", async () =>
   await client.simulatePolicyEvaluation({ action: "mcp.tool_call" });
   await client.evaluatePolicy({ action: "mcp.tool_call" });
   await client.listPolicyEvaluations({ decision: "deny", mode: "simulate", agent_id: "agent_1" });
+  await client.getPolicyEvaluationSummary({ decision: "deny" });
   await client.getPolicyEvaluation("peval_1");
+  const streamUrl = client.policyEvaluationStreamUrl({ decision: "deny" });
 
   assert.deepEqual(calls, [
     ["/api/v1/policy-evaluations/simulate", "POST", { action: "mcp.tool_call" }],
     ["/api/v1/policy-evaluations/evaluate", "POST", { action: "mcp.tool_call" }],
     ["/api/v1/policy-evaluations?decision=deny&mode=simulate&agent_id=agent_1", "GET", null],
+    ["/api/v1/policy-evaluations/summary?decision=deny", "GET", null],
     ["/api/v1/policy-evaluations/peval_1", "GET", null]
   ]);
+  assert.equal(streamUrl, "/api/v1/policy-evaluations/stream?decision=deny&environment_id=env_default");
 });

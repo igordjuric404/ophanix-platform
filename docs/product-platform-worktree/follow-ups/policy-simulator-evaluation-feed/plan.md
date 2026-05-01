@@ -1,5 +1,82 @@
 # Policy Simulator And Evaluation Feed Completion
 
+## Second-Pass Status
+
+Status: `Audit finding revised` and `Confirmed gap`.
+
+## Implementation Status
+
+Status: `Completed` on 2026-05-01.
+
+Completed work:
+
+- Added policy evaluation summary/trend aggregation and `GET /api/v1/policy-evaluations/summary`.
+- Added policy evaluation SSE streaming via `GET /api/v1/policy-evaluations/stream`.
+- Persisted agent registration simulation decisions into `policy_evaluations`.
+- Persisted provider credential and integration health decisions into `policy_evaluations`.
+- Added frontend summary/trend rendering and EventSource-based policy feed refresh handling.
+
+Validation:
+
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_policy_evaluations*.py' -v`
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_traffic_phase*.py' -v`
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_runtime_sessions_and_rings_phase*.py' -v`
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agent_registration_phase*.py' -v`
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_provider_secrets_health_phase*.py' -v`
+- `node --test test/policy-evaluations.test.js`
+- `npm run typecheck`
+- `npm run lint`
+- `npm test`
+
+The broad first-audit gap has been mostly implemented in `2de9148`: the product now has `policy_evaluations` migrations, repository/API support, simulator and live evaluation endpoints, MCP/runtime producer writes, policy frontend simulator/feed UI, and focused backend/frontend tests. The remaining gap is narrower: the original plan also required decision trends, live feed updates, and decisions from agents and framework integrations. Current code covers MCP proxy and runtime producers, but not agent/framework-integration policy decision producers, evaluation feed charts/trends, or live update handling.
+
+## Second-Pass Delta Plan
+
+### Goal
+
+Finish the remaining live-observability parts of `02-policy-governance/01-policy-management/04-policy-simulator-evaluation-feed.md` without reworking the completed simulator/evaluation repository.
+
+### Evidence
+
+- Implemented: `packages/product-platform/src/product_platform/policies/evaluations.py`, `packages/product-platform/src/product_platform/policies/evaluation_repository.py`, migration `0042_policy_evaluations`, `/api/v1/policy-evaluations/*`, and `frontend/src/policies.js`.
+- Implemented producer coverage: MCP proxy and runtime decisions are persisted by helpers in `packages/product-platform/src/product_platform/api/app.py`.
+- Missing: no policy-evaluation-specific SSE/live feed endpoint or frontend `EventSource` handling; no decision trend/chart aggregation; no producer tests for agent-registration decisions or framework integration/provider-health decisions.
+
+### Implementation Approach
+
+1. Add a lightweight evaluation summary endpoint or extend the list endpoint with grouped counts for decision/action/time buckets.
+2. Add a policy-evaluation event stream, or reuse audit SSE with a policy-evaluation filter and frontend subscription that updates the feed without a full page reload.
+3. Persist existing agent registration simulation/approval decisions into `policy_evaluations` where a real policy decision occurs.
+4. Persist framework integration and provider-health policy decisions where those flows already gate or evaluate behavior.
+5. Keep persistence non-blocking for feed writes, but keep policy decision failures fail-closed.
+
+### Likely Files
+
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/policies/evaluation_repository.py`
+- `packages/product-platform/src/product_platform/policies/models.py`
+- `packages/product-platform/frontend/src/apiClient.js`
+- `packages/product-platform/frontend/src/policies.js`
+- `packages/product-platform/frontend/src/app.js`
+- `packages/product-platform/tests/test_policy_evaluations_phase*.py`
+- `packages/product-platform/frontend/test/policy-evaluations.test.js`
+
+### Test Plan
+
+- Backend test that agent registration policy simulation writes a scoped evaluation row when appropriate.
+- Backend test that an integration/provider-health decision writes a scoped evaluation row.
+- Backend test for summary/trend aggregation by decision and action.
+- Frontend test that decision trend data renders.
+- Frontend test that a streamed/new evaluation updates or reloads the feed.
+- Re-run focused policy evaluation tests and frontend validation.
+
+### Acceptance Criteria
+
+- Policy evaluation feed includes MCP, runtime, agent, and framework-integration decisions.
+- Feed can show trends/counts by decision, action, and time bucket.
+- UI receives or refreshes new live evaluations without manual navigation.
+- Existing simulator/evaluate/list/detail behavior remains covered and passing.
+
 ## Feature Scope
 
 Complete the missing policy evaluation product surface from `02-policy-governance/01-policy-management/04-policy-simulator-evaluation-feed.md`. Users should be able to simulate policy decisions before deployment and inspect live policy decisions from agents, MCP proxy calls, runtime controls, and integrations.

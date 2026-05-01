@@ -35,6 +35,7 @@ export function renderCompliancePage(state = {}) {
         frameworks: state.complianceFrameworks ?? [],
         reports: state.complianceReports ?? [],
         selectedReport: state.selectedComplianceReport ?? null,
+        artifacts: state.complianceReportArtifacts ?? [],
         attestationResult: state.complianceReportAttestation ?? null
       })}
     </section>
@@ -424,9 +425,17 @@ export function renderReportBuilder({
   frameworks = [],
   reports = [],
   selectedReport = null,
+  artifacts = [],
   attestationResult = null
 } = {}) {
   const activeReport = selectedReport ?? reports[0] ?? null;
+  const activeReportArtifacts = activeReport
+    ? artifacts.filter((artifact) =>
+        (artifact.links ?? []).some(
+          (link) => link.target_type === "compliance_report" && link.target_id === activeReport.id
+        )
+      )
+    : [];
   return `
     <section class="workspace-panel compliance-reports" data-compliance-reports>
       <header class="panel-header">
@@ -498,6 +507,22 @@ export function renderReportBuilder({
           ? `<section class="lint-panel" data-compliance-report-preview="${escapeHtml(activeReport.id)}">
               <h3>${escapeHtml(activeReport.name)}</h3>
               <p>${escapeHtml(activeReport.artifact_uri ?? "draft")}</p>
+              ${
+                activeReportArtifacts.length
+                  ? `<ul data-compliance-report-artifacts="${escapeHtml(activeReport.id)}">
+                      ${activeReportArtifacts
+                        .map(
+                          (artifact) => `
+                            <li data-compliance-report-artifact="${escapeHtml(artifact.id)}">
+                              <strong>${escapeHtml(artifact.name)}</strong>
+                              <code>${escapeHtml(artifact.checksum)}</code>
+                            </li>
+                          `
+                        )
+                        .join("")}
+                    </ul>`
+                  : ""
+              }
               <pre>${escapeHtml(activeReport.rendered_markdown ?? "Generate report")}</pre>
               <form class="filter-bar" data-compliance-report-attest-form data-report-id="${escapeHtml(activeReport.id)}">
                 ${filterInput("statement", "Statement", "", "I attest this report")}

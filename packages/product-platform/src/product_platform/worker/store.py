@@ -96,6 +96,23 @@ class JobStateRepository:
             (organization_id, limit, offset),
         ).fetchall()
 
+    def next_queued_job(self, *, job_type: str | None = None) -> Row | None:
+        clauses = ["status = ?"]
+        values: list[object] = [JobStatus.QUEUED]
+        if job_type is not None:
+            clauses.append("job_type = ?")
+            values.append(job_type)
+        return self.connection.execute(
+            f"""
+            SELECT *
+            FROM background_jobs
+            WHERE {' AND '.join(clauses)}
+            ORDER BY created_at ASC, id ASC
+            LIMIT 1
+            """,
+            values,
+        ).fetchone()
+
     def mark_running(self, job_id: str) -> Row:
         now = utc_now_iso()
         self.connection.execute(

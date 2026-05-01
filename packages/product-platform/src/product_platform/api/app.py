@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import time
 import json
 from pathlib import Path
@@ -385,6 +386,7 @@ from product_platform.policies.models import (
     PolicyExceptionResponse,
     PolicyEvaluationRequest,
     PolicyEvaluationResponse,
+    PolicyEvaluationSummaryResponse,
     PolicyImportRequest,
     PolicyImportResponse,
     PolicyLintIssue,
@@ -544,6 +546,7 @@ from product_platform.workflows.repository import (
     workflow_run_response,
 )
 from product_platform.workflows.runner import WorkflowRunnerError, build_default_workflow_runner_registry
+from product_platform.workflows.worker import WORKFLOW_JOB_TYPE
 
 
 def _request_context_from_request(request: Request) -> RequestContext:
@@ -788,6 +791,40 @@ def create_app(
             LocalArtifactProvider(Path(resolved_settings.artifact_storage_path)),
         )
 
+    def _create_generated_artifact(
+        *,
+        connection: Any,
+        organization_id: str,
+        environment_id: str,
+        artifact_type: str,
+        name: str,
+        content_type: str,
+        content: bytes,
+        actor_id: str,
+        target_type: str,
+        target_id: str,
+        link_type: str,
+    ) -> Any:
+        repository = _artifact_repository(connection, organization_id, environment_id)
+        artifact = repository.create(
+            ArtifactCreateRequest(
+                artifact_type=artifact_type,
+                name=name,
+                content_type=content_type,
+                content_base64=base64.b64encode(content).decode("ascii"),
+            ),
+            actor_id=actor_id,
+        )
+        repository.create_link(
+            artifact["id"],
+            ArtifactLinkCreateRequest(
+                target_type=target_type,
+                target_id=target_id,
+                link_type=link_type,
+            ),
+        )
+        return artifact
+
     def _insert_job_audit_event(
         repository: AuditEventRepository,
         *,
@@ -860,6 +897,22 @@ def create_app(
                 job_type=definition["workflow_type"],
                 status=run["status"],
             )
+            if not body.run_immediately:
+                JobStateRepository(connection).create_job(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    job_type=WORKFLOW_JOB_TYPE,
+                    payload={
+                        "workflow_run_id": run["id"],
+                        "workflow_definition_id": definition["id"],
+                        "workflow_type": definition["workflow_type"],
+                        "command_ref": definition["command_ref"],
+                        "inputs": body.inputs,
+                        "started_by": current_user.id,
+                    },
+                    max_attempts=1,
+                    job_id=run["id"],
+                )
             if body.run_immediately:
                 started = repository.start_run(run["id"], environment_id=environment_id)
                 _insert_job_audit_event(
@@ -956,6 +1009,10 @@ def create_app(
             with _audit_database().transaction() as connection:
                 repository = WorkflowRepository(connection, organization_id)
                 run = repository.cancel_run(run_id, environment_id=environment_id)
+                try:
+                    JobStateRepository(connection).cancel(run_id)
+                except KeyError:
+                    pass
                 _insert_job_audit_event(
                     AuditEventRepository(connection),
                     organization_id=organization_id,
@@ -1586,6 +1643,28 @@ def create_app(
             payload_json=payload,
         )
 
+    def _format_policy_evaluation_sse_event(evaluation: PolicyEvaluationResponse) -> str:
+        data = json.dumps(evaluation.model_dump(mode="json"), sort_keys=True)
+        return f"id: {evaluation.id}\nevent: policy_evaluation\ndata: {data}\n\n"
+
+    def _resolve_policy_evaluation_stream_environment(
+        *,
+        request: Request,
+        organization_id: str,
+        environment_id: str | None,
+    ) -> str:
+        selected_environment_id = environment_id or getattr(
+            request.state,
+            "selected_environment_id",
+            None,
+        )
+        if not selected_environment_id:
+            raise HTTPException(status_code=400, detail="environment_id query parameter or X-Environment-ID is required.")
+        environment = tenants.get_environment(selected_environment_id)
+        if environment is None or environment.organization_id != organization_id:
+            raise HTTPException(status_code=403, detail="Environment access is denied.")
+        return str(selected_environment_id)
+
     def _record_mcp_policy_evaluation(
         *,
         connection: Any,
@@ -1699,6 +1778,130 @@ def create_app(
             )
         except Exception:
             return
+
+    def _record_agent_registration_policy_evaluation(
+        *,
+        connection: Any,
+        organization_id: str,
+        environment_id: str,
+        simulation: AgentRegistrationSimulationResponse,
+        capability_names: list[str],
+        policy_ids: list[str],
+        correlation_id: str | None,
+    ) -> None:
+        try:
+            persisted_policy_id = _first_persisted_policy_id(connection, organization_id, policy_ids)
+            PolicyEvaluationRepository(connection).create(
+                PolicyEvaluationResponse(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    policy_id=persisted_policy_id,
+                    agent_id=simulation.agent_id,
+                    target_type="agent",
+                    target_id=simulation.agent_id,
+                    action=simulation.action or "agent.registration.simulate",
+                    resource_type="agent_registration_draft",
+                    resource_id=simulation.agent_id,
+                    context={
+                        "capability_names": capability_names,
+                        "matched_policy_ids": simulation.matched_policy_ids,
+                        "selected_policy_ids": policy_ids,
+                    },
+                    decision=_policy_feed_decision(simulation.decision),
+                    policy_action=simulation.decision,
+                    matched_rule="agent_registration_policy_selection",
+                    reason=simulation.reason,
+                    latency_ms=0.0,
+                    mode="simulate",
+                    correlation_id=correlation_id,
+                    backend="agent-registration",
+                    audit_preview={
+                        "event_type": "agent.registration.simulated",
+                        "resource_type": "agent_registration_draft",
+                        "resource_id": simulation.agent_id,
+                    },
+                )
+            )
+        except Exception:
+            return
+
+    def _record_integration_health_policy_evaluation(
+        *,
+        connection: Any,
+        organization_id: str,
+        environment_id: str,
+        health_check: Any,
+        correlation_id: str | None,
+        credential: Any | None = None,
+    ) -> None:
+        try:
+            status = str(health_check["status"])
+            decision = "allow" if status in {"healthy", "ok", "passed"} else "deny"
+            context = {
+                "health_check_id": health_check["id"],
+                "health_status": status,
+                "message": health_check["message"],
+                "details": _loads_json_mapping(health_check["details_json"]),
+            }
+            if credential is not None:
+                context.update(
+                    {
+                        "provider_credential_id": credential["id"],
+                        "provider_type": credential["provider_type"],
+                        "credential_status": credential["status"],
+                    }
+                )
+            target_type = str(health_check["target_type"])
+            action = (
+                "integration.provider_credential.test"
+                if target_type == "provider_credential"
+                else "integration.health_check"
+            )
+            PolicyEvaluationRepository(connection).create(
+                PolicyEvaluationResponse(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    agent_id=None,
+                    target_type="framework-connector",
+                    target_id=str(health_check["target_id"]),
+                    action=action,
+                    resource_type=target_type,
+                    resource_id=str(health_check["target_id"]),
+                    context=context,
+                    decision=decision,
+                    policy_action=status,
+                    matched_rule=f"integration_health:{status}",
+                    reason=str(health_check["message"]),
+                    latency_ms=float(health_check["latency_ms"]),
+                    mode="live",
+                    correlation_id=correlation_id,
+                    backend="integration-health",
+                    audit_preview={
+                        "event_type": "integration.health_check",
+                        "resource_type": target_type,
+                        "resource_id": str(health_check["target_id"]),
+                    },
+                )
+            )
+        except Exception:
+            return
+
+    def _first_persisted_policy_id(
+        connection: Any,
+        organization_id: str,
+        policy_ids: list[str],
+    ) -> str | None:
+        repository = PolicyRepository(connection, organization_id)
+        for policy_id in policy_ids:
+            if repository.get_policy(policy_id) is not None:
+                return policy_id
+        return None
+
+    def _loads_json_mapping(raw: str | None) -> dict[str, Any]:
+        if not raw:
+            return {}
+        loaded = json.loads(raw)
+        return loaded if isinstance(loaded, dict) else {}
 
     def _policy_feed_decision(decision: str) -> str:
         normalized = decision.strip().lower()
@@ -2511,6 +2714,7 @@ def create_app(
     async def export_audit_events(
         body: AuditExportRequest,
         current_user: UserPrincipal = Depends(require_permission(Permission.AUDIT_READ)),
+        environment_id: str = Depends(require_environment_context),
     ) -> AuditExportResponse:
         """Persist audit export metadata for compliance evidence workflows."""
 
@@ -2520,7 +2724,25 @@ def create_app(
                 body,
                 actor_id=current_user.id,
             )
-            return audit_export_response(row)
+            response = audit_export_response(row)
+            _create_generated_artifact(
+                connection=connection,
+                organization_id=organization_id,
+                environment_id=environment_id,
+                artifact_type="audit.export",
+                name=f"{row['id']}.{row['format']}",
+                content_type="application/json" if row["format"] == "json" else "text/csv",
+                content=json.dumps(
+                    {"export": response.model_dump(mode="json")},
+                    sort_keys=True,
+                    indent=2,
+                ).encode("utf-8"),
+                actor_id=current_user.id,
+                target_type="audit_export",
+                target_id=row["id"],
+                link_type="export",
+            )
+            return response
 
     @app.get("/api/v1/audit/events/stream", tags=["audit"])
     async def stream_audit_events(
@@ -3127,6 +3349,80 @@ def create_app(
         return [policy_evaluation_response(row) for row in rows]
 
     @app.get(
+        "/api/v1/policy-evaluations/summary",
+        response_model=PolicyEvaluationSummaryResponse,
+        tags=["policies"],
+    )
+    async def get_policy_evaluation_summary(
+        decision: str | None = None,
+        mode: str | None = None,
+        agent_id: str | None = None,
+        action: str | None = None,
+        policy_id: str | None = None,
+        correlation_id: str | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> PolicyEvaluationSummaryResponse:
+        """Return aggregate policy evaluation counts for the selected environment."""
+
+        organization_id = _require_organization_id(current_user)
+        return PolicyEvaluationRepository(_audit_database().connect()).summary(
+            PolicyEvaluationQuery(
+                organization_id=organization_id,
+                environment_id=environment_id,
+                decision=decision,
+                mode=mode,
+                agent_id=agent_id,
+                action=action,
+                policy_id=policy_id,
+                correlation_id=correlation_id,
+            )
+        )
+
+    @app.get("/api/v1/policy-evaluations/stream", tags=["policies"])
+    async def stream_policy_evaluations(
+        request: Request,
+        decision: str | None = None,
+        mode: str | None = None,
+        agent_id: str | None = None,
+        action: str | None = None,
+        policy_id: str | None = None,
+        correlation_id: str | None = None,
+        environment_query_id: str | None = Query(default=None, alias="environment_id"),
+        last_event_id: str | None = None,
+        limit: int = Query(default=100, ge=1, le=500),
+        current_user: UserPrincipal = Depends(require_permission(Permission.POLICY_READ)),
+    ) -> StreamingResponse:
+        """Stream current policy evaluation rows as server-sent events."""
+
+        organization_id = _require_organization_id(current_user)
+        environment_id = _resolve_policy_evaluation_stream_environment(
+            request=request,
+            organization_id=organization_id,
+            environment_id=environment_query_id,
+        )
+        rows = PolicyEvaluationRepository(_audit_database().connect()).stream(
+            PolicyEvaluationQuery(
+                organization_id=organization_id,
+                environment_id=environment_id,
+                decision=decision,
+                mode=mode,
+                agent_id=agent_id,
+                action=action,
+                policy_id=policy_id,
+                correlation_id=correlation_id,
+                limit=limit,
+            ),
+            last_event_id=last_event_id,
+        )
+
+        def body() -> Any:
+            for row in rows:
+                yield _format_policy_evaluation_sse_event(policy_evaluation_response(row))
+
+        return StreamingResponse(body(), media_type="text/event-stream")
+
+    @app.get(
         "/api/v1/policy-evaluations/{evaluation_id}",
         response_model=PolicyEvaluationResponse,
         tags=["policies"],
@@ -3421,6 +3717,19 @@ def create_app(
             with _audit_database().transaction() as connection:
                 repository = ComplianceRepository(connection, organization_id, environment_id)
                 row = repository.generate_report(report_id, actor_id=current_user.id)
+                _create_generated_artifact(
+                    connection=connection,
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    artifact_type="compliance.report",
+                    name=f"{row['id']}.md",
+                    content_type="text/markdown",
+                    content=str(row["rendered_markdown"] or "").encode("utf-8"),
+                    actor_id=current_user.id,
+                    target_type="compliance_report",
+                    target_id=row["id"],
+                    link_type="report",
+                )
                 AuditEventRepository(connection).insert(
                     AuditEventEnvelope(
                         organization_id=organization_id,
@@ -6786,27 +7095,40 @@ def create_app(
     )
     async def simulate_agent_registration_draft(
         draft_id: str,
+        request: Request,
         current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
         environment_id: str = Depends(require_environment_context),
     ) -> AgentRegistrationSimulationResponse:
         """Simulate the first requested draft capability against selected policies."""
 
         organization_id = _require_organization_id(current_user)
-        agents = AgentRegistryRepository(_audit_database().connect(), organization_id, environment_id)
-        draft = agents.get(draft_id)
-        if draft is None or draft["status"] != "draft":
-            raise HTTPException(status_code=404, detail="Registration draft not found.")
-        capabilities = [
-            row["capability_name"] for row in agents.list_capabilities(draft_id)
-        ]
-        policy_ids = [
-            row["policy_id"] for row in agents.list_policy_selections(draft_id)
-        ]
-        return simulate_registration_action(
-            agent_id=draft_id,
-            capability_names=capabilities,
-            policy_ids=policy_ids,
-        )
+        context = _request_context_from_request(request)
+        with _audit_database().transaction() as connection:
+            agents = AgentRegistryRepository(connection, organization_id, environment_id)
+            draft = agents.get(draft_id)
+            if draft is None or draft["status"] != "draft":
+                raise HTTPException(status_code=404, detail="Registration draft not found.")
+            capabilities = [
+                row["capability_name"] for row in agents.list_capabilities(draft_id)
+            ]
+            policy_ids = [
+                row["policy_id"] for row in agents.list_policy_selections(draft_id)
+            ]
+            simulation = simulate_registration_action(
+                agent_id=draft_id,
+                capability_names=capabilities,
+                policy_ids=policy_ids,
+            )
+            _record_agent_registration_policy_evaluation(
+                connection=connection,
+                organization_id=organization_id,
+                environment_id=environment_id,
+                simulation=simulation,
+                capability_names=capabilities,
+                policy_ids=policy_ids,
+                correlation_id=context.correlation_id,
+            )
+            return simulation
 
     @app.get("/api/v1/agents", response_model=list[AgentInventorySummary], tags=["agents"])
     async def list_agents(
@@ -8189,10 +8511,12 @@ def create_app(
     )
     async def test_integration_provider_credential(
         credential_id: str,
+        request: Request,
         current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
         environment_id: str = Depends(require_environment_context),
     ) -> IntegrationHealthCheckResponse:
         organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
         with _audit_database().transaction() as connection:
             repository = IntegrationRegistryRepository(connection, organization_id, environment_id)
             credential = repository.get_provider_credential(credential_id)
@@ -8201,6 +8525,14 @@ def create_app(
             secret_value = _secret_provider().retrieve(credential["secret_ref"])
             result = run_provider_health_test(credential["provider_type"], secret_value)
             row = repository.create_provider_credential_health_check(credential, result)
+            _record_integration_health_policy_evaluation(
+                connection=connection,
+                organization_id=organization_id,
+                environment_id=environment_id,
+                health_check=row,
+                credential=credential,
+                correlation_id=context.correlation_id,
+            )
             return integration_health_check_response(row)
 
     @app.post(
@@ -8211,13 +8543,22 @@ def create_app(
     )
     async def create_integration_health_check(
         body: IntegrationHealthCheckCreateRequest,
+        request: Request,
         current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
         environment_id: str = Depends(require_environment_context),
     ) -> IntegrationHealthCheckResponse:
         organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
         with _audit_database().transaction() as connection:
             repository = IntegrationRegistryRepository(connection, organization_id, environment_id)
             row = repository.create_health_check(body)
+            _record_integration_health_policy_evaluation(
+                connection=connection,
+                organization_id=organization_id,
+                environment_id=environment_id,
+                health_check=row,
+                correlation_id=context.correlation_id,
+            )
             return integration_health_check_response(row)
 
     @app.get(

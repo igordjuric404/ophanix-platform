@@ -609,3 +609,21 @@ class PolicyEvaluationResponse(BaseModel):
     error: bool = False
     audit_preview: dict[str, Any] = Field(default_factory=dict)
     created_at: str | None = None
+
+
+class PolicyEvaluationTimeBucket(BaseModel):
+    """Daily policy evaluation trend bucket."""
+
+    bucket: str
+    total_count: int
+    decision_counts: dict[str, int] = Field(default_factory=dict)
+
+
+class PolicyEvaluationSummaryResponse(BaseModel):
+    """Aggregated policy evaluation feed summary."""
+
+    total_count: int
+    decision_counts: dict[str, int] = Field(default_factory=dict)
+    mode_counts: dict[str, int] = Field(default_factory=dict)
+    action_counts: dict[str, int] = Field(default_factory=dict)
+    time_buckets: list[PolicyEvaluationTimeBucket] = Field(default_factory=list)

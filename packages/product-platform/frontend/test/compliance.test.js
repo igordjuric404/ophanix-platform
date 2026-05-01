@@ -129,6 +129,31 @@ const report = {
   rendered_markdown: "# SOC 2 Evidence Report\n\n## Evidence\n"
 };
 
+const reportArtifact = {
+  id: "art_report_1",
+  organization_id: "org_default",
+  environment_id: "env_default",
+  artifact_type: "compliance.report",
+  name: "crep_1.md",
+  content_type: "text/markdown",
+  storage_uri: "local-artifact://org_default/env_default/art_report_1/crep_1.md",
+  checksum: "sha256-report",
+  size_bytes: 1024,
+  created_by: "user_admin",
+  created_at: "2026-05-01T00:00:00+00:00",
+  links: [
+    {
+      id: "alink_report_1",
+      artifact_id: "art_report_1",
+      target_type: "compliance_report",
+      target_id: "crep_1",
+      link_type: "report",
+      created_at: "2026-05-01T00:00:00+00:00"
+    }
+  ],
+  attestations: []
+};
+
 test("component audit explorer renders event table timeline and verification", () => {
   const html = renderAuditExplorer({
     events: [policyEvent, runtimeEvent],
@@ -210,12 +235,14 @@ test("component report builder renders report list preview and attestation", () 
     frameworks: [framework],
     reports: [report],
     selectedReport: report,
+    artifacts: [reportArtifact],
     attestationResult: { id: "ratt_1" }
   });
 
   assert.match(html, /data-compliance-report-create-form/);
   assert.match(html, /data-compliance-report-row="crep_1"/);
   assert.match(html, /data-compliance-report-preview="crep_1"/);
+  assert.match(html, /data-compliance-report-artifact="art_report_1"/);
   assert.match(html, /# SOC 2 Evidence Report/);
   assert.match(html, /data-compliance-report-attest-form/);
   assert.match(html, /ratt_1/);

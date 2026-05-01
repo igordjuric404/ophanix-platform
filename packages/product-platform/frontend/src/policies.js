@@ -36,6 +36,7 @@ export function renderPoliciesPage(state = {}) {
       })}
       ${renderPolicyEvaluationFeed({
         evaluations: state.policyEvaluations ?? [],
+        summary: state.policyEvaluationSummary ?? null,
         filters: state.policyEvaluationFilter ?? {},
         selectedEvaluation: state.selectedPolicyEvaluation ?? null
       })}
@@ -825,6 +826,7 @@ export function renderPolicyEvaluationResult(evaluation = null) {
 
 export function renderPolicyEvaluationFeed({
   evaluations = [],
+  summary = null,
   filters = {},
   selectedEvaluation = null
 } = {}) {
@@ -836,6 +838,7 @@ export function renderPolicyEvaluationFeed({
           <h2>Policy Decisions</h2>
         </div>
       </header>
+      ${renderPolicyEvaluationSummary(summary)}
       ${renderPolicyEvaluationFilter(filters)}
       ${
         evaluations.length
@@ -843,6 +846,46 @@ export function renderPolicyEvaluationFeed({
           : '<div class="empty-state" data-policy-evaluation-empty><strong>No decisions</strong><span>Run simulator</span></div>'
       }
       ${renderPolicyEvaluationDetail(selectedEvaluation)}
+    </section>
+  `;
+}
+
+export function renderPolicyEvaluationSummary(summary = null) {
+  if (!summary) {
+    return `
+      <section class="lint-panel" data-policy-evaluation-summary>
+        <h3>Decision Trends</h3>
+        <div class="empty-state"><strong>No summary</strong><span>Pending</span></div>
+      </section>
+    `;
+  }
+  const buckets = summary.time_buckets ?? [];
+  return `
+    <section class="lint-panel policy-evaluation-summary" data-policy-evaluation-summary>
+      <h3>Decision Trends</h3>
+      <ul class="compact-list">
+        <li><span>Total</span><strong>${escapeHtml(String(summary.total_count ?? 0))}</strong></li>
+        <li><span>Decisions</span><strong>${renderInlineCountMap(summary.decision_counts)}</strong></li>
+        <li><span>Modes</span><strong>${renderInlineCountMap(summary.mode_counts)}</strong></li>
+        <li><span>Actions</span><strong>${renderInlineCountMap(summary.action_counts)}</strong></li>
+      </ul>
+      <div class="summary-grid" data-policy-evaluation-trends>
+        ${
+          buckets.length
+            ? buckets
+                .map(
+                  (bucket) => `
+                    <div class="summary-metric" data-policy-evaluation-trend="${escapeHtml(bucket.bucket)}">
+                      <strong>${escapeHtml(bucket.bucket)}</strong>
+                      <span>${escapeHtml(String(bucket.total_count ?? 0))} decisions</span>
+                      <small>${renderInlineCountMap(bucket.decision_counts)}</small>
+                    </div>
+                  `
+                )
+                .join("")
+            : '<div class="empty-state"><strong>No trend data</strong><span>Run simulator</span></div>'
+        }
+      </div>
     </section>
   `;
 }
@@ -1069,6 +1112,25 @@ export function policyEvaluationFilterParamsFromForm(form) {
   return policyEvaluationFilterParamsFromValues(Object.fromEntries(new FormData(form)));
 }
 
+export function policyEvaluationMatchesFilters(evaluation = {}, filters = {}) {
+  return ["decision", "mode", "agent_id", "action", "policy_id", "correlation_id"].every((key) => {
+    if (!filters[key]) {
+      return true;
+    }
+    return evaluation[key] === filters[key];
+  });
+}
+
+export function upsertPolicyEvaluationFeed(evaluations = [], evaluation = null, limit = 50) {
+  if (!evaluation?.id) {
+    return evaluations;
+  }
+  return [
+    evaluation,
+    ...evaluations.filter((existing) => existing.id !== evaluation.id)
+  ].slice(0, limit);
+}
+
 export function backendHint(backend) {
   if (backend === "opa") {
     return "OPA/Rego backend selected.";
@@ -1077,6 +1139,16 @@ export function backendHint(backend) {
     return "Cedar authorization backend selected.";
   }
   return "Native YAML/JSON evaluator selected.";
+}
+
+function renderInlineCountMap(counts = {}) {
+  const entries = Object.entries(counts ?? {});
+  if (!entries.length) {
+    return "none";
+  }
+  return entries
+    .map(([key, value]) => `${escapeHtml(key)}: ${escapeHtml(String(value))}`)
+    .join(", ");
 }
 
 function cleanParams(values) {

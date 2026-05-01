@@ -79,11 +79,13 @@ import {
   policyBindingPayloadFromForm,
   policyEditorPayloadFromForm,
   policyEvaluationFilterParamsFromForm,
+  policyEvaluationMatchesFilters,
   policyEvaluationPayloadFromForm,
   policyExceptionPayloadFromForm,
   policyFilterParamsFromForm,
   policyImportPayloadFromForm,
-  policyPromotePayloadFromForm
+  policyPromotePayloadFromForm,
+  upsertPolicyEvaluationFeed
 } from "./policies.js";
 import {
   trustCardIssuePayloadFromForm,
@@ -119,6 +121,7 @@ import {
 } from "./state.js";
 
 let appState = createLoadingState();
+let policyEvaluationStream = null;
 
 function currentPath() {
   return normalizePath(window.location.pathname);
@@ -175,12 +178,20 @@ async function refreshDiscoveryWorkspace(root, apiClient, selectedRunId = null) 
 }
 
 async function loadPolicyState(apiClient, selectedPolicyId = null) {
-  const [policies, policyBindings, policyExceptions, agents, policyEvaluations] = await Promise.all([
+  const [
+    policies,
+    policyBindings,
+    policyExceptions,
+    agents,
+    policyEvaluations,
+    policyEvaluationSummary
+  ] = await Promise.all([
     apiClient.listPolicies(),
     apiClient.listPolicyBindings(),
     apiClient.listPolicyExceptions(),
     apiClient.listAgents(),
-    apiClient.listPolicyEvaluations()
+    apiClient.listPolicyEvaluations(),
+    apiClient.getPolicyEvaluationSummary()
   ]);
   const policyId = selectedPolicyId ?? policies[0]?.id ?? null;
   const selectedPolicy = policyId ? await apiClient.getPolicy(policyId) : null;
@@ -198,6 +209,7 @@ async function loadPolicyState(apiClient, selectedPolicyId = null) {
     policyBindings,
     policyExceptions,
     policyEvaluations,
+    policyEvaluationSummary,
     policyBindingTargets: { agents }
   };
 }
@@ -205,6 +217,64 @@ async function loadPolicyState(apiClient, selectedPolicyId = null) {
 async function refreshPolicyWorkspace(root, apiClient, selectedPolicyId = null) {
   appState = await loadPolicyState(apiClient, selectedPolicyId);
   mount(root, appState);
+  startPolicyEvaluationStream(root, apiClient);
+}
+
+function stopPolicyEvaluationStream() {
+  if (policyEvaluationStream?.close) {
+    policyEvaluationStream.close();
+  }
+  policyEvaluationStream = null;
+}
+
+function startPolicyEvaluationStream(root, apiClient) {
+  stopPolicyEvaluationStream();
+  if (!apiClient || currentPath() !== "/policies" || typeof window.EventSource !== "function") {
+    return;
+  }
+  const filters = appState.policyEvaluationFilter ?? {};
+  const source = new window.EventSource(apiClient.policyEvaluationStreamUrl(filters));
+  policyEvaluationStream = source;
+  source.addEventListener("policy_evaluation", async (event) => {
+    const evaluation = parsePolicyEvaluationStreamEvent(event);
+    if (!evaluation || currentPath() !== "/policies") {
+      return;
+    }
+    const activeFilters = appState.policyEvaluationFilter ?? {};
+    if (policyEvaluationMatchesFilters(evaluation, activeFilters)) {
+      appState = {
+        ...appState,
+        policyEvaluations: upsertPolicyEvaluationFeed(
+          appState.policyEvaluations ?? [],
+          evaluation
+        )
+      };
+      mount(root, appState);
+    }
+    try {
+      const [policyEvaluations, policyEvaluationSummary] = await Promise.all([
+        apiClient.listPolicyEvaluations(activeFilters),
+        apiClient.getPolicyEvaluationSummary(activeFilters)
+      ]);
+      appState = {
+        ...appState,
+        policyEvaluations,
+        policyEvaluationSummary
+      };
+      mount(root, appState);
+    } catch (error) {
+      return;
+    }
+  });
+}
+
+function parsePolicyEvaluationStreamEvent(event) {
+  try {
+    const payload = JSON.parse(event.data);
+    return payload && typeof payload === "object" ? payload : null;
+  } catch (error) {
+    return null;
+  }
 }
 
 async function loadComplianceState(
@@ -219,14 +289,16 @@ async function loadComplianceState(
     complianceControls,
     complianceEvidence,
     complianceViolations,
-    complianceReports
+    complianceReports,
+    complianceReportArtifacts
   ] = await Promise.all([
     apiClient.listAuditEvents(auditFilters),
     apiClient.listComplianceFrameworks(),
     apiClient.listComplianceControls(),
     apiClient.listComplianceEvidence(evidenceFilters),
     apiClient.listComplianceViolations(violationFilters),
-    apiClient.listComplianceReports()
+    apiClient.listComplianceReports(),
+    apiClient.listArtifacts({ artifact_type: "compliance.report" })
   ]);
   const selectedComplianceAuditEvent = complianceAuditEvents[0] ?? null;
   const selectedReportId = appState.selectedComplianceReport?.id ?? null;
@@ -254,6 +326,7 @@ async function loadComplianceState(
     complianceViolations,
     complianceViolationFilters: violationFilters,
     complianceReports,
+    complianceReportArtifacts,
     selectedComplianceReport
   };
 }
@@ -625,6 +698,9 @@ export function installNavigation(root = document.getElementById("app"), apiClie
     }
     event.preventDefault();
     navigate(targetPath, root);
+    if (normalizePath(targetPath) !== "/policies") {
+      stopPolicyEvaluationStream();
+    }
     if (apiClient && normalizePath(targetPath) === "/discovery") {
       await refreshDiscoveryWorkspace(root, apiClient);
     }
@@ -1671,11 +1747,16 @@ export function installNavigation(root = document.getElementById("app"), apiClie
         const result = await apiClient.simulatePolicyEvaluation(
           policyEvaluationPayloadFromForm(policySimulatorForm)
         );
+        const [policyEvaluations, policyEvaluationSummary] = await Promise.all([
+          apiClient.listPolicyEvaluations(appState.policyEvaluationFilter ?? {}),
+          apiClient.getPolicyEvaluationSummary(appState.policyEvaluationFilter ?? {})
+        ]);
         appState = {
           ...appState,
           policyEvaluationError: null,
           policyEvaluationResult: result,
-          policyEvaluations: await apiClient.listPolicyEvaluations()
+          policyEvaluations,
+          policyEvaluationSummary
         };
       } catch (error) {
         appState = {
@@ -1684,19 +1765,26 @@ export function installNavigation(root = document.getElementById("app"), apiClie
         };
       }
       mount(root, appState);
+      startPolicyEvaluationStream(root, apiClient);
       return;
     }
     const policyEvaluationFilterForm = event.target.closest("[data-policy-evaluation-filter]");
     if (policyEvaluationFilterForm && apiClient) {
       event.preventDefault();
       const params = policyEvaluationFilterParamsFromForm(policyEvaluationFilterForm);
+      const [policyEvaluations, policyEvaluationSummary] = await Promise.all([
+        apiClient.listPolicyEvaluations(params),
+        apiClient.getPolicyEvaluationSummary(params)
+      ]);
       appState = {
         ...appState,
         policyEvaluationFilter: params,
-        policyEvaluations: await apiClient.listPolicyEvaluations(params),
+        policyEvaluations,
+        policyEvaluationSummary,
         selectedPolicyEvaluation: null
       };
       mount(root, appState);
+      startPolicyEvaluationStream(root, apiClient);
       return;
     }
     const complianceAuditFilterForm = event.target.closest("[data-compliance-audit-filter]");
@@ -2477,7 +2565,12 @@ export function installNavigation(root = document.getElementById("app"), apiClie
       }
     }
   });
-  window.addEventListener("popstate", () => mount(root));
+  window.addEventListener("popstate", () => {
+    if (currentPath() !== "/policies") {
+      stopPolicyEvaluationStream();
+    }
+    mount(root);
+  });
 }
 
 export async function bootstrap({
@@ -2501,6 +2594,7 @@ export async function bootstrap({
     if (currentPath() === "/policies") {
       appState = await loadPolicyState(apiClient);
       mount(root, appState);
+      startPolicyEvaluationStream(root, apiClient);
     }
     if (currentPath() === "/trust") {
       appState = await loadTrustState(apiClient);
