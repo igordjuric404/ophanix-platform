@@ -21,6 +21,7 @@ evaluation feed, and agent-to-agent trust heatmap.
 ## Quick Start
 
 ```bash
+cd demo/governance-dashboard
 pip install -r requirements.txt
 streamlit run app.py
 ```

@@ -1,0 +1,10 @@
+DROP INDEX IF EXISTS idx_saga_events_type_created;
+DROP INDEX IF EXISTS idx_saga_events_saga_created;
+DROP TABLE IF EXISTS saga_events;
+DROP INDEX IF EXISTS idx_saga_steps_status;
+DROP INDEX IF EXISTS idx_saga_steps_saga_order;
+DROP TABLE IF EXISTS saga_steps;
+DROP INDEX IF EXISTS idx_sagas_status_created;
+DROP INDEX IF EXISTS idx_sagas_scope_created;
+DROP TABLE IF EXISTS sagas;
+DELETE FROM schema_migrations WHERE version = '0021';
