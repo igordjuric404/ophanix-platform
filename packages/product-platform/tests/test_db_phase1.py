@@ -23,6 +23,15 @@ EXPECTED_MIGRATIONS = [
     "0011",
     "0012",
     "0013",
+    "0014",
+    "0015",
+    "0016",
+    "0017",
+    "0018",
+    "0019",
+    "0020",
+    "0021",
+    "0022",
 ]
 
 
@@ -80,6 +89,25 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertIn("protocol_bridges", tables)
             self.assertIn("protocol_bridge_routes", tables)
             self.assertIn("protocol_bridge_health_checks", tables)
+            self.assertIn("mcp_servers", tables)
+            self.assertIn("mcp_tools", tables)
+            self.assertIn("mcp_tool_versions", tables)
+            self.assertIn("mcp_scan_runs", tables)
+            self.assertIn("mcp_findings", tables)
+            self.assertIn("mcp_scan_baselines", tables)
+            self.assertIn("mcp_tool_calls", tables)
+            self.assertIn("mcp_approvals", tables)
+            self.assertIn("mcp_rate_limits", tables)
+            self.assertIn("runtime_sessions", tables)
+            self.assertIn("runtime_actions", tables)
+            self.assertIn("runtime_ring_decisions", tables)
+            self.assertIn("runtime_ring_rules", tables)
+            self.assertIn("sagas", tables)
+            self.assertIn("saga_steps", tables)
+            self.assertIn("saga_events", tables)
+            self.assertIn("sandbox_profiles", tables)
+            self.assertIn("sandbox_decisions", tables)
+            self.assertIn("kill_switch_events", tables)
             self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS)
         finally:
             connection.close()
@@ -90,6 +118,393 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             connection.row_factory = sqlite3.Row
             runner = MigrationRunner(connection)
             runner.apply_all()
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0022")
+            self.assertNotIn("sandbox_profiles", tables)
+            self.assertNotIn("sandbox_decisions", tables)
+            self.assertNotIn("kill_switch_events", tables)
+            self.assertIn("sagas", tables)
+            self.assertIn("saga_steps", tables)
+            self.assertIn("saga_events", tables)
+            self.assertIn("runtime_ring_rules", tables)
+            self.assertIn("runtime_ring_decisions", tables)
+            self.assertIn("runtime_sessions", tables)
+            self.assertIn("runtime_actions", tables)
+            self.assertEqual(
+                runner.applied_versions(),
+                [
+                    "0001",
+                    "0002",
+                    "0003",
+                    "0004",
+                    "0005",
+                    "0006",
+                    "0007",
+                    "0008",
+                    "0009",
+                    "0010",
+                    "0011",
+                    "0012",
+                    "0013",
+                    "0014",
+                    "0015",
+                    "0016",
+                    "0017",
+                    "0018",
+                    "0019",
+                    "0020",
+                    "0021",
+                ],
+            )
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0021")
+            self.assertNotIn("sagas", tables)
+            self.assertNotIn("saga_steps", tables)
+            self.assertNotIn("saga_events", tables)
+            self.assertIn("runtime_ring_rules", tables)
+            self.assertIn("runtime_ring_decisions", tables)
+            self.assertIn("runtime_sessions", tables)
+            self.assertIn("runtime_actions", tables)
+            self.assertEqual(
+                runner.applied_versions(),
+                [
+                    "0001",
+                    "0002",
+                    "0003",
+                    "0004",
+                    "0005",
+                    "0006",
+                    "0007",
+                    "0008",
+                    "0009",
+                    "0010",
+                    "0011",
+                    "0012",
+                    "0013",
+                    "0014",
+                    "0015",
+                    "0016",
+                    "0017",
+                    "0018",
+                    "0019",
+                    "0020",
+                ],
+            )
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0020")
+            self.assertNotIn("runtime_ring_rules", tables)
+            self.assertIn("runtime_ring_decisions", tables)
+            self.assertIn("runtime_sessions", tables)
+            self.assertIn("runtime_actions", tables)
+            self.assertEqual(
+                runner.applied_versions(),
+                [
+                    "0001",
+                    "0002",
+                    "0003",
+                    "0004",
+                    "0005",
+                    "0006",
+                    "0007",
+                    "0008",
+                    "0009",
+                    "0010",
+                    "0011",
+                    "0012",
+                    "0013",
+                    "0014",
+                    "0015",
+                    "0016",
+                    "0017",
+                    "0018",
+                    "0019",
+                ],
+            )
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0019")
+            self.assertNotIn("runtime_ring_decisions", tables)
+            self.assertIn("runtime_sessions", tables)
+            self.assertIn("runtime_actions", tables)
+            self.assertEqual(
+                runner.applied_versions(),
+                [
+                    "0001",
+                    "0002",
+                    "0003",
+                    "0004",
+                    "0005",
+                    "0006",
+                    "0007",
+                    "0008",
+                    "0009",
+                    "0010",
+                    "0011",
+                    "0012",
+                    "0013",
+                    "0014",
+                    "0015",
+                    "0016",
+                    "0017",
+                    "0018",
+                ],
+            )
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0018")
+            self.assertNotIn("runtime_sessions", tables)
+            self.assertNotIn("runtime_actions", tables)
+            self.assertIn("mcp_tool_calls", tables)
+            self.assertIn("mcp_approvals", tables)
+            self.assertIn("mcp_rate_limits", tables)
+            self.assertEqual(
+                runner.applied_versions(),
+                [
+                    "0001",
+                    "0002",
+                    "0003",
+                    "0004",
+                    "0005",
+                    "0006",
+                    "0007",
+                    "0008",
+                    "0009",
+                    "0010",
+                    "0011",
+                    "0012",
+                    "0013",
+                    "0014",
+                    "0015",
+                    "0016",
+                    "0017",
+                ],
+            )
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0017")
+            self.assertNotIn("mcp_tool_calls", tables)
+            self.assertNotIn("mcp_approvals", tables)
+            self.assertNotIn("mcp_rate_limits", tables)
+            self.assertIn("mcp_scan_runs", tables)
+            self.assertIn("mcp_findings", tables)
+            self.assertIn("mcp_scan_baselines", tables)
+            self.assertIn("mcp_tools", tables)
+            self.assertIn("mcp_tool_versions", tables)
+            self.assertIn("mcp_servers", tables)
+            self.assertEqual(
+                runner.applied_versions(),
+                [
+                    "0001",
+                    "0002",
+                    "0003",
+                    "0004",
+                    "0005",
+                    "0006",
+                    "0007",
+                    "0008",
+                    "0009",
+                    "0010",
+                    "0011",
+                    "0012",
+                    "0013",
+                    "0014",
+                    "0015",
+                    "0016",
+                ],
+            )
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0016")
+            self.assertNotIn("mcp_scan_runs", tables)
+            self.assertNotIn("mcp_findings", tables)
+            self.assertNotIn("mcp_scan_baselines", tables)
+            self.assertIn("mcp_tools", tables)
+            self.assertIn("mcp_tool_versions", tables)
+            self.assertIn("mcp_servers", tables)
+            self.assertIn("protocol_bridges", tables)
+            self.assertIn("protocol_bridge_routes", tables)
+            self.assertIn("protocol_bridge_health_checks", tables)
+            self.assertIn("mesh_messages", tables)
+            self.assertIn("mesh_handoffs", tables)
+            self.assertIn("mesh_topology_snapshots", tables)
+            self.assertIn("trust_thresholds", tables)
+            self.assertIn("trust_cards", tables)
+            self.assertIn("trust_scores", tables)
+            self.assertIn("policy_bindings", tables)
+            self.assertIn("policy_lint_results", tables)
+            self.assertIn("policies", tables)
+            self.assertIn("discovery_findings", tables)
+            self.assertIn("discovery_targets", tables)
+            self.assertIn("agent_credentials", tables)
+            self.assertIn("agents", tables)
+            self.assertIn("organizations", tables)
+            self.assertEqual(
+                runner.applied_versions(),
+                [
+                    "0001",
+                    "0002",
+                    "0003",
+                    "0004",
+                    "0005",
+                    "0006",
+                    "0007",
+                    "0008",
+                    "0009",
+                    "0010",
+                    "0011",
+                    "0012",
+                    "0013",
+                    "0014",
+                    "0015",
+                ],
+            )
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0015")
+            self.assertNotIn("mcp_tools", tables)
+            self.assertNotIn("mcp_tool_versions", tables)
+            self.assertIn("mcp_servers", tables)
+            self.assertIn("protocol_bridges", tables)
+            self.assertIn("protocol_bridge_routes", tables)
+            self.assertIn("protocol_bridge_health_checks", tables)
+            self.assertIn("mesh_messages", tables)
+            self.assertIn("mesh_handoffs", tables)
+            self.assertIn("mesh_topology_snapshots", tables)
+            self.assertIn("trust_thresholds", tables)
+            self.assertIn("trust_cards", tables)
+            self.assertIn("trust_scores", tables)
+            self.assertIn("policy_bindings", tables)
+            self.assertIn("policy_lint_results", tables)
+            self.assertIn("policies", tables)
+            self.assertIn("discovery_findings", tables)
+            self.assertIn("discovery_targets", tables)
+            self.assertIn("agent_credentials", tables)
+            self.assertIn("agents", tables)
+            self.assertIn("organizations", tables)
+            self.assertEqual(
+                runner.applied_versions(),
+                [
+                    "0001",
+                    "0002",
+                    "0003",
+                    "0004",
+                    "0005",
+                    "0006",
+                    "0007",
+                    "0008",
+                    "0009",
+                    "0010",
+                    "0011",
+                    "0012",
+                    "0013",
+                    "0014",
+                ],
+            )
+
+            rolled_back = runner.rollback_last()
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            self.assertEqual(rolled_back, "0014")
+            self.assertNotIn("mcp_servers", tables)
+            self.assertIn("protocol_bridges", tables)
+            self.assertIn("protocol_bridge_routes", tables)
+            self.assertIn("protocol_bridge_health_checks", tables)
+            self.assertIn("mesh_messages", tables)
+            self.assertIn("mesh_handoffs", tables)
+            self.assertIn("mesh_topology_snapshots", tables)
+            self.assertIn("trust_thresholds", tables)
+            self.assertIn("trust_cards", tables)
+            self.assertIn("trust_scores", tables)
+            self.assertIn("policy_bindings", tables)
+            self.assertIn("policy_lint_results", tables)
+            self.assertIn("policies", tables)
+            self.assertIn("discovery_findings", tables)
+            self.assertIn("discovery_targets", tables)
+            self.assertIn("agent_credentials", tables)
+            self.assertIn("agents", tables)
+            self.assertIn("organizations", tables)
+            self.assertEqual(
+                runner.applied_versions(),
+                [
+                    "0001",
+                    "0002",
+                    "0003",
+                    "0004",
+                    "0005",
+                    "0006",
+                    "0007",
+                    "0008",
+                    "0009",
+                    "0010",
+                    "0011",
+                    "0012",
+                    "0013",
+                ],
+            )
 
             rolled_back = runner.rollback_last()
             tables = {

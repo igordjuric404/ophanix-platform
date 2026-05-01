@@ -6,6 +6,7 @@ import time
 import json
 from typing import Any
 from uuid import uuid4
+from urllib.parse import parse_qs, urlparse
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -45,7 +46,7 @@ from product_platform.api.models import (
     RequestContext,
     VersionInfo,
 )
-from product_platform.api.rbac import Permission, require_permission
+from product_platform.api.rbac import Permission, has_permission, require_permission
 from product_platform.api.settings import Settings, load_settings
 from product_platform.api.tenancy import (
     Environment,
@@ -150,6 +151,48 @@ from product_platform.mesh.repository import (
     protocol_bridge_route_response,
 )
 from product_platform.mesh.topology import MeshTopologyService
+from product_platform.mcp.discovery import DemoMCPToolDiscoveryAdapter, normalize_tool_definition
+from product_platform.mcp.models import (
+    MCPApprovalDecisionRequest,
+    MCPApprovalResponse,
+    MCPFindingActionRequest,
+    MCPFindingResponse,
+    MCPProxyCallRequest,
+    MCPRateLimitCreateRequest,
+    MCPRateLimitResponse,
+    MCPScanRunResponse,
+    MCPServerCreateRequest,
+    MCPServerPatchRequest,
+    MCPServerResponse,
+    MCPToolDiscoveryResponse,
+    MCPToolCallResponse,
+    MCPToolResponse,
+)
+from product_platform.mcp.proxy import (
+    MCPApprovalDecisionError,
+    MCPApprovalNotFoundError,
+    MCPProxyDecisionService,
+    MCPProxyReferenceError,
+    MCPProxyRepository,
+    mcp_approval_response,
+    mcp_rate_limit_response,
+    mcp_tool_call_response,
+)
+from product_platform.mcp.repository import (
+    DuplicateMCPServerNameError,
+    MCPFindingLifecycleError,
+    MCPFindingNotFoundError,
+    MCPRegistryReferenceError,
+    MCPRegistryRepository,
+    MCPServerNotFoundError,
+    MCPToolSchemaChange,
+    mcp_finding_response,
+    mcp_scan_run_response,
+    mcp_tool_response,
+    mcp_tool_version_response,
+    mcp_server_response,
+)
+from product_platform.mcp.scans import MCPScannerAdapter
 from product_platform.policies.models import (
     PolicyBindingCreateRequest,
     PolicyBindingPatchRequest,
@@ -189,6 +232,68 @@ from product_platform.policies.repository import (
     policy_lint_issue_response,
     policy_response,
     policy_version_response,
+)
+from product_platform.runtime.models import (
+    RuntimeActionCreateRequest,
+    RuntimeActionResponse,
+    RuntimeRingDecisionResponse,
+    RuntimeRingRuleCreateRequest,
+    RuntimeRingRuleResponse,
+    RuntimeSessionCreateRequest,
+    RuntimeSessionEndRequest,
+    RuntimeSessionResponse,
+    KillSwitchEventResponse,
+    KillSwitchRequest,
+    SandboxDecisionResponse,
+    SandboxProfileCreateRequest,
+    SandboxProfilePatchRequest,
+    SandboxProfileResponse,
+    SandboxProfileTestRequest,
+    SagaCancelRequest,
+    SagaCreateRequest,
+    SagaExecuteRequest,
+    SagaExecutionResponse,
+    SagaResponse,
+    SagaStepCreateRequest,
+    SagaStepResponse,
+)
+from product_platform.runtime.repository import (
+    RuntimeAgentNotActiveError,
+    RuntimeRepository,
+    RuntimeSessionNotFoundError,
+    RuntimeSessionStateError,
+    runtime_action_response,
+    runtime_ring_decision_response,
+    runtime_ring_rule_response,
+    runtime_session_response,
+)
+from product_platform.runtime.kill_switch import (
+    KillSwitchRepository,
+    KillSwitchTargetNotFoundError,
+    KillSwitchValidationError,
+    kill_switch_event_response,
+)
+from product_platform.runtime.rings import RuntimeRingDecisionService
+from product_platform.runtime.saga_executor import (
+    DemoSafeActionRunner,
+    SagaExecutionError,
+    SagaExecutionService,
+)
+from product_platform.runtime.sandbox import (
+    DuplicateSandboxProfileNameError,
+    SandboxProfileNotFoundError,
+    SandboxProfileRepository,
+    SandboxTestAdapter,
+    SandboxProfileValidationError,
+    sandbox_profile_response,
+)
+from product_platform.runtime.sagas import (
+    SagaNotFoundError,
+    SagaRepository,
+    SagaStepValidationError,
+    saga_event_response,
+    saga_response,
+    saga_step_response,
 )
 from product_platform.trust.models import (
     AgentTrustCardResponse,
@@ -738,6 +843,402 @@ def create_app(
             correlation_id=correlation_id,
             payload_json=route.model_dump(),
         )
+
+    def _mcp_server_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        event_type: str,
+        server: MCPServerResponse,
+        correlation_id: str | None,
+        previous_status: str | None = None,
+    ) -> AuditEventEnvelope:
+        payload = server.model_dump()
+        if previous_status is not None:
+            payload["previous_status"] = previous_status
+            payload["status_changed"] = previous_status != server.status
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type=event_type,
+            source_component="mcp-registry",
+            actor_type="user",
+            actor_id=actor_id,
+            resource_type="mcp_server",
+            resource_id=server.id,
+            correlation_id=correlation_id,
+            payload_json=payload,
+        )
+
+    def _mcp_tool_response(
+        repository: MCPRegistryRepository,
+        row: Any,
+        *,
+        include_versions: bool = False,
+    ) -> MCPToolResponse:
+        current_row = repository.current_tool_version(row)
+        current = mcp_tool_version_response(current_row) if current_row is not None else None
+        versions = (
+            [mcp_tool_version_response(version) for version in repository.list_tool_versions(row["id"])]
+            if include_versions
+            else []
+        )
+        return mcp_tool_response(row, current_version=current, versions=versions)
+
+    def _mcp_tool_schema_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        change: MCPToolSchemaChange,
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type="mcp.tool.schema.changed",
+            source_component="mcp-registry",
+            actor_type="user",
+            actor_id=actor_id,
+            resource_type="mcp_tool",
+            resource_id=change.tool_id,
+            severity="warning",
+            correlation_id=correlation_id,
+            payload_json={
+                "tool_id": change.tool_id,
+                "tool_name": change.tool_name,
+                "server_id": change.server_id,
+                "version_id": change.version_id,
+                "previous_schema_hash": change.previous_schema_hash,
+                "schema_hash": change.schema_hash,
+            },
+        )
+
+    def _mcp_scan_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        event_type: str,
+        scan: MCPScanRunResponse,
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        severity = "warning" if scan.status == "failed" else "info"
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type=event_type,
+            source_component="mcp-security-scans",
+            actor_type="user",
+            actor_id=actor_id,
+            resource_type="mcp_scan_run",
+            resource_id=scan.id,
+            severity=severity,
+            correlation_id=correlation_id,
+            payload_json=scan.model_dump(),
+        )
+
+    def _mcp_finding_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        event_type: str,
+        finding: MCPFindingResponse,
+        correlation_id: str | None,
+        previous_status: str,
+        reason: str | None = None,
+    ) -> AuditEventEnvelope:
+        payload = finding.model_dump()
+        payload["previous_status"] = previous_status
+        if reason is not None:
+            payload["reason"] = reason
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type=event_type,
+            source_component="mcp-security-scans",
+            actor_type="user",
+            actor_id=actor_id,
+            resource_type="mcp_finding",
+            resource_id=finding.id,
+            severity="info",
+            correlation_id=correlation_id,
+            payload_json=payload,
+        )
+
+    def _mcp_proxy_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        call: MCPToolCallResponse,
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        event_type = {
+            "allowed": "mcp.proxy.call.allowed",
+            "denied": "mcp.proxy.call.denied",
+            "escalated": "mcp.proxy.call.escalated",
+        }.get(call.decision, "mcp.proxy.call.recorded")
+        severity = "warning" if call.decision in {"denied", "escalated"} else "info"
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type=event_type,
+            source_component="mcp-proxy",
+            actor_type="user",
+            actor_id=actor_id,
+            resource_type="mcp_tool_call",
+            resource_id=call.id,
+            decision=call.decision,
+            severity=severity,
+            correlation_id=call.correlation_id or correlation_id,
+            payload_json=call.model_dump(),
+        )
+
+    def _mcp_approval_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        event_type: str,
+        approval: MCPApprovalResponse,
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        decision = "allow" if approval.status == "approved" else "deny"
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type=event_type,
+            source_component="mcp-proxy",
+            actor_type="user",
+            actor_id=actor_id,
+            resource_type="mcp_approval",
+            resource_id=approval.id,
+            decision=decision,
+            severity="info" if approval.status == "approved" else "warning",
+            correlation_id=correlation_id,
+            payload_json=approval.model_dump(),
+        )
+
+    def _mcp_response_sanitizer_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        call: MCPToolCallResponse,
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type="mcp.proxy.response.sanitized",
+            source_component="mcp-proxy",
+            actor_type="user",
+            actor_id=actor_id,
+            resource_type="mcp_tool_call",
+            resource_id=call.id,
+            decision=call.decision,
+            severity="warning",
+            correlation_id=call.correlation_id or correlation_id,
+            payload_json=call.model_dump(),
+        )
+
+    def _require_mcp_approval_actor(current_user: UserPrincipal) -> None:
+        if has_permission(current_user, Permission.SECURITY_MANAGE) or "Operator" in current_user.roles:
+            return
+        raise HTTPException(
+            status_code=403,
+            detail="MCP approval decisions require Security Admin or Operator.",
+        )
+
+    def _runtime_session_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        event_type: str,
+        session: RuntimeSessionResponse,
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type=event_type,
+            source_component="runtime-sessions",
+            actor_type="user",
+            actor_id=actor_id,
+            agent_id=session.agent_id,
+            resource_type="runtime_session",
+            resource_id=session.id,
+            severity="info",
+            correlation_id=correlation_id,
+            payload_json=session.model_dump(),
+        )
+
+    def _runtime_action_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        action: RuntimeActionResponse,
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type="runtime.action",
+            source_component="runtime-rings",
+            actor_type="user",
+            actor_id=actor_id,
+            agent_id=action.ring_decision.agent_id if action.ring_decision else None,
+            resource_type="runtime_action",
+            resource_id=action.id,
+            decision=action.decision,
+            severity="warning" if action.decision == "denied" else "info",
+            correlation_id=action.correlation_id or correlation_id,
+            payload_json=action.model_dump(),
+        )
+
+    def _runtime_ring_rule_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        rule: RuntimeRingRuleResponse,
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type="runtime.ring_rule.created",
+            source_component="runtime-rings",
+            actor_type="user",
+            actor_id=actor_id,
+            resource_type="runtime_ring_rule",
+            resource_id=rule.id,
+            severity="info",
+            correlation_id=correlation_id,
+            payload_json=rule.model_dump(),
+        )
+
+    def _saga_detail_response(repository: SagaRepository, saga_id: str) -> SagaResponse:
+        row = repository.get_saga(saga_id)
+        if row is None:
+            raise SagaNotFoundError("Saga not found.")
+        return saga_response(
+            row,
+            steps=[saga_step_response(step) for step in repository.list_steps(saga_id)],
+            events=[saga_event_response(event) for event in repository.list_events(saga_id)],
+        )
+
+    def _saga_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        event_type: str,
+        saga: SagaResponse,
+        correlation_id: str | None,
+        payload: dict[str, Any] | None = None,
+        decision: str | None = None,
+        severity: str = "info",
+    ) -> AuditEventEnvelope:
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type=event_type,
+            source_component="saga-runtime",
+            actor_type="user",
+            actor_id=actor_id,
+            resource_type="saga",
+            resource_id=saga.id,
+            decision=decision,
+            severity=severity,
+            correlation_id=correlation_id or saga.correlation_id,
+            payload_json={
+                "saga_id": saga.id,
+                "status": saga.status,
+                "runtime_session_id": saga.runtime_session_id,
+                **(payload or {}),
+            },
+        )
+
+    def _saga_runtime_action_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        saga: SagaResponse,
+        step: SagaStepResponse,
+        status: str,
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        denied = status in {"failed", "compensation_failed"}
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type="runtime.action",
+            source_component="saga-runtime",
+            actor_type="user",
+            actor_id=actor_id,
+            agent_id=step.target_agent_id,
+            resource_type="runtime_session",
+            resource_id=saga.runtime_session_id,
+            decision="deny" if denied else "allow",
+            severity="warning" if denied else "info",
+            correlation_id=correlation_id or saga.correlation_id,
+            payload_json={
+                "action": step.action_name,
+                "status": status,
+                "saga_id": saga.id,
+                "step_id": step.id,
+                "required_capability": step.required_capability,
+            },
+        )
+
+    def _kill_switch_audit_event(
+        *,
+        event: KillSwitchEventResponse,
+        agent_id: str | None,
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        return AuditEventEnvelope(
+            organization_id=event.organization_id,
+            environment_id=event.environment_id,
+            event_type="runtime.kill_switch",
+            source_component="kill-switch",
+            actor_type="user",
+            actor_id=event.actor_id,
+            agent_id=agent_id,
+            resource_type=event.target_type,
+            resource_id=event.target_id,
+            decision="deny",
+            severity="critical",
+            correlation_id=correlation_id,
+            payload_json={
+                "action": "kill_switch",
+                "status": "kill_switch_triggered",
+                "target_type": event.target_type,
+                "target_id": event.target_id,
+                "scope": event.scope,
+                "reason": event.reason,
+            },
+        )
+
+    def _mcp_scan_run_response(
+        repository: MCPRegistryRepository,
+        row: Any,
+        *,
+        include_findings: bool = False,
+    ) -> MCPScanRunResponse:
+        findings = (
+            [mcp_finding_response(finding) for finding in repository.list_findings(scan_run_id=row["id"])]
+            if include_findings
+            else []
+        )
+        return mcp_scan_run_response(row, findings=findings)
 
     def _resolve_sponsor_email(row: Any, current_user: UserPrincipal, connection: Any) -> str:
         sponsor_user_id = str(row["sponsor_user_id"])
@@ -2106,6 +2607,814 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post(
+        "/api/v1/mcp/servers",
+        response_model=MCPServerResponse,
+        status_code=201,
+        tags=["mcp"],
+    )
+    async def create_mcp_server(
+        body: MCPServerCreateRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> MCPServerResponse:
+        """Register an MCP server as a product resource."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                server = mcp_server_response(
+                    MCPRegistryRepository(connection, organization_id, environment_id).create_server(
+                        body
+                    )
+                )
+                AuditEventRepository(connection).insert(
+                    _mcp_server_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="mcp.server.created",
+                        server=server,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return server
+        except MCPRegistryReferenceError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except DuplicateMCPServerNameError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/mcp/servers",
+        response_model=list[MCPServerResponse],
+        tags=["mcp"],
+    )
+    async def list_mcp_servers(
+        status: str | None = None,
+        owner_user_id: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[MCPServerResponse]:
+        """List MCP servers in the selected environment."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = MCPRegistryRepository(_audit_database().connect(), organization_id, environment_id)
+        return [
+            mcp_server_response(row)
+            for row in repository.list_servers(
+                status=status,
+                owner_user_id=owner_user_id,
+                limit=limit,
+                offset=offset,
+            )
+        ]
+
+    @app.get(
+        "/api/v1/mcp/servers/{server_id}",
+        response_model=MCPServerResponse,
+        tags=["mcp"],
+    )
+    async def get_mcp_server(
+        server_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> MCPServerResponse:
+        """Get one MCP server in the selected environment."""
+
+        organization_id = _require_organization_id(current_user)
+        row = MCPRegistryRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        ).get_server(server_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="MCP server not found.")
+        return mcp_server_response(row)
+
+    @app.patch(
+        "/api/v1/mcp/servers/{server_id}",
+        response_model=MCPServerResponse,
+        tags=["mcp"],
+    )
+    async def patch_mcp_server(
+        server_id: str,
+        body: MCPServerPatchRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> MCPServerResponse:
+        """Patch an MCP server registry record."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = MCPRegistryRepository(connection, organization_id, environment_id)
+                existing = repository.get_server(server_id)
+                if existing is None:
+                    raise MCPServerNotFoundError("MCP server not found.")
+                previous_status = existing["status"]
+                server = mcp_server_response(repository.update_server(server_id, body))
+                AuditEventRepository(connection).insert(
+                    _mcp_server_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="mcp.server.updated",
+                        server=server,
+                        correlation_id=context.correlation_id,
+                        previous_status=previous_status,
+                    )
+                )
+                return server
+        except MCPServerNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except MCPRegistryReferenceError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except DuplicateMCPServerNameError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/mcp/servers/{server_id}/discover-tools",
+        response_model=MCPToolDiscoveryResponse,
+        status_code=201,
+        tags=["mcp"],
+    )
+    async def discover_mcp_server_tools(
+        server_id: str,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> MCPToolDiscoveryResponse:
+        """Discover and persist tool definitions for one MCP server."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = MCPRegistryRepository(connection, organization_id, environment_id)
+                server = repository.get_server(server_id)
+                if server is None:
+                    raise MCPServerNotFoundError("MCP server not found.")
+                raw_tools = DemoMCPToolDiscoveryAdapter().discover_tools(server)
+                normalized_tools = [normalize_tool_definition(tool) for tool in raw_tools]
+                result = repository.persist_discovered_tools(server_id, normalized_tools)
+                for change in result.schema_changes:
+                    if change.previous_schema_hash is None:
+                        continue
+                    AuditEventRepository(connection).insert(
+                        _mcp_tool_schema_audit_event(
+                            organization_id=organization_id,
+                            environment_id=environment_id,
+                            actor_id=current_user.id,
+                            change=change,
+                            correlation_id=context.correlation_id,
+                        )
+                    )
+                tools = [
+                    _mcp_tool_response(repository, row, include_versions=True)
+                    for row in result.rows
+                ]
+                return MCPToolDiscoveryResponse(
+                    server_id=server_id,
+                    discovered_count=len(tools),
+                    tools=tools,
+                )
+        except MCPServerNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/mcp/tools",
+        response_model=list[MCPToolResponse],
+        tags=["mcp"],
+    )
+    async def list_mcp_tools(
+        server_id: str | None = None,
+        status: str | None = None,
+        risk_level: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[MCPToolResponse]:
+        """List discovered MCP tools in the selected environment."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = MCPRegistryRepository(_audit_database().connect(), organization_id, environment_id)
+        return [
+            _mcp_tool_response(repository, row)
+            for row in repository.list_tools(
+                server_id=server_id,
+                status=status,
+                risk_level=risk_level,
+                limit=limit,
+                offset=offset,
+            )
+        ]
+
+    @app.get(
+        "/api/v1/mcp/tools/{tool_id}",
+        response_model=MCPToolResponse,
+        tags=["mcp"],
+    )
+    async def get_mcp_tool(
+        tool_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> MCPToolResponse:
+        """Get one discovered MCP tool with version history."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = MCPRegistryRepository(_audit_database().connect(), organization_id, environment_id)
+        row = repository.get_tool(tool_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="MCP tool not found.")
+        return _mcp_tool_response(repository, row, include_versions=True)
+
+    @app.post(
+        "/api/v1/mcp/servers/{server_id}/scan",
+        response_model=MCPScanRunResponse,
+        status_code=201,
+        tags=["mcp"],
+    )
+    async def run_mcp_security_scan(
+        server_id: str,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> MCPScanRunResponse:
+        """Run a demo-safe MCP security scan and persist results synchronously."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = MCPRegistryRepository(connection, organization_id, environment_id)
+                server = repository.get_server(server_id)
+                if server is None:
+                    raise MCPServerNotFoundError("MCP server not found.")
+                run = _mcp_scan_run_response(repository, repository.create_scan_run(server_id))
+                audit = AuditEventRepository(connection)
+                audit.insert(
+                    _mcp_scan_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="mcp.scan.started",
+                        scan=run,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                try:
+                    query = parse_qs(urlparse(server["endpoint_url"]).query)
+                    if query.get("scan", [""])[0] == "error":
+                        raise RuntimeError("Demo scanner failure fixture requested.")
+                    tool_rows = repository.list_tools(server_id=server_id, limit=500)
+                    tools = [
+                        _mcp_tool_response(repository, row, include_versions=False).model_dump(
+                            by_alias=True
+                        )
+                        for row in tool_rows
+                    ]
+                    scan_result = MCPScannerAdapter().scan_tools(tools)
+                    for finding in scan_result.findings:
+                        repository.create_finding(run.id, finding)
+                    summary = {
+                        "tools_scanned": scan_result.tools_scanned,
+                        "tools_flagged": scan_result.tools_flagged,
+                        "finding_count": len(scan_result.findings),
+                    }
+                    completed = _mcp_scan_run_response(
+                        repository,
+                        repository.finish_scan_run(run.id, status="completed", summary=summary),
+                        include_findings=True,
+                    )
+                    audit.insert(
+                        _mcp_scan_audit_event(
+                            organization_id=organization_id,
+                            environment_id=environment_id,
+                            actor_id=current_user.id,
+                            event_type="mcp.scan.completed",
+                            scan=completed,
+                            correlation_id=context.correlation_id,
+                        )
+                    )
+                    return completed
+                except Exception as exc:
+                    failed = _mcp_scan_run_response(
+                        repository,
+                        repository.finish_scan_run(
+                            run.id,
+                            status="failed",
+                            summary={"tools_scanned": 0, "tools_flagged": 0, "finding_count": 0},
+                            error_message=str(exc),
+                        ),
+                    )
+                    audit.insert(
+                        _mcp_scan_audit_event(
+                            organization_id=organization_id,
+                            environment_id=environment_id,
+                            actor_id=current_user.id,
+                            event_type="mcp.scan.failed",
+                            scan=failed,
+                            correlation_id=context.correlation_id,
+                        )
+                    )
+                    return failed
+        except MCPServerNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/mcp/scans",
+        response_model=list[MCPScanRunResponse],
+        tags=["mcp"],
+    )
+    async def list_mcp_scan_runs(
+        server_id: str | None = None,
+        status: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[MCPScanRunResponse]:
+        """List MCP security scan runs."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = MCPRegistryRepository(_audit_database().connect(), organization_id, environment_id)
+        return [
+            _mcp_scan_run_response(repository, row)
+            for row in repository.list_scan_runs(
+                server_id=server_id,
+                status=status,
+                limit=limit,
+                offset=offset,
+            )
+        ]
+
+    @app.get(
+        "/api/v1/mcp/scans/{scan_run_id}",
+        response_model=MCPScanRunResponse,
+        tags=["mcp"],
+    )
+    async def get_mcp_scan_run(
+        scan_run_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> MCPScanRunResponse:
+        """Get one MCP security scan run with findings."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = MCPRegistryRepository(_audit_database().connect(), organization_id, environment_id)
+        row = repository.get_scan_run(scan_run_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="MCP scan run not found.")
+        return _mcp_scan_run_response(repository, row, include_findings=True)
+
+    @app.get(
+        "/api/v1/mcp/findings",
+        response_model=list[MCPFindingResponse],
+        tags=["mcp"],
+    )
+    async def list_mcp_findings(
+        scan_run_id: str | None = None,
+        server_id: str | None = None,
+        tool_id: str | None = None,
+        status: str | None = None,
+        severity: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[MCPFindingResponse]:
+        """List MCP security findings."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = MCPRegistryRepository(_audit_database().connect(), organization_id, environment_id)
+        return [
+            mcp_finding_response(row)
+            for row in repository.list_findings(
+                scan_run_id=scan_run_id,
+                server_id=server_id,
+                tool_id=tool_id,
+                status=status,
+                severity=severity,
+                limit=limit,
+                offset=offset,
+            )
+        ]
+
+    @app.post(
+        "/api/v1/mcp/findings/{finding_id}/accept-risk",
+        response_model=MCPFindingResponse,
+        tags=["mcp"],
+    )
+    async def accept_mcp_finding_risk(
+        finding_id: str,
+        body: MCPFindingActionRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> MCPFindingResponse:
+        """Accept an MCP finding risk for the current tool schema version."""
+
+        if not body.reason:
+            raise HTTPException(status_code=400, detail="reason is required.")
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = MCPRegistryRepository(connection, organization_id, environment_id)
+                previous = repository.get_finding(finding_id)
+                if previous is None:
+                    raise MCPFindingNotFoundError("MCP finding not found.")
+                updated = mcp_finding_response(
+                    repository.update_finding_status(
+                        finding_id,
+                        status="accepted_risk",
+                        reason=body.reason,
+                        actor_id=current_user.id,
+                    )
+                )
+                AuditEventRepository(connection).insert(
+                    _mcp_finding_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="mcp.finding.accepted_risk",
+                        finding=updated,
+                        correlation_id=context.correlation_id,
+                        previous_status=previous["status"],
+                        reason=body.reason,
+                    )
+                )
+                return updated
+        except MCPFindingNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except MCPFindingLifecycleError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/mcp/findings/{finding_id}/resolve",
+        response_model=MCPFindingResponse,
+        tags=["mcp"],
+    )
+    async def resolve_mcp_finding(
+        finding_id: str,
+        body: MCPFindingActionRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> MCPFindingResponse:
+        """Mark an MCP finding as resolved."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = MCPRegistryRepository(connection, organization_id, environment_id)
+                previous = repository.get_finding(finding_id)
+                if previous is None:
+                    raise MCPFindingNotFoundError("MCP finding not found.")
+                updated = mcp_finding_response(
+                    repository.update_finding_status(
+                        finding_id,
+                        status="resolved",
+                        reason=body.reason,
+                        actor_id=current_user.id,
+                    )
+                )
+                AuditEventRepository(connection).insert(
+                    _mcp_finding_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="mcp.finding.resolved",
+                        finding=updated,
+                        correlation_id=context.correlation_id,
+                        previous_status=previous["status"],
+                        reason=body.reason,
+                    )
+                )
+                return updated
+        except MCPFindingNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except MCPFindingLifecycleError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/mcp/findings/{finding_id}/false-positive",
+        response_model=MCPFindingResponse,
+        tags=["mcp"],
+    )
+    async def mark_mcp_finding_false_positive(
+        finding_id: str,
+        body: MCPFindingActionRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> MCPFindingResponse:
+        """Mark an MCP finding as a false positive with a required reason."""
+
+        if not body.reason:
+            raise HTTPException(status_code=400, detail="reason is required.")
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = MCPRegistryRepository(connection, organization_id, environment_id)
+                previous = repository.get_finding(finding_id)
+                if previous is None:
+                    raise MCPFindingNotFoundError("MCP finding not found.")
+                updated = mcp_finding_response(
+                    repository.update_finding_status(
+                        finding_id,
+                        status="false_positive",
+                        reason=body.reason,
+                        actor_id=current_user.id,
+                    )
+                )
+                AuditEventRepository(connection).insert(
+                    _mcp_finding_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="mcp.finding.false_positive",
+                        finding=updated,
+                        correlation_id=context.correlation_id,
+                        previous_status=previous["status"],
+                        reason=body.reason,
+                    )
+                )
+                return updated
+        except MCPFindingNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except MCPFindingLifecycleError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/mcp/proxy/call",
+        response_model=MCPToolCallResponse,
+        status_code=201,
+        tags=["mcp"],
+    )
+    async def create_mcp_proxy_call(
+        body: MCPProxyCallRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> MCPToolCallResponse:
+        """Evaluate and persist a governed MCP proxy tool call."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = MCPProxyRepository(connection, organization_id, environment_id)
+                row = MCPProxyDecisionService(repository).evaluate_and_record(
+                    body,
+                    request_correlation_id=context.correlation_id,
+                )
+                response = mcp_tool_call_response(row)
+                AuditEventRepository(connection).insert(
+                    _mcp_proxy_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        call=response,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                if response.sanitizer_action:
+                    AuditEventRepository(connection).insert(
+                        _mcp_response_sanitizer_audit_event(
+                            organization_id=organization_id,
+                            environment_id=environment_id,
+                            actor_id=current_user.id,
+                            call=response,
+                            correlation_id=context.correlation_id,
+                        )
+                    )
+                return response
+        except MCPProxyReferenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/mcp/traffic",
+        response_model=list[MCPToolCallResponse],
+        tags=["mcp"],
+    )
+    async def list_mcp_proxy_traffic(
+        decision: str | None = None,
+        server_id: str | None = None,
+        tool_id: str | None = None,
+        source_agent_id: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[MCPToolCallResponse]:
+        """List product-visible MCP proxy traffic."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = MCPProxyRepository(_audit_database().connect(), organization_id, environment_id)
+        return [
+            mcp_tool_call_response(row)
+            for row in repository.list_tool_calls(
+                decision=decision,
+                server_id=server_id,
+                tool_id=tool_id,
+                source_agent_id=source_agent_id,
+                limit=limit,
+                offset=offset,
+            )
+        ]
+
+    @app.get(
+        "/api/v1/mcp/approvals",
+        response_model=list[MCPApprovalResponse],
+        tags=["mcp"],
+    )
+    async def list_mcp_approvals(
+        status: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[MCPApprovalResponse]:
+        """List MCP approval records with their queued tool-call context."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = MCPProxyRepository(_audit_database().connect(), organization_id, environment_id)
+        responses: list[MCPApprovalResponse] = []
+        for row in repository.list_approvals(status=status, limit=limit, offset=offset):
+            call_row = repository.get_tool_call(row["tool_call_id"])
+            responses.append(
+                mcp_approval_response(
+                    row,
+                    tool_call=mcp_tool_call_response(call_row) if call_row is not None else None,
+                )
+            )
+        return responses
+
+    @app.post(
+        "/api/v1/mcp/approvals/{approval_id}/approve",
+        response_model=MCPApprovalResponse,
+        tags=["mcp"],
+    )
+    async def approve_mcp_approval(
+        approval_id: str,
+        body: MCPApprovalDecisionRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> MCPApprovalResponse:
+        """Approve and release a queued MCP tool call."""
+
+        _require_mcp_approval_actor(current_user)
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = MCPProxyRepository(connection, organization_id, environment_id)
+                row = repository.decide_approval(
+                    approval_id,
+                    status="approved",
+                    actor_id=current_user.id,
+                    reason=body.reason,
+                )
+                call_row = repository.get_tool_call(row["tool_call_id"])
+                response = mcp_approval_response(
+                    row,
+                    tool_call=mcp_tool_call_response(call_row) if call_row is not None else None,
+                )
+                AuditEventRepository(connection).insert(
+                    _mcp_approval_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="mcp.approval.approved",
+                        approval=response,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                if response.tool_call is not None and response.tool_call.sanitizer_action:
+                    AuditEventRepository(connection).insert(
+                        _mcp_response_sanitizer_audit_event(
+                            organization_id=organization_id,
+                            environment_id=environment_id,
+                            actor_id=current_user.id,
+                            call=response.tool_call,
+                            correlation_id=context.correlation_id,
+                        )
+                    )
+                return response
+        except MCPApprovalNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (MCPApprovalDecisionError, MCPProxyReferenceError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/mcp/approvals/{approval_id}/deny",
+        response_model=MCPApprovalResponse,
+        tags=["mcp"],
+    )
+    async def deny_mcp_approval(
+        approval_id: str,
+        body: MCPApprovalDecisionRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> MCPApprovalResponse:
+        """Deny a queued MCP tool call."""
+
+        _require_mcp_approval_actor(current_user)
+        if not body.reason:
+            raise HTTPException(status_code=400, detail="reason is required.")
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = MCPProxyRepository(connection, organization_id, environment_id)
+                row = repository.decide_approval(
+                    approval_id,
+                    status="denied",
+                    actor_id=current_user.id,
+                    reason=body.reason,
+                )
+                call_row = repository.get_tool_call(row["tool_call_id"])
+                response = mcp_approval_response(
+                    row,
+                    tool_call=mcp_tool_call_response(call_row) if call_row is not None else None,
+                )
+                AuditEventRepository(connection).insert(
+                    _mcp_approval_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="mcp.approval.denied",
+                        approval=response,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return response
+        except MCPApprovalNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (MCPApprovalDecisionError, MCPProxyReferenceError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/mcp/rate-limits",
+        response_model=list[MCPRateLimitResponse],
+        tags=["mcp"],
+    )
+    async def list_mcp_rate_limits(
+        target_type: str | None = None,
+        target_id: str | None = None,
+        enabled: bool | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[MCPRateLimitResponse]:
+        """List MCP proxy rate-limit configuration."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = MCPProxyRepository(_audit_database().connect(), organization_id, environment_id)
+        return [
+            mcp_rate_limit_response(row)
+            for row in repository.list_rate_limits(
+                target_type=target_type,
+                target_id=target_id,
+                enabled=enabled,
+                limit=limit,
+                offset=offset,
+            )
+        ]
+
+    @app.post(
+        "/api/v1/mcp/rate-limits",
+        response_model=MCPRateLimitResponse,
+        status_code=201,
+        tags=["mcp"],
+    )
+    async def create_mcp_rate_limit(
+        body: MCPRateLimitCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> MCPRateLimitResponse:
+        """Create an MCP proxy rate-limit configuration row."""
+
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = MCPProxyRepository(connection, organization_id, environment_id)
+            return mcp_rate_limit_response(repository.create_rate_limit(body))
+
+    @app.post(
         "/api/v1/trust/cards",
         response_model=TrustCardResponse,
         status_code=201,
@@ -3031,6 +4340,709 @@ def create_app(
                         detail="Only demo.noop can run immediately in the foundation runtime.",
                     )
             return _serialize_job(jobs, created["id"])
+
+    @app.post(
+        "/api/v1/runtime/sessions",
+        response_model=RuntimeSessionResponse,
+        status_code=201,
+        tags=["runtime"],
+    )
+    async def create_runtime_session(
+        body: RuntimeSessionCreateRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> RuntimeSessionResponse:
+        """Start a runtime session for an active agent."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = RuntimeRepository(connection, organization_id, environment_id)
+                session = runtime_session_response(repository.create_session(body))
+                AuditEventRepository(connection).insert(
+                    _runtime_session_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="runtime.session.started",
+                        session=session,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return session
+        except RuntimeAgentNotActiveError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/runtime/sessions",
+        response_model=list[RuntimeSessionResponse],
+        tags=["runtime"],
+    )
+    async def list_runtime_sessions(
+        state: str | None = None,
+        agent_id: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[RuntimeSessionResponse]:
+        """List runtime sessions in the selected environment."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = RuntimeRepository(_audit_database().connect(), organization_id, environment_id)
+        return [
+            runtime_session_response(row)
+            for row in repository.list_sessions(state=state, agent_id=agent_id, limit=limit, offset=offset)
+        ]
+
+    @app.get(
+        "/api/v1/runtime/sessions/{session_id}",
+        response_model=RuntimeSessionResponse,
+        tags=["runtime"],
+    )
+    async def get_runtime_session(
+        session_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> RuntimeSessionResponse:
+        """Get one runtime session and its action timeline."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = RuntimeRepository(_audit_database().connect(), organization_id, environment_id)
+        row = repository.get_session(session_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Runtime session not found.")
+        actions = []
+        for action_row in repository.list_actions_for_session(session_id):
+            decision_row = repository.get_ring_decision_for_action(action_row["id"])
+            actions.append(
+                runtime_action_response(
+                    action_row,
+                    ring_decision=runtime_ring_decision_response(decision_row)
+                    if decision_row is not None
+                    else None,
+                )
+            )
+        return runtime_session_response(row, actions=actions)
+
+    @app.post(
+        "/api/v1/runtime/sessions/{session_id}/end",
+        response_model=RuntimeSessionResponse,
+        tags=["runtime"],
+    )
+    async def end_runtime_session(
+        session_id: str,
+        body: RuntimeSessionEndRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> RuntimeSessionResponse:
+        """End and archive an active runtime session."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = RuntimeRepository(connection, organization_id, environment_id)
+                session = runtime_session_response(repository.end_session(session_id, reason=body.reason))
+                AuditEventRepository(connection).insert(
+                    _runtime_session_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="runtime.session.ended",
+                        session=session,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return session
+        except RuntimeSessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeSessionStateError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/runtime/sessions/{session_id}/actions",
+        response_model=RuntimeActionResponse,
+        status_code=201,
+        tags=["runtime"],
+    )
+    async def create_runtime_action(
+        session_id: str,
+        body: RuntimeActionCreateRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> RuntimeActionResponse:
+        """Evaluate a runtime action through ring enforcement and persist the decision."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = RuntimeRepository(connection, organization_id, environment_id)
+                action_row, decision_row = RuntimeRingDecisionService(repository).evaluate_and_record(
+                    session_id,
+                    body,
+                    correlation_id=context.correlation_id,
+                )
+                decision = runtime_ring_decision_response(decision_row)
+                action = runtime_action_response(action_row, ring_decision=decision)
+                AuditEventRepository(connection).insert(
+                    _runtime_action_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        action=action,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return action
+        except RuntimeSessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeSessionStateError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/runtime/ring-decisions",
+        response_model=list[RuntimeRingDecisionResponse],
+        tags=["runtime"],
+    )
+    async def list_runtime_ring_decisions(
+        result: str | None = None,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[RuntimeRingDecisionResponse]:
+        """List persisted runtime ring decisions."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = RuntimeRepository(_audit_database().connect(), organization_id, environment_id)
+        return [
+            runtime_ring_decision_response(row)
+            for row in repository.list_ring_decisions(
+                result=result,
+                session_id=session_id,
+                agent_id=agent_id,
+                limit=limit,
+                offset=offset,
+            )
+        ]
+
+    @app.get(
+        "/api/v1/runtime/ring-rules",
+        response_model=list[RuntimeRingRuleResponse],
+        tags=["runtime"],
+    )
+    async def list_runtime_ring_rules(
+        enabled: bool | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[RuntimeRingRuleResponse]:
+        """List runtime ring override rules."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = RuntimeRepository(_audit_database().connect(), organization_id, environment_id)
+        return [
+            runtime_ring_rule_response(row)
+            for row in repository.list_ring_rules(enabled=enabled, limit=limit, offset=offset)
+        ]
+
+    @app.post(
+        "/api/v1/runtime/ring-rules",
+        response_model=RuntimeRingRuleResponse,
+        status_code=201,
+        tags=["runtime"],
+    )
+    async def create_runtime_ring_rule(
+        body: RuntimeRingRuleCreateRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> RuntimeRingRuleResponse:
+        """Create a runtime ring override rule."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        with _audit_database().transaction() as connection:
+            repository = RuntimeRepository(connection, organization_id, environment_id)
+            rule = runtime_ring_rule_response(repository.create_ring_rule(body))
+            AuditEventRepository(connection).insert(
+                _runtime_ring_rule_audit_event(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    actor_id=current_user.id,
+                    rule=rule,
+                    correlation_id=context.correlation_id,
+                )
+            )
+            return rule
+
+    @app.post(
+        "/api/v1/runtime/sandbox-profiles",
+        response_model=SandboxProfileResponse,
+        status_code=201,
+        tags=["runtime"],
+    )
+    async def create_runtime_sandbox_profile(
+        body: SandboxProfileCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> SandboxProfileResponse:
+        """Create a sandbox profile for runtime actions."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = SandboxProfileRepository(connection, organization_id, environment_id)
+                return sandbox_profile_response(repository.create_profile(body))
+        except DuplicateSandboxProfileNameError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except SandboxProfileValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/runtime/sandbox-profiles",
+        response_model=list[SandboxProfileResponse],
+        tags=["runtime"],
+    )
+    async def list_runtime_sandbox_profiles(
+        status: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[SandboxProfileResponse]:
+        """List sandbox profiles."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            repository = SandboxProfileRepository(_audit_database().connect(), organization_id, environment_id)
+            return [
+                sandbox_profile_response(row)
+                for row in repository.list_profiles(status=status, limit=limit, offset=offset)
+            ]
+        except SandboxProfileValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.patch(
+        "/api/v1/runtime/sandbox-profiles/{profile_id}",
+        response_model=SandboxProfileResponse,
+        tags=["runtime"],
+    )
+    async def patch_runtime_sandbox_profile(
+        profile_id: str,
+        body: SandboxProfilePatchRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> SandboxProfileResponse:
+        """Patch a sandbox profile."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = SandboxProfileRepository(connection, organization_id, environment_id)
+                return sandbox_profile_response(repository.patch_profile(profile_id, body))
+        except SandboxProfileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except DuplicateSandboxProfileNameError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except SandboxProfileValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/runtime/sandbox-profiles/{profile_id}/test",
+        response_model=SandboxDecisionResponse,
+        tags=["runtime"],
+    )
+    async def test_runtime_sandbox_profile(
+        profile_id: str,
+        body: SandboxProfileTestRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> SandboxDecisionResponse:
+        """Test sample code against a sandbox profile without executing the code."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = SandboxProfileRepository(connection, organization_id, environment_id)
+                return SandboxTestAdapter(repository).test_profile(profile_id, body)
+        except SandboxProfileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except SandboxProfileValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/runtime/kill-switch",
+        response_model=KillSwitchEventResponse,
+        status_code=201,
+        tags=["runtime"],
+    )
+    async def trigger_runtime_kill_switch(
+        body: KillSwitchRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> KillSwitchEventResponse:
+        """Trigger an auditable emergency stop for a supported runtime target."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = KillSwitchRepository(connection, organization_id, environment_id)
+                row = repository.trigger(body, actor_id=current_user.id)
+                event = kill_switch_event_response(row)
+                AuditEventRepository(connection).insert(
+                    _kill_switch_audit_event(
+                        event=event,
+                        agent_id=repository.agent_id_for_event(row),
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return event
+        except KillSwitchTargetNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except KillSwitchValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/runtime/kill-switch/events",
+        response_model=list[KillSwitchEventResponse],
+        tags=["runtime"],
+    )
+    async def list_runtime_kill_switch_events(
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[KillSwitchEventResponse]:
+        """List kill-switch events."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = KillSwitchRepository(_audit_database().connect(), organization_id, environment_id)
+        return [kill_switch_event_response(row) for row in repository.list_events(limit=limit, offset=offset)]
+
+    @app.post(
+        "/api/v1/runtime/sagas",
+        response_model=SagaResponse,
+        status_code=201,
+        tags=["runtime"],
+    )
+    async def create_runtime_saga(
+        body: SagaCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> SagaResponse:
+        """Create a draft saga definition."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = SagaRepository(connection, organization_id, environment_id)
+                row = repository.create_saga(body, created_by=current_user.id)
+                return saga_response(row)
+        except SagaStepValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/runtime/sagas",
+        response_model=list[SagaResponse],
+        tags=["runtime"],
+    )
+    async def list_runtime_sagas(
+        status: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[SagaResponse]:
+        """List saga definitions."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = SagaRepository(_audit_database().connect(), organization_id, environment_id)
+        return [
+            saga_response(row)
+            for row in repository.list_sagas(status=status, limit=limit, offset=offset)
+        ]
+
+    @app.get(
+        "/api/v1/runtime/sagas/{saga_id}",
+        response_model=SagaResponse,
+        tags=["runtime"],
+    )
+    async def get_runtime_saga(
+        saga_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> SagaResponse:
+        """Get one saga with steps and events."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = SagaRepository(_audit_database().connect(), organization_id, environment_id)
+        row = repository.get_saga(saga_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Saga not found.")
+        return saga_response(
+            row,
+            steps=[saga_step_response(step) for step in repository.list_steps(saga_id)],
+            events=[saga_event_response(event) for event in repository.list_events(saga_id)],
+        )
+
+    @app.post(
+        "/api/v1/runtime/sagas/{saga_id}/steps",
+        response_model=SagaStepResponse,
+        status_code=201,
+        tags=["runtime"],
+    )
+    async def add_runtime_saga_step(
+        saga_id: str,
+        body: SagaStepCreateRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> SagaStepResponse:
+        """Add an ordered step to a draft saga."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = SagaRepository(connection, organization_id, environment_id)
+                return saga_step_response(repository.add_step(saga_id, body))
+        except SagaNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except SagaStepValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/runtime/sagas/{saga_id}/execute",
+        response_model=SagaExecutionResponse,
+        tags=["runtime"],
+    )
+    async def execute_runtime_saga(
+        saga_id: str,
+        body: SagaExecuteRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> SagaExecutionResponse:
+        """Execute a saga using demo-safe actions and persist runtime/audit visibility."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                saga_repository = SagaRepository(connection, organization_id, environment_id)
+                runtime_repository = RuntimeRepository(connection, organization_id, environment_id)
+                audit_repository = AuditEventRepository(connection)
+                saga_row = saga_repository.get_saga(saga_id)
+                if saga_row is None:
+                    raise SagaNotFoundError("Saga not found.")
+                steps = saga_repository.list_steps(saga_id)
+                if not steps:
+                    raise SagaExecutionError("Saga must have at least one step before execution.")
+
+                runtime_session_id = body.runtime_session_id or saga_row["runtime_session_id"]
+                if runtime_session_id:
+                    if runtime_repository.get_session(runtime_session_id) is None:
+                        raise RuntimeSessionNotFoundError("Runtime session not found.")
+                    saga_repository.link_runtime_session(saga_id, runtime_session_id)
+                else:
+                    session_row = runtime_repository.create_session(
+                        RuntimeSessionCreateRequest(
+                            agent_id=steps[0]["target_agent_id"],
+                            ring=2,
+                            sponsor_user_id=current_user.id,
+                            metadata={"source": "saga.execute", "saga_id": saga_id},
+                        )
+                    )
+                    session = runtime_session_response(session_row)
+                    saga_repository.link_runtime_session(saga_id, session.id)
+                    audit_repository.insert(
+                        _runtime_session_audit_event(
+                            organization_id=organization_id,
+                            environment_id=environment_id,
+                            actor_id=current_user.id,
+                            event_type="runtime.session.started",
+                            session=session,
+                            correlation_id=context.correlation_id,
+                        )
+                    )
+
+                linked_saga = _saga_detail_response(saga_repository, saga_id)
+                audit_repository.insert(
+                    _saga_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="saga.started",
+                        saga=linked_saga,
+                        correlation_id=context.correlation_id,
+                        payload={"failure_actions": body.failure_actions},
+                    )
+                )
+                result = await SagaExecutionService(
+                    saga_repository,
+                    action_runner=DemoSafeActionRunner(failure_actions=body.failure_actions),
+                ).execute(saga_id)
+                final_saga = _saga_detail_response(saga_repository, saga_id)
+
+                step_event_by_status = {
+                    "committed": "saga.step.committed",
+                    "failed": "saga.step.failed",
+                    "compensated": "saga.step.compensated",
+                    "compensation_failed": "saga.step.compensation_failed",
+                }
+                for step in final_saga.steps:
+                    event_type = step_event_by_status.get(step.status)
+                    if event_type is None:
+                        continue
+                    denied = step.status in {"failed", "compensation_failed"}
+                    audit_repository.insert(
+                        _saga_audit_event(
+                            organization_id=organization_id,
+                            environment_id=environment_id,
+                            actor_id=current_user.id,
+                            event_type=event_type,
+                            saga=final_saga,
+                            correlation_id=context.correlation_id,
+                            payload={
+                                "step_id": step.id,
+                                "step_order": step.step_order,
+                                "action_name": step.action_name,
+                                "result": step.result,
+                            },
+                            decision="deny" if denied else "allow",
+                            severity="warning" if denied else "info",
+                        )
+                    )
+                    audit_repository.insert(
+                        _saga_runtime_action_audit_event(
+                            organization_id=organization_id,
+                            environment_id=environment_id,
+                            actor_id=current_user.id,
+                            saga=final_saga,
+                            step=step,
+                            status=step.status,
+                            correlation_id=context.correlation_id,
+                        )
+                    )
+
+                final_event = f"saga.{result.status}"
+                audit_repository.insert(
+                    _saga_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type=final_event,
+                        saga=final_saga,
+                        correlation_id=context.correlation_id,
+                        payload={
+                            "executed_step_ids": result.executed_step_ids,
+                            "compensated_step_ids": result.compensated_step_ids,
+                            "failed_step_id": result.failed_step_id,
+                        },
+                        decision="allow" if result.status == "completed" else "deny",
+                        severity="info" if result.status == "completed" else "warning",
+                    )
+                )
+                return SagaExecutionResponse(
+                    saga_id=saga_id,
+                    runtime_session_id=final_saga.runtime_session_id,
+                    status=result.status,
+                    message=result.message,
+                    executed_step_ids=result.executed_step_ids,
+                    compensated_step_ids=result.compensated_step_ids,
+                    failed_step_id=result.failed_step_id,
+                    saga=final_saga,
+                )
+        except SagaNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeSessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (RuntimeAgentNotActiveError, SagaExecutionError, SagaStepValidationError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/runtime/sagas/{saga_id}/cancel",
+        response_model=SagaResponse,
+        tags=["runtime"],
+    )
+    async def cancel_runtime_saga(
+        saga_id: str,
+        body: SagaCancelRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> SagaResponse:
+        """Cancel a non-terminal saga."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        terminal_statuses = {"completed", "compensated", "failed", "compensation_failed", "cancelled"}
+        try:
+            with _audit_database().transaction() as connection:
+                saga_repository = SagaRepository(connection, organization_id, environment_id)
+                runtime_repository = RuntimeRepository(connection, organization_id, environment_id)
+                audit_repository = AuditEventRepository(connection)
+                saga_row = saga_repository.get_saga(saga_id)
+                if saga_row is None:
+                    raise SagaNotFoundError("Saga not found.")
+                if saga_row["status"] in terminal_statuses:
+                    raise SagaExecutionError("Terminal saga cannot be cancelled.")
+                saga_repository.update_saga_status(saga_id, "cancelled", mark_finished=True)
+                saga_repository.create_event(
+                    saga_id,
+                    event_type="saga.cancelled",
+                    message="Saga cancelled.",
+                    payload={"reason": body.reason},
+                )
+                runtime_session_id = saga_row["runtime_session_id"]
+                if runtime_session_id:
+                    session_row = runtime_repository.get_session(runtime_session_id)
+                    if session_row is not None and session_row["state"] == "active":
+                        session = runtime_session_response(
+                            runtime_repository.end_session(
+                                runtime_session_id,
+                                reason=body.reason or "Saga cancelled.",
+                            )
+                        )
+                        audit_repository.insert(
+                            _runtime_session_audit_event(
+                                organization_id=organization_id,
+                                environment_id=environment_id,
+                                actor_id=current_user.id,
+                                event_type="runtime.session.ended",
+                                session=session,
+                                correlation_id=context.correlation_id,
+                            )
+                        )
+                saga = _saga_detail_response(saga_repository, saga_id)
+                audit_repository.insert(
+                    _saga_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="saga.cancelled",
+                        saga=saga,
+                        correlation_id=context.correlation_id,
+                        payload={"reason": body.reason},
+                        decision="deny",
+                        severity="warning",
+                    )
+                )
+                return saga
+        except SagaNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (RuntimeSessionStateError, SagaExecutionError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/v1/jobs", response_model=list[JobResponse], tags=["jobs"])
     async def list_jobs(

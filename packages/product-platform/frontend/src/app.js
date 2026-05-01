@@ -25,6 +25,16 @@ import {
   renderMeshMessageDetail
 } from "./mesh.js";
 import {
+  mcpApprovalDecisionPayloadFromForm,
+  mcpFindingActionPayloadFromForm,
+  mcpFindingFilterParamsFromForm,
+  mcpRateLimitPayloadFromForm,
+  mcpServerPayloadFromForm,
+  mcpTrafficFilterParamsFromForm,
+  renderMcpFindingDetail,
+  renderMcpToolDetail
+} from "./mcp.js";
+import {
   policyBindingPayloadFromForm,
   policyEditorPayloadFromForm,
   policyExceptionPayloadFromForm,
@@ -42,6 +52,19 @@ import {
   trustThresholdPayloadFromForm,
   renderHandshakeDetail
 } from "./trust.js";
+import {
+  runtimeActionPayloadFromForm,
+  runtimeSagaCancelPayloadFromForm,
+  runtimeSagaExecutePayloadFromForm,
+  runtimeSagaPayloadFromForm,
+  runtimeSagaStepPayloadFromForm,
+  runtimeSandboxProfilePayloadFromForm,
+  runtimeSandboxTestPayloadFromForm,
+  runtimeKillSwitchPayloadFromForm,
+  runtimeRingRulePayloadFromForm,
+  runtimeSessionPayloadFromForm,
+  renderRuntimeSagaStepDetail
+} from "./runtime.js";
 import {
   createLoadingState,
   loadAppContext,
@@ -207,6 +230,99 @@ async function refreshMeshWorkspace(
   mount(root, appState);
 }
 
+async function loadMcpState(
+  apiClient,
+  findingParams = appState.mcpFindingFilter ?? {},
+  trafficParams = appState.mcpTrafficFilter ?? {}
+) {
+  const [
+    mcpServers,
+    mcpTools,
+    mcpScanRuns,
+    mcpFindings,
+    mcpTraffic,
+    mcpApprovals,
+    mcpRateLimits
+  ] = await Promise.all([
+    apiClient.listMcpServers(),
+    apiClient.listMcpTools(),
+    apiClient.listMcpScans(),
+    apiClient.listMcpFindings(findingParams),
+    apiClient.listMcpTraffic(trafficParams),
+    apiClient.listMcpApprovals(),
+    apiClient.listMcpRateLimits()
+  ]);
+  return {
+    ...appState,
+    mcpServers,
+    mcpTools,
+    mcpScanRuns,
+    mcpFindings,
+    mcpFindingFilter: findingParams,
+    mcpTraffic,
+    mcpTrafficFilter: trafficParams,
+    mcpApprovals,
+    mcpRateLimits
+  };
+}
+
+async function refreshMcpWorkspace(
+  root,
+  apiClient,
+  findingParams = appState.mcpFindingFilter ?? {},
+  trafficParams = appState.mcpTrafficFilter ?? {}
+) {
+  appState = await loadMcpState(apiClient, findingParams, trafficParams);
+  mount(root, appState);
+}
+
+async function loadRuntimeState(apiClient) {
+  const [
+    runtimeSessions,
+    runtimeRingDecisions,
+    runtimeRingRules,
+    runtimeSagas,
+    runtimeSandboxProfiles,
+    runtimeKillSwitchEvents
+  ] = await Promise.all([
+    apiClient.listRuntimeSessions(),
+    apiClient.listRuntimeRingDecisions(),
+    apiClient.listRuntimeRingRules(),
+    apiClient.listRuntimeSagas(),
+    apiClient.listRuntimeSandboxProfiles(),
+    apiClient.listRuntimeKillSwitchEvents()
+  ]);
+  const selectedSessionId = runtimeSessions[0]?.id ?? null;
+  const selectedRuntimeSession = selectedSessionId
+    ? await apiClient.getRuntimeSession(selectedSessionId)
+    : null;
+  const selectedSagaId = appState.selectedRuntimeSaga?.id ?? runtimeSagas[0]?.id ?? null;
+  const selectedRuntimeSaga = selectedSagaId ? await apiClient.getRuntimeSaga(selectedSagaId) : null;
+  return {
+    ...appState,
+    runtimeSessions,
+    selectedRuntimeSession,
+    runtimeRingDecisions,
+    runtimeRingRules,
+    runtimeSagas,
+    selectedRuntimeSaga,
+    runtimeSandboxProfiles,
+    selectedRuntimeSandboxProfile: runtimeSandboxProfiles[0] ?? null,
+    runtimeKillSwitchEvents
+  };
+}
+
+async function refreshRuntimeWorkspace(root, apiClient, selectedSagaId = appState.selectedRuntimeSaga?.id ?? null) {
+  appState = await loadRuntimeState(apiClient);
+  if (selectedSagaId) {
+    appState = {
+      ...appState,
+      selectedRuntimeSaga: await apiClient.getRuntimeSaga(selectedSagaId)
+    };
+  }
+  mount(root, appState);
+}
+
 export function installNavigation(root = document.getElementById("app"), apiClient = null) {
   document.addEventListener("click", async (event) => {
     const link = event.target.closest("[data-route]");
@@ -230,6 +346,12 @@ export function installNavigation(root = document.getElementById("app"), apiClie
     }
     if (apiClient && normalizePath(targetPath) === "/mesh") {
       await refreshMeshWorkspace(root, apiClient);
+    }
+    if (apiClient && normalizePath(targetPath) === "/mcp") {
+      await refreshMcpWorkspace(root, apiClient);
+    }
+    if (apiClient && normalizePath(targetPath) === "/runtime") {
+      await refreshRuntimeWorkspace(root, apiClient);
     }
   });
   document.addEventListener("change", (event) => {
@@ -456,6 +578,101 @@ export function installNavigation(root = document.getElementById("app"), apiClie
     mount(root, appState);
   });
   document.addEventListener("click", async (event) => {
+    const discoverButton = event.target.closest("[data-mcp-discover-tools]");
+    if (discoverButton && apiClient) {
+      const serverId = discoverButton.getAttribute("data-mcp-discover-tools");
+      if (!serverId) {
+        return;
+      }
+      await apiClient.discoverMcpServerTools(serverId);
+      await refreshMcpWorkspace(root, apiClient);
+      return;
+    }
+    const scanButton = event.target.closest("[data-mcp-run-scan]");
+    if (scanButton && apiClient) {
+      const serverId = scanButton.getAttribute("data-mcp-run-scan");
+      if (!serverId) {
+        return;
+      }
+      await apiClient.runMcpSecurityScan(serverId);
+      await refreshMcpWorkspace(root, apiClient);
+      return;
+    }
+    const toolDetailButton = event.target.closest("[data-mcp-tool-detail-open]");
+    if (toolDetailButton && apiClient) {
+      const toolId = toolDetailButton.getAttribute("data-mcp-tool-detail-open");
+      if (!toolId) {
+        return;
+      }
+      const tool = await apiClient.getMcpTool(toolId);
+      appState = withDrawer(
+        appState,
+        openDrawer({
+          kind: "mcp-tool",
+          resourceId: tool.id,
+          title: "MCP Tool",
+          subtitle: tool.name,
+          status: tool.status,
+          content: renderMcpToolDetail(tool)
+        })
+      );
+      mount(root, appState);
+      return;
+    }
+    const findingDetailButton = event.target.closest("[data-mcp-finding-detail-open]");
+    if (findingDetailButton && apiClient) {
+      const findingId = findingDetailButton.getAttribute("data-mcp-finding-detail-open");
+      const finding = appState.mcpFindings?.find((item) => item.id === findingId);
+      if (!finding) {
+        return;
+      }
+      appState = withDrawer(
+        appState,
+        openDrawer({
+          kind: "mcp-finding",
+          resourceId: finding.id,
+          title: "MCP Finding",
+          subtitle: finding.title,
+          status: finding.status,
+          content: renderMcpFindingDetail(finding)
+        })
+      );
+      mount(root, appState);
+      return;
+    }
+    const acceptRiskButton = event.target.closest("[data-mcp-accept-risk-open]");
+    if (acceptRiskButton) {
+      const findingId = acceptRiskButton.getAttribute("data-mcp-accept-risk-open");
+      const dialog = findingId
+        ? document.querySelector(`[data-mcp-accept-risk-modal="${findingId}"]`)
+        : null;
+      if (dialog?.showModal) {
+        dialog.showModal();
+      }
+      return;
+    }
+    const approveApprovalButton = event.target.closest("[data-mcp-approval-approve-open]");
+    if (approveApprovalButton) {
+      const approvalId = approveApprovalButton.getAttribute("data-mcp-approval-approve-open");
+      const dialog = approvalId
+        ? document.querySelector(`[data-mcp-approval-approve-modal="${approvalId}"]`)
+        : null;
+      if (dialog?.showModal) {
+        dialog.showModal();
+      }
+      return;
+    }
+    const denyApprovalButton = event.target.closest("[data-mcp-approval-deny-open]");
+    if (denyApprovalButton) {
+      const approvalId = denyApprovalButton.getAttribute("data-mcp-approval-deny-open");
+      const dialog = approvalId
+        ? document.querySelector(`[data-mcp-approval-deny-modal="${approvalId}"]`)
+        : null;
+      if (dialog?.showModal) {
+        dialog.showModal();
+      }
+      return;
+    }
     const bridgeOpenButton = event.target.closest("[data-protocol-bridge-open]");
     if (bridgeOpenButton && apiClient) {
       const bridgeId = bridgeOpenButton.getAttribute("data-protocol-bridge-open");
@@ -524,6 +741,42 @@ export function installNavigation(root = document.getElementById("app"), apiClie
         subtitle: `${handoff.source_agent_id} -> ${handoff.target_agent_id}`,
         status: handoff.status,
         content: renderMeshHandoffDetail(handoff)
+      })
+    );
+    mount(root, appState);
+  });
+  document.addEventListener("click", async (event) => {
+    const openSagaButton = event.target.closest("[data-runtime-saga-open]");
+    if (openSagaButton && apiClient) {
+      const sagaId = openSagaButton.getAttribute("data-runtime-saga-open");
+      if (!sagaId) {
+        return;
+      }
+      appState = {
+        ...appState,
+        selectedRuntimeSaga: await apiClient.getRuntimeSaga(sagaId)
+      };
+      mount(root, appState);
+      return;
+    }
+    const stepDetailButton = event.target.closest("[data-runtime-saga-step-detail-open]");
+    if (!stepDetailButton) {
+      return;
+    }
+    const [sagaId, stepId] = (stepDetailButton.getAttribute("data-runtime-saga-step-detail-open") ?? "").split(":");
+    const saga = appState.selectedRuntimeSaga?.id === sagaId
+      ? appState.selectedRuntimeSaga
+      : appState.runtimeSagas?.find((item) => item.id === sagaId);
+    const step = saga?.steps?.find((item) => item.id === stepId);
+    appState = withDrawer(
+      appState,
+      openDrawer({
+        kind: "runtime-saga-step",
+        resourceId: stepId,
+        title: "Saga Step",
+        subtitle: step?.action_name ?? "Unknown action",
+        status: step?.status ?? "unknown",
+        content: renderRuntimeSagaStepDetail(step)
       })
     );
     mount(root, appState);
@@ -780,6 +1033,204 @@ export function installNavigation(root = document.getElementById("app"), apiClie
       );
       return;
     }
+    const mcpServerRegisterForm = event.target.closest("[data-mcp-server-register-form]");
+    if (mcpServerRegisterForm && apiClient) {
+      event.preventDefault();
+      await apiClient.createMcpServer(mcpServerPayloadFromForm(mcpServerRegisterForm));
+      await refreshMcpWorkspace(root, apiClient);
+      return;
+    }
+    const mcpFindingFilterForm = event.target.closest("[data-mcp-finding-filter-form]");
+    if (mcpFindingFilterForm && apiClient) {
+      event.preventDefault();
+      await refreshMcpWorkspace(root, apiClient, mcpFindingFilterParamsFromForm(mcpFindingFilterForm));
+      return;
+    }
+    const mcpTrafficFilterForm = event.target.closest("[data-mcp-traffic-filter-form]");
+    if (mcpTrafficFilterForm && apiClient) {
+      event.preventDefault();
+      await refreshMcpWorkspace(
+        root,
+        apiClient,
+        appState.mcpFindingFilter ?? {},
+        mcpTrafficFilterParamsFromForm(mcpTrafficFilterForm)
+      );
+      return;
+    }
+    const mcpFindingAcceptRiskForm = event.target.closest("[data-mcp-finding-accept-risk-form]");
+    if (mcpFindingAcceptRiskForm && apiClient) {
+      event.preventDefault();
+      const findingId = mcpFindingAcceptRiskForm.getAttribute("data-finding-id");
+      if (!findingId) {
+        return;
+      }
+      await apiClient.acceptMcpFindingRisk(
+        findingId,
+        mcpFindingActionPayloadFromForm(mcpFindingAcceptRiskForm)
+      );
+      const dialog = document.querySelector(`[data-mcp-accept-risk-modal="${findingId}"]`);
+      if (dialog?.close) {
+        dialog.close();
+      }
+      await refreshMcpWorkspace(root, apiClient);
+      return;
+    }
+    const mcpFindingResolveForm = event.target.closest("[data-mcp-finding-resolve-form]");
+    if (mcpFindingResolveForm && apiClient) {
+      event.preventDefault();
+      const findingId = mcpFindingResolveForm.getAttribute("data-finding-id");
+      if (!findingId) {
+        return;
+      }
+      await apiClient.resolveMcpFinding(
+        findingId,
+        mcpFindingActionPayloadFromForm(mcpFindingResolveForm)
+      );
+      await refreshMcpWorkspace(root, apiClient);
+      return;
+    }
+    const mcpApprovalApproveForm = event.target.closest("[data-mcp-approval-approve-form]");
+    if (mcpApprovalApproveForm && apiClient) {
+      event.preventDefault();
+      const approvalId = mcpApprovalApproveForm.getAttribute("data-approval-id");
+      if (!approvalId) {
+        return;
+      }
+      await apiClient.approveMcpApproval(
+        approvalId,
+        mcpApprovalDecisionPayloadFromForm(mcpApprovalApproveForm)
+      );
+      const dialog = document.querySelector(`[data-mcp-approval-approve-modal="${approvalId}"]`);
+      if (dialog?.close) {
+        dialog.close();
+      }
+      await refreshMcpWorkspace(root, apiClient);
+      return;
+    }
+    const mcpApprovalDenyForm = event.target.closest("[data-mcp-approval-deny-form]");
+    if (mcpApprovalDenyForm && apiClient) {
+      event.preventDefault();
+      const approvalId = mcpApprovalDenyForm.getAttribute("data-approval-id");
+      if (!approvalId) {
+        return;
+      }
+      await apiClient.denyMcpApproval(
+        approvalId,
+        mcpApprovalDecisionPayloadFromForm(mcpApprovalDenyForm)
+      );
+      const dialog = document.querySelector(`[data-mcp-approval-deny-modal="${approvalId}"]`);
+      if (dialog?.close) {
+        dialog.close();
+      }
+      await refreshMcpWorkspace(root, apiClient);
+      return;
+    }
+    const mcpRateLimitForm = event.target.closest("[data-mcp-rate-limit-form]");
+    if (mcpRateLimitForm && apiClient) {
+      event.preventDefault();
+      await apiClient.createMcpRateLimit(mcpRateLimitPayloadFromForm(mcpRateLimitForm));
+      await refreshMcpWorkspace(root, apiClient);
+      return;
+    }
+    const runtimeSessionForm = event.target.closest("[data-runtime-session-form]");
+    if (runtimeSessionForm && apiClient) {
+      event.preventDefault();
+      await apiClient.createRuntimeSession(runtimeSessionPayloadFromForm(runtimeSessionForm));
+      await refreshRuntimeWorkspace(root, apiClient);
+      return;
+    }
+    const runtimeActionForm = event.target.closest("[data-runtime-action-form]");
+    if (runtimeActionForm && apiClient) {
+      event.preventDefault();
+      const sessionId = runtimeActionForm.getAttribute("data-session-id");
+      if (!sessionId) {
+        return;
+      }
+      await apiClient.createRuntimeAction(sessionId, runtimeActionPayloadFromForm(runtimeActionForm));
+      await refreshRuntimeWorkspace(root, apiClient);
+      return;
+    }
+    const runtimeRingRuleForm = event.target.closest("[data-runtime-ring-rule-form]");
+    if (runtimeRingRuleForm && apiClient) {
+      event.preventDefault();
+      await apiClient.createRuntimeRingRule(runtimeRingRulePayloadFromForm(runtimeRingRuleForm));
+      await refreshRuntimeWorkspace(root, apiClient);
+      return;
+    }
+    const runtimeSagaForm = event.target.closest("[data-runtime-saga-form]");
+    if (runtimeSagaForm && apiClient) {
+      event.preventDefault();
+      const saga = await apiClient.createRuntimeSaga(runtimeSagaPayloadFromForm(runtimeSagaForm));
+      await refreshRuntimeWorkspace(root, apiClient, saga.id);
+      return;
+    }
+    const runtimeSagaStepForm = event.target.closest("[data-runtime-saga-step-form]");
+    if (runtimeSagaStepForm && apiClient) {
+      event.preventDefault();
+      const sagaId = runtimeSagaStepForm.getAttribute("data-saga-id");
+      if (!sagaId) {
+        return;
+      }
+      await apiClient.addRuntimeSagaStep(sagaId, runtimeSagaStepPayloadFromForm(runtimeSagaStepForm));
+      await refreshRuntimeWorkspace(root, apiClient, sagaId);
+      return;
+    }
+    const runtimeSagaExecuteForm = event.target.closest("[data-runtime-saga-execute-form]");
+    if (runtimeSagaExecuteForm && apiClient) {
+      event.preventDefault();
+      const sagaId = runtimeSagaExecuteForm.getAttribute("data-saga-id");
+      if (!sagaId) {
+        return;
+      }
+      await apiClient.executeRuntimeSaga(sagaId, runtimeSagaExecutePayloadFromForm(runtimeSagaExecuteForm));
+      await refreshRuntimeWorkspace(root, apiClient, sagaId);
+      return;
+    }
+    const runtimeSagaCancelForm = event.target.closest("[data-runtime-saga-cancel-form]");
+    if (runtimeSagaCancelForm && apiClient) {
+      event.preventDefault();
+      const sagaId = runtimeSagaCancelForm.getAttribute("data-saga-id");
+      if (!sagaId) {
+        return;
+      }
+      await apiClient.cancelRuntimeSaga(sagaId, runtimeSagaCancelPayloadFromForm(runtimeSagaCancelForm));
+      await refreshRuntimeWorkspace(root, apiClient, sagaId);
+      return;
+    }
+    const runtimeSandboxProfileForm = event.target.closest("[data-runtime-sandbox-profile-form]");
+    if (runtimeSandboxProfileForm && apiClient) {
+      event.preventDefault();
+      await apiClient.createRuntimeSandboxProfile(
+        runtimeSandboxProfilePayloadFromForm(runtimeSandboxProfileForm)
+      );
+      await refreshRuntimeWorkspace(root, apiClient);
+      return;
+    }
+    const runtimeSandboxTestForm = event.target.closest("[data-runtime-sandbox-test-form]");
+    if (runtimeSandboxTestForm && apiClient) {
+      event.preventDefault();
+      const profileId = runtimeSandboxTestForm.getAttribute("data-profile-id");
+      if (!profileId) {
+        return;
+      }
+      const decision = await apiClient.testRuntimeSandboxProfile(
+        profileId,
+        runtimeSandboxTestPayloadFromForm(runtimeSandboxTestForm)
+      );
+      appState = {
+        ...appState,
+        runtimeSandboxDecision: decision
+      };
+      mount(root, appState);
+      return;
+    }
+    const runtimeKillSwitchForm = event.target.closest("[data-runtime-kill-switch-form]");
+    if (runtimeKillSwitchForm && apiClient) {
+      event.preventDefault();
+      await apiClient.triggerRuntimeKillSwitch(runtimeKillSwitchPayloadFromForm(runtimeKillSwitchForm));
+      await refreshRuntimeWorkspace(root, apiClient);
+      return;
+    }
     const bridgeCreateForm = event.target.closest("[data-protocol-bridge-create-form]");
     if (bridgeCreateForm && apiClient) {
       event.preventDefault();
@@ -896,6 +1347,14 @@ export async function bootstrap({
     }
     if (currentPath() === "/trust") {
       appState = await loadTrustState(apiClient);
+      mount(root, appState);
+    }
+    if (currentPath() === "/mcp") {
+      appState = await loadMcpState(apiClient);
+      mount(root, appState);
+    }
+    if (currentPath() === "/runtime") {
+      appState = await loadRuntimeState(apiClient);
       mount(root, appState);
     }
     if (appState.drawer.open && appState.drawer.kind === "audit-event" && appState.drawer.resourceId) {

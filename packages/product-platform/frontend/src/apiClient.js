@@ -247,6 +247,88 @@ export function createApiClient({
       request(`/mesh/protocol-bridges/${encodeURIComponent(bridgeId)}/health-check`, {
         method: "POST"
       }),
+    createMcpServer: (body) => request("/mcp/servers", { method: "POST", body }),
+    listMcpServers: (params = {}) => request(`/mcp/servers${queryString(params)}`),
+    getMcpServer: (serverId) => request(`/mcp/servers/${encodeURIComponent(serverId)}`),
+    patchMcpServer: (serverId, body = {}) =>
+      request(`/mcp/servers/${encodeURIComponent(serverId)}`, { method: "PATCH", body }),
+    discoverMcpServerTools: (serverId) =>
+      request(`/mcp/servers/${encodeURIComponent(serverId)}/discover-tools`, {
+        method: "POST"
+      }),
+    runMcpSecurityScan: (serverId) =>
+      request(`/mcp/servers/${encodeURIComponent(serverId)}/scan`, { method: "POST" }),
+    listMcpScans: (params = {}) => request(`/mcp/scans${queryString(params)}`),
+    getMcpScan: (scanId) => request(`/mcp/scans/${encodeURIComponent(scanId)}`),
+    listMcpFindings: (params = {}) => request(`/mcp/findings${queryString(params)}`),
+    acceptMcpFindingRisk: (findingId, body = {}) =>
+      request(`/mcp/findings/${encodeURIComponent(findingId)}/accept-risk`, {
+        method: "POST",
+        body
+      }),
+    resolveMcpFinding: (findingId, body = {}) =>
+      request(`/mcp/findings/${encodeURIComponent(findingId)}/resolve`, {
+        method: "POST",
+        body
+      }),
+    createMcpProxyCall: (body = {}) => request("/mcp/proxy/call", { method: "POST", body }),
+    listMcpTraffic: (params = {}) => request(`/mcp/traffic${queryString(params)}`),
+    listMcpApprovals: (params = {}) => request(`/mcp/approvals${queryString(params)}`),
+    approveMcpApproval: (approvalId, body = {}) =>
+      request(`/mcp/approvals/${encodeURIComponent(approvalId)}/approve`, {
+        method: "POST",
+        body
+      }),
+    denyMcpApproval: (approvalId, body = {}) =>
+      request(`/mcp/approvals/${encodeURIComponent(approvalId)}/deny`, {
+        method: "POST",
+        body
+      }),
+    listMcpRateLimits: (params = {}) => request(`/mcp/rate-limits${queryString(params)}`),
+    createMcpRateLimit: (body = {}) => request("/mcp/rate-limits", { method: "POST", body }),
+    listMcpTools: (params = {}) => request(`/mcp/tools${queryString(params)}`),
+    getMcpTool: (toolId) => request(`/mcp/tools/${encodeURIComponent(toolId)}`),
+    createRuntimeSession: (body = {}) => request("/runtime/sessions", { method: "POST", body }),
+    listRuntimeSessions: (params = {}) => request(`/runtime/sessions${queryString(params)}`),
+    getRuntimeSession: (sessionId) => request(`/runtime/sessions/${encodeURIComponent(sessionId)}`),
+    endRuntimeSession: (sessionId, body = {}) =>
+      request(`/runtime/sessions/${encodeURIComponent(sessionId)}/end`, { method: "POST", body }),
+    createRuntimeAction: (sessionId, body = {}) =>
+      request(`/runtime/sessions/${encodeURIComponent(sessionId)}/actions`, {
+        method: "POST",
+        body
+      }),
+    listRuntimeRingDecisions: (params = {}) =>
+      request(`/runtime/ring-decisions${queryString(params)}`),
+    listRuntimeRingRules: (params = {}) => request(`/runtime/ring-rules${queryString(params)}`),
+    createRuntimeRingRule: (body = {}) => request("/runtime/ring-rules", { method: "POST", body }),
+    createRuntimeSaga: (body = {}) => request("/runtime/sagas", { method: "POST", body }),
+    listRuntimeSagas: (params = {}) => request(`/runtime/sagas${queryString(params)}`),
+    getRuntimeSaga: (sagaId) => request(`/runtime/sagas/${encodeURIComponent(sagaId)}`),
+    addRuntimeSagaStep: (sagaId, body = {}) =>
+      request(`/runtime/sagas/${encodeURIComponent(sagaId)}/steps`, { method: "POST", body }),
+    executeRuntimeSaga: (sagaId, body = {}) =>
+      request(`/runtime/sagas/${encodeURIComponent(sagaId)}/execute`, { method: "POST", body }),
+    cancelRuntimeSaga: (sagaId, body = {}) =>
+      request(`/runtime/sagas/${encodeURIComponent(sagaId)}/cancel`, { method: "POST", body }),
+    createRuntimeSandboxProfile: (body = {}) =>
+      request("/runtime/sandbox-profiles", { method: "POST", body }),
+    listRuntimeSandboxProfiles: (params = {}) =>
+      request(`/runtime/sandbox-profiles${queryString(params)}`),
+    patchRuntimeSandboxProfile: (profileId, body = {}) =>
+      request(`/runtime/sandbox-profiles/${encodeURIComponent(profileId)}`, {
+        method: "PATCH",
+        body
+      }),
+    testRuntimeSandboxProfile: (profileId, body = {}) =>
+      request(`/runtime/sandbox-profiles/${encodeURIComponent(profileId)}/test`, {
+        method: "POST",
+        body
+      }),
+    triggerRuntimeKillSwitch: (body = {}) =>
+      request("/runtime/kill-switch", { method: "POST", body }),
+    listRuntimeKillSwitchEvents: (params = {}) =>
+      request(`/runtime/kill-switch/events${queryString(params)}`),
     issueTrustCard: (body) => request("/trust/cards", { method: "POST", body }),
     listTrustCards: (params = {}) => request(`/trust/cards${queryString(params)}`),
     getTrustCard: (cardId) => request(`/trust/cards/${encodeURIComponent(cardId)}`),

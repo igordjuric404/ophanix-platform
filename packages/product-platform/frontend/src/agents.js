@@ -338,6 +338,9 @@ export function renderAgentDetailTab(detail, activeTab) {
       handoffs: detail.meshHandoffs ?? []
     });
   }
+  if (activeTab === "runtime") {
+    return renderAgentRuntimeTab(detail);
+  }
   if (activeTab === "overview") {
     return renderOverviewTab(detail);
   }
@@ -354,6 +357,21 @@ export function renderAgentMeshTab({ messages = [], handoffs = [] } = {}) {
     <div data-agent-mesh-activity>
       ${renderMeshMessagesTable({ messages })}
       ${renderMeshHandoffsTable({ handoffs })}
+    </div>
+  `;
+}
+
+export function renderAgentRuntimeTab(detail) {
+  const agent = detail.summary;
+  return `
+    <div data-agent-runtime-tab>
+      <dl class="metadata-grid">
+        <dt>Runtime</dt><dd>${escapeHtml(agent.runtime_type ?? "service")}</dd>
+        <dt>Framework</dt><dd>${escapeHtml(agent.framework ?? "unknown")}</dd>
+        <dt>Trust Tier</dt><dd>${escapeHtml(agent.trust_tier ?? "unrated")}</dd>
+        <dt>Status</dt><dd>${escapeHtml(agent.status)}</dd>
+      </dl>
+      <a class="primary-action" href="/runtime" data-route="/runtime">Open Runtime</a>
     </div>
   `;
 }

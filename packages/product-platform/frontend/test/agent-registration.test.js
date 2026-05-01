@@ -183,6 +183,14 @@ test("component audit tab exposes shared drawer event buttons", () => {
   assert.match(html, /data-related-event-id="evt_agent_1"/);
 });
 
+test("component runtime tab links to runtime controls", () => {
+  const html = renderAgentDetail(detail, "runtime");
+
+  assert.match(html, /data-agent-runtime-tab/);
+  assert.match(html, /Open Runtime/);
+  assert.match(html, /data-route="\/runtime"/);
+});
+
 test("component lifecycle approval queue renders pending agents", () => {
   const html = renderLifecycleWorkspace({
     agents: [

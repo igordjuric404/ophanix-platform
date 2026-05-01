@@ -8,6 +8,8 @@ import { renderDiscoveryPage } from "./discovery.js";
 import { renderPoliciesPage } from "./policies.js";
 import { renderTrustPage } from "./trust.js";
 import { renderMeshPage } from "./mesh.js";
+import { renderMcpPage } from "./mcp.js";
+import { renderRuntimePage } from "./runtime.js";
 
 export { escapeHtml };
 
@@ -204,6 +206,10 @@ export function renderShell({ currentPath = DEFAULT_ROUTE, state = createInitial
         ? renderTrustPage(state)
       : route?.path === "/mesh"
         ? renderMeshPage(state)
+      : route?.path === "/mcp"
+        ? renderMcpPage(state)
+      : route?.path === "/runtime"
+        ? renderRuntimePage(state)
       : route?.path === "/discovery"
         ? renderDiscoveryPage(state)
       : route

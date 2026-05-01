@@ -911,7 +911,9 @@ input {
   gap: 16px;
 }
 
-.mesh-workspace {
+.mesh-workspace,
+.mcp-workspace,
+.runtime-workspace {
   display: grid;
   gap: 16px;
 }
@@ -925,8 +927,81 @@ input {
 .mesh-topology,
 .mesh-messages,
 .mesh-handoffs,
-.protocol-bridges {
+.protocol-bridges,
+.mcp-servers,
+.mcp-tools,
+.mcp-scans,
+.mcp-findings,
+.mcp-traffic,
+.mcp-approvals,
+.mcp-rate-limits,
+.runtime-sessions,
+.runtime-session-detail,
+.runtime-sagas,
+.runtime-saga-monitor,
+.runtime-sandbox,
+.runtime-kill-switch,
+.runtime-ring-decisions,
+.runtime-ring-rules {
   grid-column: 1 / -1;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.metric-grid div {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 10px;
+  background: var(--surface);
+}
+
+.metric-grid strong,
+.metric-grid span {
+  display: block;
+}
+
+.inline-actions,
+.mcp-finding-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.mcp-finding-actions {
+  margin-top: 16px;
+}
+
+.mcp-finding-actions form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: end;
+}
+
+.mcp-finding-actions label,
+.mcp-action-dialog label {
+  display: grid;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.mcp-action-dialog textarea {
+  min-width: min(420px, 70vw);
+  min-height: 90px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 10px;
+  resize: vertical;
 }
 
 .trust-summary {
@@ -1060,6 +1135,15 @@ input {
 .json-preview {
   overflow: auto;
   max-height: 260px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  padding: 12px;
+}
+
+.schema-viewer pre {
+  overflow: auto;
+  max-height: 320px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-muted);
