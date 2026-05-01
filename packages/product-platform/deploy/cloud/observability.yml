@@ -1,0 +1,15 @@
+logs:
+  include_fields:
+    - request_id
+    - correlation_id
+    - route
+    - status_code
+metrics:
+  api_ready_endpoint: /ready
+  api_health_endpoint: /health
+  worker_health_command: "python -m product_platform.cli worker noop"
+traces:
+  otlp_endpoint_env: OTEL_EXPORTER_OTLP_ENDPOINT
+  service_names:
+    - product-platform-api
+    - product-platform-worker
