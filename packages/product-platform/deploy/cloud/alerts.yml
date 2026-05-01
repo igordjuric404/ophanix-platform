@@ -1,0 +1,17 @@
+groups:
+  - name: product-platform-health
+    rules:
+      - alert: ProductPlatformApiUnhealthy
+        expr: product_platform_api_ready == 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: Product Platform API readiness is unhealthy.
+      - alert: ProductPlatformWorkerUnhealthy
+        expr: product_platform_worker_noop_success == 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: Product Platform worker no-op health check is failing.
