@@ -44,3 +44,4 @@ jobs:
       - uses: github/codeql-action/analyze@7aefa1c9aed02ae41531ec219164e64a0f087410 # v4
         with:
           category: "/language:${{ matrix.language }}"
+          upload: ${{ github.event.repository.private && vars.ENABLE_PRIVATE_CODE_SCANNING != 'true' && 'never' || 'always' }}
