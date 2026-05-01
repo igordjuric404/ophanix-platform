@@ -1,0 +1,15 @@
+DROP TABLE IF EXISTS policy_placeholders;
+DROP TABLE IF EXISTS job_schedules;
+DROP TABLE IF EXISTS job_runs;
+DROP TABLE IF EXISTS background_jobs;
+DROP TABLE IF EXISTS workflow_runs;
+DROP TABLE IF EXISTS event_subscriptions;
+DROP TABLE IF EXISTS audit_event_hashes;
+DROP TABLE IF EXISTS audit_events;
+DROP TABLE IF EXISTS api_keys;
+DROP TABLE IF EXISTS auth_sessions;
+DROP TABLE IF EXISTS organization_memberships;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS environments;
+DROP TABLE IF EXISTS organizations;
+DROP TABLE IF EXISTS schema_migrations;
