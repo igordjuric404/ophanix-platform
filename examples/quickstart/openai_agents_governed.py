@@ -4,8 +4,8 @@
 OpenAI Agents SDK with Guardrails — Quickstart
 ===============================================
 
-pip install agent-governance-toolkit[full] openai-agents
-python examples/quickstart/openai_agents_governed.py
+python3 -m pip install 'agent-governance-toolkit[full]' openai-agents
+python3 examples/quickstart/openai_agents_governed.py
 
 Shows a real policy violation being caught by a tool guard, then a compliant
 tool call succeeding, with a printed audit trail.

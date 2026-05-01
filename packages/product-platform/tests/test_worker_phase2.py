@@ -1,0 +1,98 @@
+from __future__ import annotations
+
+import json
+import unittest
+
+from product_platform.db.seed import seed_demo_data
+from product_platform.db.testing import create_migrated_test_database
+from product_platform.worker.store import JobStateRepository, JobStatus
+
+
+class WorkerPhase2Tests(unittest.TestCase):
+    def test_job_state_transitions_capture_logs_and_metadata(self) -> None:
+        database = create_migrated_test_database()
+        try:
+            with database.transaction() as connection:
+                seed_demo_data(connection)
+                repository = JobStateRepository(connection)
+                job = repository.create_job(
+                    organization_id="org_default",
+                    environment_id="env_default",
+                    job_type="demo.noop",
+                    payload={"demo": True},
+                    job_id="job_state",
+                )
+                running = repository.mark_running(job["id"])
+                succeeded = repository.mark_succeeded(
+                    job["id"],
+                    logs=["started", "finished"],
+                    metrics={"duration_ms": 1},
+                    result={"ok": True},
+                )
+                runs = repository.runs_for_job(job["id"])
+
+            self.assertEqual(job["status"], JobStatus.QUEUED)
+            self.assertEqual(running["status"], JobStatus.RUNNING)
+            self.assertEqual(running["attempts"], 1)
+            self.assertEqual(succeeded["status"], JobStatus.SUCCEEDED)
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(json.loads(runs[0]["logs_json"]), ["started", "finished"])
+            self.assertEqual(json.loads(runs[0]["metrics_json"])["duration_ms"], 1)
+        finally:
+            database.close()
+
+    def test_failed_job_records_error_message(self) -> None:
+        database = create_migrated_test_database()
+        try:
+            with database.transaction() as connection:
+                seed_demo_data(connection)
+                repository = JobStateRepository(connection)
+                job = repository.create_job(
+                    organization_id="org_default",
+                    environment_id="env_default",
+                    job_type="demo.fail",
+                    payload={},
+                    job_id="job_failed",
+                )
+                repository.mark_running(job["id"])
+                failed = repository.mark_failed(
+                    job["id"],
+                    error_message="boom",
+                    logs=["started"],
+                )
+                runs = repository.runs_for_job(job["id"])
+
+            self.assertEqual(failed["status"], JobStatus.FAILED)
+            self.assertEqual(failed["error_message"], "boom")
+            self.assertEqual(json.loads(runs[0]["result_json"])["error"], "boom")
+        finally:
+            database.close()
+
+    def test_retry_increments_attempt_count(self) -> None:
+        database = create_migrated_test_database()
+        try:
+            with database.transaction() as connection:
+                seed_demo_data(connection)
+                repository = JobStateRepository(connection)
+                job = repository.create_job(
+                    organization_id="org_default",
+                    environment_id="env_default",
+                    job_type="demo.retry",
+                    payload={},
+                    max_attempts=2,
+                    job_id="job_retry",
+                )
+                repository.mark_running(job["id"])
+                repository.mark_failed(job["id"], error_message="try again", logs=[])
+                repository.requeue_for_retry(job["id"])
+                retried = repository.mark_running(job["id"])
+
+            self.assertEqual(retried["attempts"], 2)
+            self.assertEqual(retried["status"], JobStatus.RUNNING)
+        finally:
+            database.close()
+
+
+if __name__ == "__main__":
+    unittest.main()
+

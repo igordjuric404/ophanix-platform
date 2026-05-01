@@ -68,7 +68,7 @@ jobs:
 
       - name: Upload reports
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: weekly-security-audit
           path: |
@@ -124,7 +124,7 @@ jobs:
           FAIL=0
 
           # No workflow should checkout HEAD ref on pull_request_target
-          HEAD_REFS=$(grep -rn 'ref:.*head\.sha\|ref:.*head_sha' .github/workflows/*.yml \
+          HEAD_REFS=$(grep -rn 'ref:.*head[.]sha\|ref:.*head[_]sha' .github/workflows/*.yml \
             | grep -v '#' | grep -v 'workflow_run' || true)
           if [ -n "$HEAD_REFS" ]; then
             echo "🔴 CRITICAL: pull_request_target workflow checks out HEAD ref:" >> "$GITHUB_STEP_SUMMARY"
