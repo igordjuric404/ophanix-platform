@@ -5,9 +5,22 @@ governance to any agent. No trust mesh, no execution rings, no SRE.
 Just deterministic policy enforcement.
 
 Usage:
-    pip install agent-os-kernel
-    python examples/quickstart/govern_in_60_seconds.py
+    # From a source checkout:
+    python3 examples/quickstart/govern_in_60_seconds.py
+
+    # Or, outside the checkout:
+    python3 -m pip install agent-os-kernel
+    python3 examples/quickstart/govern_in_60_seconds.py
 """
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+# Allow running from the repo root without installing the toolkit.
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(_REPO_ROOT / "packages" / "agent-os" / "src"))
 
 from agent_os.lite import govern
 

@@ -11,7 +11,8 @@ Refer to the individual scripts for framework-specific implementations.
 - Google ADK credentials (for ADK example)
 
 ```bash
-pip install agent-governance-toolkit[full]
+cd ophanix-platform
+python3 -m pip install -e packages/agent-os
 ```
 
 ## How to Run
