@@ -1,0 +1,14 @@
+DROP INDEX IF EXISTS idx_mesh_topology_snapshots_scope_bucket;
+DROP TABLE IF EXISTS mesh_topology_snapshots;
+DROP INDEX IF EXISTS idx_mesh_handoffs_correlation;
+DROP INDEX IF EXISTS idx_mesh_handoffs_status_created;
+DROP INDEX IF EXISTS idx_mesh_handoffs_source_created;
+DROP INDEX IF EXISTS idx_mesh_handoffs_scope_created;
+DROP TABLE IF EXISTS mesh_handoffs;
+DROP INDEX IF EXISTS idx_mesh_messages_correlation;
+DROP INDEX IF EXISTS idx_mesh_messages_protocol_decision;
+DROP INDEX IF EXISTS idx_mesh_messages_target_created;
+DROP INDEX IF EXISTS idx_mesh_messages_source_created;
+DROP INDEX IF EXISTS idx_mesh_messages_scope_created;
+DROP TABLE IF EXISTS mesh_messages;
+DELETE FROM schema_migrations WHERE version = '0012';
