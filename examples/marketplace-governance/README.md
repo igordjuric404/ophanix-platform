@@ -131,7 +131,7 @@ Give plugin contributors fast local feedback before they push:
 
 ```bash
 # Install the toolkit
-pip install agent-governance-toolkit[full]
+python3 -m pip install 'agent-governance-toolkit[full]'
 
 # Validate a single manifest
 python -m agent_marketplace.cli_commands verify plugins/my-plugin/plugin.json

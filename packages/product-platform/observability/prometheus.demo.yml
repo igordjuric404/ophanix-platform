@@ -1,0 +1,12 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: product-api
+    metrics_path: /health
+    static_configs:
+      - targets: ["api:8088"]
+  - job_name: demo-mcp
+    metrics_path: /health
+    static_configs:
+      - targets: ["sample-mcp:8091"]
