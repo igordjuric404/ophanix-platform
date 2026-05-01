@@ -42,7 +42,7 @@ Agent Action ──► Policy Check ──► Allow / Deny ──► Audit Log  
 
 ```bash
 # 1. Install
-pip install agent-governance-toolkit[full]
+python3 -m pip install 'agent-governance-toolkit[full]'
 
 # 2. Check your installation
 agt doctor
@@ -219,7 +219,7 @@ Full methodology: [BENCHMARKS.md](BENCHMARKS.md)
 
 | Language | Package | Command |
 |----------|---------|---------|
-| **Python** | [`agent-governance-toolkit`](https://pypi.org/project/agent-governance-toolkit/) | `pip install agent-governance-toolkit[full]` |
+| **Python** | [`agent-governance-toolkit`](https://pypi.org/project/agent-governance-toolkit/) | `python3 -m pip install 'agent-governance-toolkit[full]'` |
 | **TypeScript** | [`@microsoft/agentmesh-sdk`](packages/agent-mesh/sdks/typescript/) | `npm install @microsoft/agentmesh-sdk` |
 | **.NET** | [`Microsoft.AgentGovernance`](https://www.nuget.org/packages/Microsoft.AgentGovernance) | `dotnet add package Microsoft.AgentGovernance` |
 | **Rust** | [`agentmesh`](https://crates.io/crates/agentmesh) | `cargo add agentmesh` |

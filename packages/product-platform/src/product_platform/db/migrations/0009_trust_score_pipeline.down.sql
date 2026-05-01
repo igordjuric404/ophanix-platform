@@ -1,0 +1,10 @@
+DROP INDEX IF EXISTS idx_trust_recalculation_runs_org_env_started;
+DROP TABLE IF EXISTS trust_recalculation_runs;
+DROP INDEX IF EXISTS idx_trust_rules_org_enabled;
+DROP TABLE IF EXISTS trust_rules;
+DROP INDEX IF EXISTS idx_trust_events_source;
+DROP INDEX IF EXISTS idx_trust_events_agent_created;
+DROP TABLE IF EXISTS trust_events;
+DROP INDEX IF EXISTS idx_trust_scores_org_env_score;
+DROP TABLE IF EXISTS trust_scores;
+DELETE FROM schema_migrations WHERE version = '0009';
