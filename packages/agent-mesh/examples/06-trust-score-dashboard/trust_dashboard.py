@@ -117,7 +117,7 @@ def _build_credentials(agents: list[dict]) -> pd.DataFrame:
     rows = []
     for a in agents:
         ctype = rng.choice(CREDENTIAL_TYPES)
-        issued = NOW - dt.timedelta(hours=rng.integers(2, 72))
+        issued = NOW - dt.timedelta(hours=int(rng.integers(2, 72)))
         ttl_h = int(rng.choice([6, 12, 24, 48]))
         expires = issued + dt.timedelta(hours=ttl_h)
         remaining = (expires - NOW).total_seconds()
@@ -496,7 +496,7 @@ with tab_compliance:
     fw_status = {"EU AI Act": 92, "SOC 2": 88, "HIPAA": 95, "GDPR": 90}
     for col, fw in zip(fw_cols, COMPLIANCE_FRAMEWORKS):
         score = fw_status[fw]
-        col.metric(fw, f"{score}%", delta=f"+{rng.integers(0, 4)}% this week")
+        col.metric(fw, f"{score}%", delta=f"+{int(rng.integers(0, 4))}% this week")
 
     # Per-agent compliance checklist
     st.subheader("Per-Agent Compliance Checklist")
