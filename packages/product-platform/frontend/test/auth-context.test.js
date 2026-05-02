@@ -82,6 +82,37 @@ test("api client includes selected organization and environment headers", async 
   assert.equal(captured.headers.get("Accept"), "application/json");
 });
 
+test("api client posts dev login and logout requests", async () => {
+  const calls = [];
+  const client = createApiClient({
+    baseUrl: "/api/v1",
+    fetchImpl: async (url, init) => {
+      calls.push({ url, init });
+      return jsonResponse({ ok: true });
+    }
+  });
+
+  await client.devLogin({
+    email: "admin@example.com",
+    display_name: "Platform Admin",
+    roles: ["Platform Admin"]
+  });
+  await client.logout();
+
+  assert.equal(calls[0].url, "/api/v1/auth/dev-login");
+  assert.equal(calls[0].init.method, "POST");
+  assert.equal(
+    calls[0].init.body,
+    JSON.stringify({
+      email: "admin@example.com",
+      display_name: "Platform Admin",
+      roles: ["Platform Admin"]
+    })
+  );
+  assert.equal(calls[1].url, "/api/v1/auth/logout");
+  assert.equal(calls[1].init.method, "POST");
+});
+
 test("route guard redirects unauthenticated users to login", () => {
   const state = createUnauthenticatedState();
   const guarded = guardRoute("/policies", state);
@@ -90,6 +121,15 @@ test("route guard redirects unauthenticated users to login", () => {
   assert.equal(guarded.path, "/login");
   assert.equal(guarded.redirected, true);
   assert.match(html, /data-auth-required/);
+  assert.match(html, /data-dev-login-form/);
+  assert.match(html, /admin@example\.com/);
+  assert.match(html, /<button type="submit">Sign in<\/button>/);
+});
+
+test("signed-out chip links to the login route", () => {
+  const html = renderShell({ currentPath: "/login", state: createUnauthenticatedState() });
+
+  assert.match(html, /href="\/login" data-route="\/login">Signed out<\/a>/);
 });
 
 test("load app context returns unauthenticated state on auth failure", async () => {

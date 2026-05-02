@@ -43,7 +43,7 @@ export function createApiClient({
     }
     const payload = await parseResponse(response);
     if (!response.ok) {
-      throw new ApiClientError(payload?.message || `Request failed with status ${response.status}`, {
+      throw new ApiClientError(payload?.message || payload?.detail || `Request failed with status ${response.status}`, {
         status: response.status,
         payload
       });
@@ -53,6 +53,8 @@ export function createApiClient({
 
   return {
     request,
+    devLogin: (body) => request("/auth/dev-login", { method: "POST", body }),
+    logout: () => request("/auth/logout", { method: "POST" }),
     getCurrentUser: () => request("/auth/me"),
     listOrganizations: () => request("/organizations"),
     listEnvironments: () => request("/environments"),

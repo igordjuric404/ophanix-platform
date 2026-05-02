@@ -11,6 +11,13 @@ def _csv_env(name: str, default: str) -> list[str]:
     return [value.strip() for value in raw.split(",") if value.strip()]
 
 
+def _dev_login_allowed_emails() -> list[str]:
+    values = _csv_env("OPHANIX_DEV_LOGIN_ALLOWED_EMAILS", "admin@example.com")
+    if "admin@example.com" not in {value.lower() for value in values}:
+        values.insert(0, "admin@example.com")
+    return values
+
+
 def _bool_env(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -38,7 +45,7 @@ class Settings:
         default_factory=lambda: os.environ.get("OPHANIX_DATABASE_URL", "sqlite:///ophanix_product.db")
     )
     dev_login_allowed_emails: list[str] = field(
-        default_factory=lambda: _csv_env("OPHANIX_DEV_LOGIN_ALLOWED_EMAILS", "admin@ophanix.local")
+        default_factory=_dev_login_allowed_emails
     )
     session_secret: str = field(default_factory=lambda: os.environ.get("OPHANIX_SESSION_SECRET", "dev-secret-change-me"))
     session_ttl_seconds: int = field(

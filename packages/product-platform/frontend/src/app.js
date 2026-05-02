@@ -1,4 +1,4 @@
-import { DEFAULT_ROUTE, findRoute, normalizePath } from "./navigation.js";
+import { DEFAULT_ROUTE, LOGIN_ROUTE, findRoute, normalizePath } from "./navigation.js";
 import {
   agentInventoryParamsFromForm,
   registrationPayloadFromForm,
@@ -693,7 +693,7 @@ export function installNavigation(root = document.getElementById("app"), apiClie
       return;
     }
     const targetPath = link.getAttribute("data-route");
-    if (!targetPath || !findRoute(targetPath)) {
+    if (!targetPath || (normalizePath(targetPath) !== LOGIN_ROUTE && !findRoute(targetPath))) {
       return;
     }
     event.preventDefault();
@@ -737,6 +737,17 @@ export function installNavigation(root = document.getElementById("app"), apiClie
     if (apiClient && normalizePath(targetPath) === "/workflows") {
       await refreshWorkflowWorkspace(root, apiClient);
     }
+  });
+  document.addEventListener("click", async (event) => {
+    const logoutButton = event.target.closest("[data-logout]");
+    if (!logoutButton || !apiClient) {
+      return;
+    }
+    event.preventDefault();
+    await apiClient.logout();
+    stopPolicyEvaluationStream();
+    appState = await loadAppContext({ apiClient, storage: window.localStorage });
+    navigate(LOGIN_ROUTE, root);
   });
   document.addEventListener("change", (event) => {
     const selector = event.target.closest("[data-environment-selector]");
@@ -1509,6 +1520,29 @@ export function installNavigation(root = document.getElementById("app"), apiClie
     }
   });
   document.addEventListener("submit", async (event) => {
+    const loginForm = event.target.closest("[data-dev-login-form]");
+    if (loginForm && apiClient) {
+      event.preventDefault();
+      const values = Object.fromEntries(new FormData(loginForm));
+      try {
+        await apiClient.devLogin({
+          email: String(values.email ?? "").trim(),
+          display_name: String(values.display_name ?? "").trim() || null,
+          roles: [String(values.role ?? "Platform Admin")]
+        });
+        appState = await loadAppContext({ apiClient, storage: window.localStorage });
+        appState = withSystemStatus(appState, await loadSystemStatus({ apiClient }));
+        navigate(DEFAULT_ROUTE, root);
+      } catch (error) {
+        appState = {
+          ...appState,
+          authStatus: "unauthenticated",
+          authError: error?.message ?? "Sign in failed."
+        };
+        mount(root, appState);
+      }
+      return;
+    }
     const workflowRunForm = event.target.closest("[data-workflow-run-form]");
     if (workflowRunForm && apiClient) {
       event.preventDefault();

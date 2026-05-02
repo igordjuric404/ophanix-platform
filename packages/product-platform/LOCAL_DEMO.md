@@ -14,7 +14,7 @@ docker compose --env-file .env -f docker-compose.demo.yml up --build
 ```
 
 Open the app at `http://localhost:3000` and sign in with
-`admin@ophanix.local` through dev login. The API is available at
+`admin@example.com` through dev login. The API is available at
 `http://localhost:8088`.
 
 ## Optional Services

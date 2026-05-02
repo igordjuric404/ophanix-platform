@@ -2,6 +2,24 @@
 
 FastAPI control plane and static application shell for the productized Ophanix governance platform.
 
+## One-command Startup
+
+Run the local platform without manual migrations, seeding, or server setup:
+
+```bash
+./start.sh
+```
+
+The script starts the API, worker loop, sample MCP/agent services, SQLite migrations/seed, and a local frontend proxy.
+
+Open `http://127.0.0.1:3000` and sign in with `admin@example.com`.
+
+To run the Docker Compose demo stack instead:
+
+```bash
+./start.sh --docker
+```
+
 ## Local API
 
 ```bash

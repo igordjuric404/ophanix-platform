@@ -13,7 +13,7 @@ from product_platform.workflows.catalog import seed_workflow_catalog
 DEMO_ORG_ID = "org_default"
 DEMO_ENV_ID = "env_default"
 DEMO_ADMIN_USER_ID = "user_admin"
-DEMO_ADMIN_EMAIL = "admin@ophanix.local"
+DEMO_ADMIN_EMAIL = "admin@example.com"
 
 
 def seed_demo_data(connection: Connection, *, include_baseline: bool = False) -> None:
@@ -41,6 +41,14 @@ def seed_demo_data(connection: Connection, *, include_baseline: bool = False) ->
         VALUES (?, ?, ?, ?, ?, ?)
         """,
         (DEMO_ADMIN_USER_ID, DEMO_ADMIN_EMAIL, "Demo Admin", "active", now, now),
+    )
+    connection.execute(
+        """
+        UPDATE users
+        SET email = ?, display_name = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (DEMO_ADMIN_EMAIL, "Demo Admin", now, DEMO_ADMIN_USER_ID),
     )
     connection.execute(
         """

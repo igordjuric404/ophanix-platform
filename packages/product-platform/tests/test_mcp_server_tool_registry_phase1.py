@@ -86,7 +86,7 @@ class MCPServerToolRegistryPhase1Tests(unittest.TestCase):
         self.assertEqual(created["name"], "Claims MCP")
         self.assertEqual(created["endpoint_url"], "https://mcp.claims.local/rpc")
         self.assertEqual(created["owner_user_id"], "user_admin")
-        self.assertEqual(created["owner_email"], "admin@ophanix.local")
+        self.assertEqual(created["owner_email"], "admin@example.com")
         self.assertEqual(created["auth_type"], "oauth")
         self.assertEqual(created["status"], "registered")
         self.assertEqual(created["policy_pack_id"], "policy_placeholder_sensitive_tools")

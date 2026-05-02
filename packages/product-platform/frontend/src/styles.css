@@ -28,7 +28,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -174,6 +175,7 @@ input {
   align-items: center;
   max-width: 180px;
   color: var(--text-muted);
+  text-decoration: none;
 }
 
 .user-chip.is-warning {
@@ -487,6 +489,15 @@ input {
   justify-content: flex-end;
 }
 
+.header-button {
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0 12px;
+}
+
 .content-region {
   min-width: 0;
   padding: 28px;
@@ -537,6 +548,56 @@ input {
   margin: 0;
   color: var(--text-muted);
   line-height: 1.6;
+}
+
+.auth-layout {
+  max-width: 720px;
+}
+
+.auth-panel {
+  min-height: 0;
+}
+
+.auth-form {
+  display: grid;
+  gap: 14px;
+}
+
+.auth-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.auth-form input,
+.auth-form select,
+.auth-form button {
+  min-width: 0;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0 10px;
+}
+
+.auth-form button {
+  width: fit-content;
+  border-color: var(--teal);
+  background: var(--teal);
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.auth-error {
+  margin: 0;
+  border: 1px solid #fed7aa;
+  border-radius: 7px;
+  background: #fff7ed;
+  color: var(--red);
+  padding: 10px;
 }
 
 .agent-workspace {

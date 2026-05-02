@@ -19,7 +19,7 @@ class LocalDemoComposePhase4Tests(unittest.TestCase):
             "sh deploy/local-demo-smoke.sh",
             "http://localhost:3000",
             "http://localhost:8088/ready",
-            "admin@ophanix.local",
+            "admin@example.com",
             "Missing optional provider credentials show a warning",
         ):
             self.assertIn(snippet, readme)

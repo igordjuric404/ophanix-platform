@@ -49,13 +49,41 @@ export function renderNotFoundPage(pathname) {
   `;
 }
 
-export function renderAuthRequiredPage() {
+export function renderAuthRequiredPage(state = null) {
+  const defaultEmail = "admin@example.com";
   return `
-    <section class="page-heading" data-route-page="${LOGIN_ROUTE}" data-auth-required>
-      <p class="section-label">Authentication</p>
-      <h1>Sign In Required</h1>
-      <p>The product shell is ready, but an authenticated platform session is required before loading tenant data.</p>
-    </section>
+    <div class="auth-layout" data-route-page="${LOGIN_ROUTE}" data-auth-required>
+      <section class="page-heading">
+        <p class="section-label">Authentication</p>
+        <h1>Sign In Required</h1>
+        <p>Use the local development account to start an authenticated platform session.</p>
+      </section>
+      <section class="workspace-panel auth-panel" aria-label="Development login">
+        <form class="auth-form" data-dev-login-form>
+          <label>
+            <span>Email</span>
+            <input name="email" type="email" autocomplete="email" value="${escapeHtml(defaultEmail)}" required>
+          </label>
+          <label>
+            <span>Display name</span>
+            <input name="display_name" type="text" autocomplete="name" value="Platform Admin">
+          </label>
+          <label>
+            <span>Role</span>
+            <select name="role">
+              <option value="Platform Admin" selected>Platform Admin</option>
+              <option value="Operator">Operator</option>
+              <option value="Viewer">Viewer</option>
+              <option value="Policy Admin">Policy Admin</option>
+              <option value="Security Admin">Security Admin</option>
+              <option value="Compliance Admin">Compliance Admin</option>
+            </select>
+          </label>
+          ${stateErrorMessage(state)}
+          <button type="submit">Sign in</button>
+        </form>
+      </section>
+    </div>
   `;
 }
 
@@ -101,12 +129,22 @@ export function renderCurrentUser(state) {
     return '<span class="user-chip">Loading session</span>';
   }
   if (state.authStatus === "unauthenticated") {
-    return '<span class="user-chip is-warning">Signed out</span>';
+    return `
+      <a class="user-chip is-warning" href="${LOGIN_ROUTE}" data-route="${LOGIN_ROUTE}">Signed out</a>
+    `;
   }
   if (state.authStatus === "error") {
     return '<span class="user-chip is-warning">Context warning</span>';
   }
-  return `<span class="user-chip">${escapeHtml(state.currentUser?.display_name ?? "User")}</span>`;
+  return `
+    <span class="user-chip">${escapeHtml(state.currentUser?.display_name ?? "User")}</span>
+    <button class="header-button" type="button" data-logout>Sign out</button>
+  `;
+}
+
+function stateErrorMessage(state = null) {
+  const message = state?.authError ?? state?.loadError ?? "";
+  return message ? `<p class="auth-error" role="alert">${escapeHtml(message)}</p>` : "";
 }
 
 export function renderSystemStatus(state) {
@@ -201,7 +239,7 @@ export function renderShell({ currentPath = DEFAULT_ROUTE, state = createInitial
   const route = normalized === LOGIN_ROUTE ? null : findRoute(normalized);
   const content =
     normalized === LOGIN_ROUTE
-      ? renderAuthRequiredPage()
+      ? renderAuthRequiredPage(state)
       : guarded.reason === "forbidden"
         ? renderAccessDeniedPage(normalized)
       : route?.path === "/agents"

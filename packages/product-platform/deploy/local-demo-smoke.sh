@@ -46,7 +46,7 @@ assert ready["status"] == "ready", ready
 login_status, login = request(
     "/api/v1/auth/dev-login",
     method="POST",
-    body={"email": "admin@ophanix.local"},
+    body={"email": "admin@example.com"},
 )
 assert login_status == 200, login
 token = login["access_token"]
