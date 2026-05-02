@@ -10,6 +10,7 @@ export interface AuditEvent {
   resource_type?: string | null;
   resource_id?: string | null;
   policy_id?: string | null;
+  policy_version_id?: string | null;
   decision?: string | null;
   severity?: string | null;
   correlation_id?: string | null;
@@ -29,11 +30,11 @@ export function getAuditEvent(eventId: string) {
 
 export function verifyAuditEvent(eventId: string) {
   return apiClient.request<AuditVerification>(
-    `/audit/events/${encodeURIComponent(eventId)}/verify`
+    `/audit/events/${encodeURIComponent(eventId)}/verify`,
+    { method: "POST" }
   );
 }
 
 export function listAuditEvents(params: Record<string, unknown> = {}) {
   return apiClient.request<AuditEvent[]>(`/audit/events${queryString(params)}`);
 }
-

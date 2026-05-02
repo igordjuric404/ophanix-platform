@@ -11,8 +11,10 @@ import { LoginScreen } from "../components/auth/LoginScreen";
 import { RequireAuth } from "../components/auth/RequireAuth";
 import { AppShell } from "../components/layout/AppShell";
 import { AgentsPage } from "../features/agents/AgentsPage";
+import { CompliancePage } from "../features/compliance/CompliancePage";
 import { DiscoveryPage } from "../features/discovery/DiscoveryPage";
 import { OverviewPage } from "../features/overview/OverviewPage";
+import { PoliciesPage } from "../features/policies/PoliciesPage";
 import { AccessDeniedPage } from "../features/shared/AccessDeniedPage";
 import { FeaturePlaceholderPage } from "../features/shared/FeaturePlaceholderPage";
 import { canAccessRoute } from "../lib/rbac";
@@ -89,9 +91,26 @@ const discoveryRoute = createRoute({
   component: DiscoveryPage
 });
 
+const policiesRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: "/policies",
+  component: PoliciesPage
+});
+
+const complianceRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: "/compliance",
+  component: CompliancePage
+});
+
 const featureRoutes = routeRegistry
   .filter(
-    (route) => route.path !== "/overview" && route.path !== "/agents" && route.path !== "/discovery"
+    (route) =>
+      route.path !== "/overview" &&
+      route.path !== "/agents" &&
+      route.path !== "/discovery" &&
+      route.path !== "/policies" &&
+      route.path !== "/compliance"
   )
   .map((route) =>
     createRoute({
@@ -110,7 +129,14 @@ const featureRoutes = routeRegistry
 const routeTree = rootRoute.addChildren([
   indexRoute,
   loginRoute,
-  protectedRoute.addChildren([overviewRoute, agentsRoute, discoveryRoute, ...featureRoutes])
+  protectedRoute.addChildren([
+    overviewRoute,
+    agentsRoute,
+    discoveryRoute,
+    policiesRoute,
+    complianceRoute,
+    ...featureRoutes
+  ])
 ]);
 
 export const router = createRouter({ routeTree });
