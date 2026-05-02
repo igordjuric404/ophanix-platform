@@ -10,6 +10,8 @@ import {
 import { LoginScreen } from "../components/auth/LoginScreen";
 import { RequireAuth } from "../components/auth/RequireAuth";
 import { AppShell } from "../components/layout/AppShell";
+import { AgentsPage } from "../features/agents/AgentsPage";
+import { DiscoveryPage } from "../features/discovery/DiscoveryPage";
 import { OverviewPage } from "../features/overview/OverviewPage";
 import { AccessDeniedPage } from "../features/shared/AccessDeniedPage";
 import { FeaturePlaceholderPage } from "../features/shared/FeaturePlaceholderPage";
@@ -75,8 +77,22 @@ const overviewRoute = createRoute({
   component: OverviewPage
 });
 
+const agentsRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: "/agents",
+  component: AgentsPage
+});
+
+const discoveryRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: "/discovery",
+  component: DiscoveryPage
+});
+
 const featureRoutes = routeRegistry
-  .filter((route) => route.path !== "/overview")
+  .filter(
+    (route) => route.path !== "/overview" && route.path !== "/agents" && route.path !== "/discovery"
+  )
   .map((route) =>
     createRoute({
       getParentRoute: () => protectedRoute,
@@ -94,7 +110,7 @@ const featureRoutes = routeRegistry
 const routeTree = rootRoute.addChildren([
   indexRoute,
   loginRoute,
-  protectedRoute.addChildren([overviewRoute, ...featureRoutes])
+  protectedRoute.addChildren([overviewRoute, agentsRoute, discoveryRoute, ...featureRoutes])
 ]);
 
 export const router = createRouter({ routeTree });

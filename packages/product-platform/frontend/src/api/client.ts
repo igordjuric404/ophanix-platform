@@ -26,6 +26,8 @@ export interface ApiClientOptions {
   getTenantContext?: () => TenantContext;
 }
 
+export type ApiRequestInit = Omit<RequestInit, "body"> & { body?: unknown };
+
 let activeTenantContext: TenantContext = { organizationId: null, environmentId: null };
 
 export function setApiTenantContext(context: TenantContext) {
@@ -44,8 +46,9 @@ export function createApiClient({
     throw new Error("A fetch implementation is required.");
   }
 
-  async function request<TResponse>(path: string, options: RequestInit = {}): Promise<TResponse> {
+  async function request<TResponse>(path: string, options: ApiRequestInit = {}): Promise<TResponse> {
     const tenant = getTenantContext();
+    const { body, ...requestOptions } = options;
     const headers = new Headers(options.headers);
     headers.set("Accept", "application/json");
     if (tenant.organizationId) {
@@ -56,14 +59,16 @@ export function createApiClient({
     }
 
     const init: RequestInit = {
-      ...options,
+      ...requestOptions,
       headers,
       credentials: options.credentials ?? "include"
     };
 
-    if (options.body && typeof options.body !== "string") {
+    if (body && typeof body !== "string") {
       headers.set("Content-Type", "application/json");
-      init.body = JSON.stringify(options.body);
+      init.body = JSON.stringify(body);
+    } else if (typeof body === "string") {
+      init.body = body;
     }
 
     const response = await resolvedFetch(resolveUrl(baseUrl, path), init);
