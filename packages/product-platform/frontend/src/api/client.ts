@@ -26,10 +26,16 @@ export interface ApiClientOptions {
   getTenantContext?: () => TenantContext;
 }
 
+let activeTenantContext: TenantContext = { organizationId: null, environmentId: null };
+
+export function setApiTenantContext(context: TenantContext) {
+  activeTenantContext = context;
+}
+
 export function createApiClient({
   baseUrl = "/api/v1",
   fetchImpl,
-  getTenantContext = () => ({ organizationId: null, environmentId: null })
+  getTenantContext = () => activeTenantContext
 }: ApiClientOptions = {}) {
   const resolvedFetch: typeof fetch =
     fetchImpl ?? ((input, init) => globalThis.fetch(input, init));

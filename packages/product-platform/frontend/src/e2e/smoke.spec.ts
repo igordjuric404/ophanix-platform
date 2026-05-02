@@ -40,6 +40,18 @@ test("dev login and top-level navigation smoke", async ({ page }) => {
       json: { build_sha: "test-sha", environment: "test" }
     });
   });
+  await page.route("**/api/v1/organizations", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: [{ id: "org_default", name: "Ophanix Demo" }]
+    });
+  });
+  await page.route("**/api/v1/environments", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: [{ id: "env_default", organization_id: "org_default", name: "Development" }]
+    });
+  });
 
   await page.goto("/login");
   await page.getByRole("button", { name: "Sign in" }).click();

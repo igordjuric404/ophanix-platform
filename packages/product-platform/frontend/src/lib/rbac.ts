@@ -44,6 +44,24 @@ export const rolePermissions: Record<string, Set<string>> = {
   "Platform Admin": new Set(Object.values(permissions))
 };
 
+export const routePermissions: Record<string, string> = {
+  "/overview": permissions.SYSTEM_READ,
+  "/agents": permissions.TENANT_READ,
+  "/policies": permissions.POLICY_READ,
+  "/trust": permissions.COMPLIANCE_READ,
+  "/mcp": permissions.AUDIT_READ,
+  "/mesh": permissions.SYSTEM_READ,
+  "/runtime": permissions.JOB_RUN,
+  "/discovery": permissions.JOB_RUN,
+  "/marketplace": permissions.TENANT_READ,
+  "/compliance": permissions.COMPLIANCE_READ,
+  "/observability": permissions.AUDIT_READ,
+  "/integrations": permissions.SECURITY_MANAGE,
+  "/workflows": permissions.JOB_RUN,
+  "/demo-lab": permissions.JOB_RUN,
+  "/settings": permissions.TENANT_MANAGE
+};
+
 export function userHasPermission(user: UserPrincipal | null | undefined, permission: string) {
   if (!user) {
     return false;
@@ -55,4 +73,9 @@ export function userHasPermission(user: UserPrincipal | null | undefined, permis
   return user.roles.some((role) =>
     rolePermissions[role as keyof typeof rolePermissions]?.has(permission)
   );
+}
+
+export function canAccessRoute(path: string, user: UserPrincipal | null | undefined) {
+  const requiredPermission = routePermissions[path];
+  return requiredPermission ? userHasPermission(user, requiredPermission) : true;
 }

@@ -3,22 +3,31 @@ import {
   Outlet,
   createRootRoute,
   createRoute,
-  createRouter
+  createRouter,
+  useLocation
 } from "@tanstack/react-router";
 
 import { LoginScreen } from "../components/auth/LoginScreen";
 import { RequireAuth } from "../components/auth/RequireAuth";
 import { AppShell } from "../components/layout/AppShell";
 import { OverviewPage } from "../features/overview/OverviewPage";
+import { AccessDeniedPage } from "../features/shared/AccessDeniedPage";
 import { FeaturePlaceholderPage } from "../features/shared/FeaturePlaceholderPage";
+import { canAccessRoute } from "../lib/rbac";
 import { routeRegistry } from "../lib/routes";
 
 function ProtectedLayout() {
+  const location = useLocation();
+
   return (
     <RequireAuth>
       {(user) => (
         <AppShell user={user}>
-          <Outlet />
+          {canAccessRoute(location.pathname, user) ? (
+            <Outlet />
+          ) : (
+            <AccessDeniedPage path={location.pathname} />
+          )}
         </AppShell>
       )}
     </RequireAuth>
@@ -95,4 +104,3 @@ declare module "@tanstack/react-router" {
     router: typeof router;
   }
 }
-
