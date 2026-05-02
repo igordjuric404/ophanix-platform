@@ -144,6 +144,14 @@ if missing:
 PY
 }
 
+require_frontend_dependencies() {
+  if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
+    echo "Missing frontend dependencies. Install them from packages/product-platform/frontend with:" >&2
+    echo "  npm install" >&2
+    exit 1
+  fi
+}
+
 wait_for_url() {
   url="$1"
   label="$2"
@@ -297,7 +305,7 @@ run_docker() {
 
 run_local() {
   require_python_dependencies
-  create_frontend_proxy
+  require_frontend_dependencies
 
   log "Applying migrations..."
   python3 -m product_platform.cli db migrate
@@ -320,12 +328,10 @@ run_local() {
     python3 -m product_platform.cli demo-service serve --service agent --agent-id agent_demo_research --host "$API_HOST" --port 8094
 
   start_process "frontend on http://$FRONTEND_HOST:$FRONTEND_PORT" \
-    python3 "$PROXY_SCRIPT" \
-      --frontend-dir "$FRONTEND_DIR" \
+    env VITE_API_PROXY_TARGET="http://$API_HOST:$API_PORT" \
+      npm --prefix "$FRONTEND_DIR" run dev -- \
       --host "$FRONTEND_HOST" \
-      --port "$FRONTEND_PORT" \
-      --api-host "$API_HOST" \
-      --api-port "$API_PORT"
+      --port "$FRONTEND_PORT"
   wait_for_url "http://$FRONTEND_HOST:$FRONTEND_PORT" "Frontend"
 
   cat <<EOF
