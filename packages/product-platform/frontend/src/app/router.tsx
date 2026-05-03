@@ -13,10 +13,12 @@ import { AppShell } from "../components/layout/AppShell";
 import { AgentsPage } from "../features/agents/AgentsPage";
 import { CompliancePage } from "../features/compliance/CompliancePage";
 import { DiscoveryPage } from "../features/discovery/DiscoveryPage";
+import { MeshPage } from "../features/mesh/MeshPage";
 import { OverviewPage } from "../features/overview/OverviewPage";
 import { PoliciesPage } from "../features/policies/PoliciesPage";
 import { AccessDeniedPage } from "../features/shared/AccessDeniedPage";
 import { FeaturePlaceholderPage } from "../features/shared/FeaturePlaceholderPage";
+import { TrustPage } from "../features/trust/TrustPage";
 import { canAccessRoute } from "../lib/rbac";
 import { routeRegistry } from "../lib/routes";
 
@@ -103,6 +105,18 @@ const complianceRoute = createRoute({
   component: CompliancePage
 });
 
+const trustRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: "/trust",
+  component: TrustPage
+});
+
+const meshRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: "/mesh",
+  component: MeshPage
+});
+
 const featureRoutes = routeRegistry
   .filter(
     (route) =>
@@ -110,7 +124,9 @@ const featureRoutes = routeRegistry
       route.path !== "/agents" &&
       route.path !== "/discovery" &&
       route.path !== "/policies" &&
-      route.path !== "/compliance"
+      route.path !== "/compliance" &&
+      route.path !== "/trust" &&
+      route.path !== "/mesh"
   )
   .map((route) =>
     createRoute({
@@ -135,6 +151,8 @@ const routeTree = rootRoute.addChildren([
     discoveryRoute,
     policiesRoute,
     complianceRoute,
+    trustRoute,
+    meshRoute,
     ...featureRoutes
   ])
 ]);

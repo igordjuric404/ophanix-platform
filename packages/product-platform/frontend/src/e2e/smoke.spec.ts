@@ -420,14 +420,235 @@ test("dev login and top-level navigation smoke", async ({ page }) => {
       ]
     });
   });
+  await page.route("**/api/v1/trust/scores", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: [
+        {
+          id: "tscore_smoke",
+          agent_id: "agent_smoke",
+          agent_name: "Smoke Agent",
+          score: 735,
+          tier: "trusted",
+          dimensions: { policy_compliance: { score: 735, signal_count: 2 } },
+          calculated_at: "2026-05-02T10:04:00Z"
+        }
+      ]
+    });
+  });
+  await page.route("**/api/v1/trust/events**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: [
+        {
+          id: "tevt_smoke",
+          agent_id: "agent_smoke",
+          agent_name: "Smoke Agent",
+          dimension: "policy_compliance",
+          delta: 8,
+          reason: "Policy decision allowed.",
+          score_before: 727,
+          score_after: 735,
+          source_event_id: "evt_policy_smoke",
+          created_at: "2026-05-02T10:04:00Z"
+        }
+      ]
+    });
+  });
+  await page.route("**/api/v1/trust/rules", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: [
+        {
+          id: "trule_smoke",
+          event_type: "policy.decision.allow",
+          dimension: "policy_compliance",
+          delta: 8,
+          min_delta: -50,
+          max_delta: 50,
+          enabled: true
+        }
+      ]
+    });
+  });
+  const trustCard = {
+    id: "tcard_smoke",
+    agent_id: "agent_smoke",
+    issuer: "ophanix-demo",
+    status: "active",
+    signature: "signature_smoke_123456",
+    valid_from: "2026-05-02T10:00:00Z",
+    valid_until: "2026-06-02T10:00:00Z",
+    issued_at: "2026-05-02T10:00:00Z",
+    card: {
+      name: "Smoke Agent",
+      agent_did: "did:mesh:smoke",
+      capabilities: ["claims:read"],
+      trust_score: 0.735,
+      metadata: { trust_score: 735 }
+    }
+  };
+  await page.route("**/api/v1/trust/cards/tcard_smoke", async (route) => {
+    await route.fulfill({ contentType: "application/json", json: trustCard });
+  });
+  await page.route("**/api/v1/trust/cards", async (route) => {
+    await route.fulfill({ contentType: "application/json", json: [trustCard] });
+  });
+  await page.route("**/api/v1/trust/thresholds", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: [
+        {
+          id: "tthr_smoke",
+          threshold_type: "handoff",
+          target_type: "environment",
+          target_id: null,
+          min_score: 700,
+          required_tier: "trusted",
+          enabled: true
+        }
+      ]
+    });
+  });
+  await page.route("**/api/v1/trust/handshakes**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: [
+        {
+          id: "hshake_smoke",
+          source_agent_id: "agent_smoke",
+          target_agent_id: "agent_smoke_peer",
+          purpose: "handoff",
+          threshold_type: "handoff",
+          target_type: "environment",
+          target_id: null,
+          required_score: 700,
+          required_tier: "trusted",
+          source_score: 735,
+          target_score: 720,
+          result: "allowed",
+          reason: "trust_threshold_satisfied",
+          metadata: { mode: "smoke" },
+          created_at: "2026-05-02T10:05:00Z"
+        }
+      ]
+    });
+  });
+  await page.route("**/api/v1/mesh/topology**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: {
+        nodes: [
+          { agent_id: "agent_smoke", name: "Smoke Agent", status: "active", trust_tier: "trusted", message_count: 1 },
+          { agent_id: "agent_peer", name: "Peer Agent", status: "active", trust_tier: "standard", message_count: 1 }
+        ],
+        edges: [
+          {
+            source_agent_id: "agent_smoke",
+            target_agent_id: "agent_peer",
+            protocol: "mcp",
+            volume: 1,
+            denied_count: 0,
+            deny_rate: 0,
+            average_latency_ms: 24
+          }
+        ],
+        message_count: 1,
+        generated_at: "2026-05-02T10:06:00Z",
+        cached: false
+      }
+    });
+  });
+  await page.route("**/api/v1/mesh/messages**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: [
+        {
+          id: "mmsg_smoke",
+          source_agent_id: "agent_smoke",
+          target_agent_id: "agent_peer",
+          source_agent_name: "Smoke Agent",
+          target_agent_name: "Peer Agent",
+          protocol: "mcp",
+          action: "tool.call",
+          decision: "allow",
+          latency_ms: 24,
+          correlation_id: "corr-smoke-mesh",
+          payload_summary: { reason: "policy_allow" },
+          created_at: "2026-05-02T10:06:00Z"
+        }
+      ]
+    });
+  });
+  await page.route("**/api/v1/mesh/handoffs**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: [
+        {
+          id: "mhnd_smoke",
+          source_agent_id: "agent_smoke",
+          target_agent_id: "agent_peer",
+          source_agent_name: "Smoke Agent",
+          target_agent_name: "Peer Agent",
+          task_type: "claim_review",
+          required_capabilities: ["claims:read"],
+          trust_result: "allowed",
+          policy_result: "allow",
+          status: "completed",
+          reason: "ok",
+          correlation_id: "corr-smoke-mesh",
+          metadata: { demo: true },
+          created_at: "2026-05-02T10:06:00Z"
+        }
+      ]
+    });
+  });
+  const protocolBridge = {
+    id: "pbrg_smoke",
+    name: "MCP Smoke Bridge",
+    bridge_type: "mcp",
+    status: "limited",
+    config: { endpoint: "https://mcp.local/rpc" },
+    current_health: {
+      id: "pbhc_smoke",
+      bridge_id: "pbrg_smoke",
+      status: "limited",
+      latency_ms: 1,
+      message: "AgentMesh bridge methods are placeholder/pass-through implementations.",
+      checked_at: "2026-05-02T10:06:00Z"
+    },
+    routes: [
+      {
+        id: "pbrt_smoke",
+        bridge_id: "pbrg_smoke",
+        source_protocol: "a2a",
+        target_protocol: "mcp",
+        source_agent_id: "agent_smoke",
+        target_agent_id: "agent_peer",
+        source_agent_name: "Smoke Agent",
+        target_agent_name: "Peer Agent",
+        enabled: true,
+        created_at: "2026-05-02T10:06:00Z",
+        updated_at: "2026-05-02T10:06:00Z"
+      }
+    ],
+    created_at: "2026-05-02T10:06:00Z",
+    updated_at: "2026-05-02T10:06:00Z"
+  };
+  await page.route("**/api/v1/mesh/protocol-bridges/pbrg_smoke", async (route) => {
+    await route.fulfill({ contentType: "application/json", json: protocolBridge });
+  });
+  await page.route("**/api/v1/mesh/protocol-bridges**", async (route) => {
+    await route.fulfill({ contentType: "application/json", json: [protocolBridge] });
+  });
 
   await page.goto("/login");
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
 
-  for (const name of ["Agents", "Discovery", "Policies", "Compliance", "MCP Security", "Runtime", "Demo Lab"]) {
+  for (const name of ["Agents", "Discovery", "Policies", "Trust", "Mesh", "Compliance", "MCP Security", "Runtime", "Demo Lab"]) {
     await page.getByRole("link", { name }).click();
-    await expect(page.getByRole("heading", { name })).toBeVisible();
+    await expect(page.getByRole("heading", { name, exact: true })).toBeVisible();
   }
   await page.getByRole("link", { name: "Agents" }).click();
   await expect(page.getByRole("heading", { name: "Smoke Agent" })).toBeVisible();
@@ -440,4 +661,10 @@ test("dev login and top-level navigation smoke", async ({ page }) => {
   await page.getByRole("link", { name: "Compliance" }).click();
   await expect(page.getByText("policy.decision").first()).toBeVisible();
   await expect(page.getByText("SOC 2 Smoke Report").first()).toBeVisible();
+  await page.getByRole("link", { name: "Trust" }).click();
+  await expect(page.getByText("Agent Trust Scores")).toBeVisible();
+  await expect(page.getByText("did:mesh:smoke").first()).toBeVisible();
+  await page.getByRole("link", { name: "Mesh" }).click();
+  await expect(page.getByText("Live Edges")).toBeVisible();
+  await expect(page.getByText("MCP Smoke Bridge").first()).toBeVisible();
 });
