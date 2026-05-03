@@ -641,6 +641,306 @@ test("dev login and top-level navigation smoke", async ({ page }) => {
   await page.route("**/api/v1/mesh/protocol-bridges**", async (route) => {
     await route.fulfill({ contentType: "application/json", json: [protocolBridge] });
   });
+  const mcpServer = {
+    id: "mcpsrv_smoke",
+    name: "Claims MCP Smoke",
+    endpoint_url: "https://mcp.claims.local/rpc",
+    owner_user_id: "user_1",
+    owner_display_name: "admin",
+    auth_type: "bearer",
+    status: "active",
+    policy_pack_id: "pack_smoke",
+    tool_count: 1,
+    created_at: "2026-05-02T10:07:00Z",
+    updated_at: "2026-05-02T10:07:00Z",
+    last_discovered_at: "2026-05-02T10:07:00Z"
+  };
+  const mcpTool = {
+    id: "mcptool_smoke",
+    server_id: "mcpsrv_smoke",
+    server_name: "Claims MCP Smoke",
+    name: "claims.lookup",
+    description: "Look up claim status",
+    current_version_id: "mcptv_smoke",
+    current_version: {
+      id: "mcptv_smoke",
+      tool_id: "mcptool_smoke",
+      schema: { type: "object", properties: { claim_id: { type: "string" } } },
+      schema_hash: "sha256:smoke",
+      definition: { name: "claims.lookup" },
+      discovered_at: "2026-05-02T10:07:00Z",
+      scan_status: "changed"
+    },
+    versions: [
+      {
+        id: "mcptv_smoke",
+        tool_id: "mcptool_smoke",
+        schema: { type: "object", properties: { claim_id: { type: "string" } } },
+        schema_hash: "sha256:smoke",
+        definition: { name: "claims.lookup" },
+        discovered_at: "2026-05-02T10:07:00Z",
+        scan_status: "changed"
+      }
+    ],
+    risk_level: "critical",
+    status: "active",
+    created_at: "2026-05-02T10:07:00Z",
+    updated_at: "2026-05-02T10:07:00Z"
+  };
+  const mcpScan = {
+    id: "mcpscan_smoke",
+    server_id: "mcpsrv_smoke",
+    server_name: "Claims MCP Smoke",
+    status: "completed",
+    started_at: "2026-05-02T10:07:00Z",
+    finished_at: "2026-05-02T10:07:02Z",
+    summary: { tools_scanned: 1, tools_flagged: 1, finding_count: 1 },
+    findings: []
+  };
+  const mcpFinding = {
+    id: "mcpf_smoke",
+    scan_run_id: "mcpscan_smoke",
+    server_id: "mcpsrv_smoke",
+    server_name: "Claims MCP Smoke",
+    tool_id: "mcptool_smoke",
+    tool_name: "claims.lookup",
+    tool_version_id: "mcptv_smoke",
+    finding_type: "schema_change",
+    severity: "critical",
+    title: "Smoke schema finding",
+    description: "Schema exposes a smoke field.",
+    evidence: { field: "claim_id" },
+    recommendation: "Review the schema.",
+    status: "open",
+    created_at: "2026-05-02T10:07:00Z",
+    updated_at: "2026-05-02T10:07:00Z"
+  };
+  await page.route("**/api/v1/mcp/servers**", async (route) => {
+    await route.fulfill({ contentType: "application/json", json: [mcpServer] });
+  });
+  await page.route("**/api/v1/mcp/tools**", async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    await route.fulfill({
+      contentType: "application/json",
+      json: pathname.endsWith("/mcptool_smoke") ? mcpTool : [mcpTool]
+    });
+  });
+  await page.route("**/api/v1/mcp/scans**", async (route) => {
+    await route.fulfill({ contentType: "application/json", json: [mcpScan] });
+  });
+  await page.route("**/api/v1/mcp/findings**", async (route) => {
+    await route.fulfill({ contentType: "application/json", json: [mcpFinding] });
+  });
+  await page.route("**/api/v1/mcp/traffic**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: [
+        {
+          id: "mcpcall_smoke",
+          server_id: "mcpsrv_smoke",
+          server_name: "Claims MCP Smoke",
+          tool_id: "mcptool_smoke",
+          tool_name: "claims.lookup",
+          source_agent_id: "agent_smoke",
+          source_agent_name: "Smoke Agent",
+          params_summary: { claim_id: "redacted" },
+          decision: "denied",
+          reason: "policy blocked smoke lookup",
+          matched_policy_id: "policy_smoke",
+          trust_score: 735,
+          sanitizer_action: "blocked",
+          latency_ms: 8,
+          correlation_id: "corr-smoke-mcp",
+          created_at: "2026-05-02T10:07:00Z"
+        }
+      ]
+    });
+  });
+  await page.route("**/api/v1/mcp/approvals**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: [
+        {
+          id: "mcpappr_smoke",
+          tool_call_id: "mcpcall_smoke",
+          status: "pending",
+          requested_by_agent_id: "agent_smoke",
+          requested_by_agent_name: "Smoke Agent",
+          requested_at: "2026-05-02T10:07:00Z",
+          tool_call: null
+        }
+      ]
+    });
+  });
+  await page.route("**/api/v1/mcp/rate-limits**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: [
+        {
+          id: "mcprl_smoke",
+          target_type: "mcp-tool",
+          target_id: "mcptool_smoke",
+          window_seconds: 60,
+          max_calls: 20,
+          enabled: true,
+          created_at: "2026-05-02T10:07:00Z",
+          updated_at: "2026-05-02T10:07:00Z"
+        }
+      ]
+    });
+  });
+  const runtimeSession = {
+    id: "rtssn_smoke",
+    agent_id: "agent_smoke",
+    agent_name: "Smoke Agent",
+    state: "active",
+    ring: 2,
+    sponsor_user_id: "user_1",
+    started_at: "2026-05-02T10:08:00Z",
+    ended_at: null,
+    metadata: {},
+    actions: [
+      {
+        id: "rtact_smoke",
+        session_id: "rtssn_smoke",
+        action_name: "refund.issue",
+        resource_type: "runtime-action",
+        required_ring: 1,
+        decision: "denied",
+        reason: "Ring 1 requires higher trust",
+        latency_ms: 11,
+        correlation_id: "corr-smoke-runtime",
+        created_at: "2026-05-02T10:08:00Z",
+        ring_decision: {
+          id: "rtdcsn_smoke",
+          runtime_action_id: "rtact_smoke",
+          session_id: "rtssn_smoke",
+          agent_id: "agent_smoke",
+          action_name: "refund.issue",
+          resource_type: "runtime-action",
+          agent_trust_score: 735,
+          required_ring: 1,
+          assigned_ring: 2,
+          result: "denied",
+          reason: "Ring 1 requires higher trust",
+          created_at: "2026-05-02T10:08:00Z"
+        }
+      }
+    ]
+  };
+  const runtimeSaga = {
+    id: "saga_smoke",
+    runtime_session_id: "rtssn_smoke",
+    name: "Refund Saga Smoke",
+    status: "draft",
+    created_by: "user_1",
+    started_at: null,
+    finished_at: null,
+    correlation_id: "corr-smoke-saga",
+    created_at: "2026-05-02T10:08:00Z",
+    updated_at: "2026-05-02T10:08:00Z",
+    steps: [
+      {
+        id: "sgstp_smoke",
+        saga_id: "saga_smoke",
+        step_order: 1,
+        name: "Lookup order",
+        action_name: "order.lookup",
+        target_agent_id: "agent_smoke",
+        target_agent_name: "Smoke Agent",
+        required_capability: "claims:read",
+        timeout_seconds: 300,
+        retry_count: 1,
+        compensation_action: "refund.revert",
+        status: "failed",
+        result: { error: "demo failure" },
+        created_at: "2026-05-02T10:08:00Z",
+        updated_at: "2026-05-02T10:08:00Z"
+      }
+    ],
+    events: [
+      {
+        id: "sgev_smoke",
+        saga_id: "saga_smoke",
+        step_id: "sgstp_smoke",
+        event_type: "saga.step.compensated",
+        message: "Compensation queued",
+        payload: {},
+        created_at: "2026-05-02T10:08:00Z"
+      }
+    ]
+  };
+  await page.route("**/api/v1/runtime/sessions**", async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    await route.fulfill({
+      contentType: "application/json",
+      json: pathname.endsWith("/rtssn_smoke") ? runtimeSession : [runtimeSession]
+    });
+  });
+  await page.route("**/api/v1/runtime/ring-decisions**", async (route) => {
+    await route.fulfill({ contentType: "application/json", json: [runtimeSession.actions[0].ring_decision] });
+  });
+  await page.route("**/api/v1/runtime/ring-rules**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: [
+        {
+          id: "rtrule_smoke",
+          action_pattern: "refund.*",
+          required_ring: 1,
+          min_trust_score: 700,
+          enabled: true,
+          created_at: "2026-05-02T10:08:00Z",
+          updated_at: "2026-05-02T10:08:00Z"
+        }
+      ]
+    });
+  });
+  await page.route("**/api/v1/runtime/sagas**", async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    await route.fulfill({
+      contentType: "application/json",
+      json: pathname.endsWith("/saga_smoke") ? runtimeSaga : [runtimeSaga]
+    });
+  });
+  await page.route("**/api/v1/runtime/sandbox-profiles**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: [
+        {
+          id: "sbx_smoke",
+          name: "Python Smoke Sandbox",
+          provider_type: "subprocess",
+          allowed_imports: ["json"],
+          blocked_imports: ["os", "subprocess", "socket"],
+          allowed_paths: ["/tmp/claims"],
+          network_policy: { egress: "deny" },
+          resource_limits: { timeout_seconds: 5, memory_mb: 128 },
+          status: "active",
+          provider_warning: "Subprocess sandbox is demo-only and does not provide production isolation.",
+          created_at: "2026-05-02T10:08:00Z",
+          updated_at: "2026-05-02T10:08:00Z"
+        }
+      ]
+    });
+  });
+  await page.route("**/api/v1/runtime/kill-switch/events**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: [
+        {
+          id: "kill_smoke",
+          target_type: "session",
+          target_id: "rtssn_smoke",
+          scope: "target",
+          reason: "operator stop",
+          actor_id: "user_1",
+          status: "triggered",
+          created_at: "2026-05-02T10:08:00Z"
+        }
+      ]
+    });
+  });
 
   await page.goto("/login");
   await page.getByRole("button", { name: "Sign in" }).click();
@@ -667,4 +967,11 @@ test("dev login and top-level navigation smoke", async ({ page }) => {
   await page.getByRole("link", { name: "Mesh" }).click();
   await expect(page.getByText("Live Edges")).toBeVisible();
   await expect(page.getByText("MCP Smoke Bridge").first()).toBeVisible();
+  await page.getByRole("link", { name: "MCP Security" }).click();
+  await expect(page.getByRole("heading", { name: "Server Registry" })).toBeVisible();
+  await expect(page.getByText("Claims MCP Smoke").first()).toBeVisible();
+  await page.getByRole("link", { name: "Runtime" }).click();
+  await expect(page.getByRole("heading", { name: "Runtime Sessions" })).toBeVisible();
+  await expect(page.getByText("Refund Saga Smoke").first()).toBeVisible();
+  await expect(page.getByText("Python Smoke Sandbox").first()).toBeVisible();
 });

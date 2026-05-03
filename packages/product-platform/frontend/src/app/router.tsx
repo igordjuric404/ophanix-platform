@@ -14,8 +14,10 @@ import { AgentsPage } from "../features/agents/AgentsPage";
 import { CompliancePage } from "../features/compliance/CompliancePage";
 import { DiscoveryPage } from "../features/discovery/DiscoveryPage";
 import { MeshPage } from "../features/mesh/MeshPage";
+import { McpPage } from "../features/mcp/McpPage";
 import { OverviewPage } from "../features/overview/OverviewPage";
 import { PoliciesPage } from "../features/policies/PoliciesPage";
+import { RuntimePage } from "../features/runtime/RuntimePage";
 import { AccessDeniedPage } from "../features/shared/AccessDeniedPage";
 import { FeaturePlaceholderPage } from "../features/shared/FeaturePlaceholderPage";
 import { TrustPage } from "../features/trust/TrustPage";
@@ -117,6 +119,18 @@ const meshRoute = createRoute({
   component: MeshPage
 });
 
+const mcpRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: "/mcp",
+  component: McpPage
+});
+
+const runtimeRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: "/runtime",
+  component: RuntimePage
+});
+
 const featureRoutes = routeRegistry
   .filter(
     (route) =>
@@ -126,7 +140,9 @@ const featureRoutes = routeRegistry
       route.path !== "/policies" &&
       route.path !== "/compliance" &&
       route.path !== "/trust" &&
-      route.path !== "/mesh"
+      route.path !== "/mesh" &&
+      route.path !== "/mcp" &&
+      route.path !== "/runtime"
   )
   .map((route) =>
     createRoute({
@@ -153,6 +169,8 @@ const routeTree = rootRoute.addChildren([
     complianceRoute,
     trustRoute,
     meshRoute,
+    mcpRoute,
+    runtimeRoute,
     ...featureRoutes
   ])
 ]);
