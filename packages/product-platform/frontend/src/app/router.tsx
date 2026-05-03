@@ -13,14 +13,18 @@ import { AppShell } from "../components/layout/AppShell";
 import { AgentsPage } from "../features/agents/AgentsPage";
 import { CompliancePage } from "../features/compliance/CompliancePage";
 import { DiscoveryPage } from "../features/discovery/DiscoveryPage";
+import { IntegrationsPage } from "../features/integrations/IntegrationsPage";
 import { MeshPage } from "../features/mesh/MeshPage";
 import { McpPage } from "../features/mcp/McpPage";
+import { MarketplacePage } from "../features/marketplace/MarketplacePage";
+import { ObservabilityPage } from "../features/observability/ObservabilityPage";
 import { OverviewPage } from "../features/overview/OverviewPage";
 import { PoliciesPage } from "../features/policies/PoliciesPage";
 import { RuntimePage } from "../features/runtime/RuntimePage";
 import { AccessDeniedPage } from "../features/shared/AccessDeniedPage";
 import { FeaturePlaceholderPage } from "../features/shared/FeaturePlaceholderPage";
 import { TrustPage } from "../features/trust/TrustPage";
+import { WorkflowsPage } from "../features/workflows/WorkflowsPage";
 import { canAccessRoute } from "../lib/rbac";
 import { routeRegistry } from "../lib/routes";
 
@@ -131,6 +135,30 @@ const runtimeRoute = createRoute({
   component: RuntimePage
 });
 
+const marketplaceRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: "/marketplace",
+  component: MarketplacePage
+});
+
+const observabilityRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: "/observability",
+  component: ObservabilityPage
+});
+
+const integrationsRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: "/integrations",
+  component: IntegrationsPage
+});
+
+const workflowsRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: "/workflows",
+  component: WorkflowsPage
+});
+
 const featureRoutes = routeRegistry
   .filter(
     (route) =>
@@ -142,7 +170,11 @@ const featureRoutes = routeRegistry
       route.path !== "/trust" &&
       route.path !== "/mesh" &&
       route.path !== "/mcp" &&
-      route.path !== "/runtime"
+      route.path !== "/runtime" &&
+      route.path !== "/marketplace" &&
+      route.path !== "/observability" &&
+      route.path !== "/integrations" &&
+      route.path !== "/workflows"
   )
   .map((route) =>
     createRoute({
@@ -171,6 +203,10 @@ const routeTree = rootRoute.addChildren([
     meshRoute,
     mcpRoute,
     runtimeRoute,
+    marketplaceRoute,
+    observabilityRoute,
+    integrationsRoute,
+    workflowsRoute,
     ...featureRoutes
   ])
 ]);

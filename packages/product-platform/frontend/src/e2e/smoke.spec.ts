@@ -52,6 +52,445 @@ test("dev login and top-level navigation smoke", async ({ page }) => {
       json: [{ id: "env_default", organization_id: "org_default", name: "Development" }]
     });
   });
+
+  const marketplacePlugin = {
+    id: "plug_smoke",
+    organization_id: "org_default",
+    name: "Claims Assistant",
+    description: "Claims workflow governance pack",
+    publisher: "Ophanix",
+    plugin_type: "integration",
+    status: "available",
+    created_at: "2026-05-02T10:00:00Z",
+    updated_at: "2026-05-02T10:00:00Z",
+    versions: [
+      {
+        id: "plugver_smoke",
+        plugin_id: "plug_smoke",
+        version: "1.0.0",
+        manifest: { name: "Claims Assistant", version: "1.0.0", plugin_type: "integration" },
+        package_ref: "registry://claims-assistant",
+        signature_status: "signed",
+        quality_score: 0.91,
+        trust_tier: "trusted",
+        required_capabilities: ["claims.lookup"],
+        permissions: ["mcp.invoke"],
+        created_at: "2026-05-02T10:00:00Z",
+        updated_at: "2026-05-02T10:00:00Z"
+      }
+    ]
+  };
+  const marketplaceInstallation = {
+    id: "install_smoke",
+    plugin_version_id: "plugver_smoke",
+    plugin_name: "Claims Assistant",
+    version: "1.0.0",
+    environment_id: "env_default",
+    target_agent_id: "agent_smoke",
+    target_agent_name: "Smoke Agent",
+    status: "installed",
+    installed_by: "user_1",
+    installed_at: "2026-05-02T10:01:00Z",
+    uninstalled_at: null
+  };
+  const marketplaceReview = {
+    id: "review_smoke",
+    plugin_version_id: "plugver_smoke",
+    plugin_name: "Claims Assistant",
+    version: "1.0.0",
+    status: "pending",
+    reviewer_id: null,
+    findings: [{ code: "manual_review", message: "Manual review requested" }],
+    decision_reason: null,
+    created_at: "2026-05-02T10:02:00Z",
+    decided_at: null
+  };
+  const marketplaceSigningKey = {
+    id: "sign_smoke",
+    organization_id: "org_default",
+    name: "Marketplace Root",
+    public_key: "pk_smoke",
+    status: "active",
+    created_by: "user_1",
+    created_at: "2026-05-02T10:03:00Z",
+    revoked_at: null
+  };
+  await page.route("**/api/v1/marketplace/**", async (route) => {
+    const { pathname } = new URL(route.request().url());
+    if (pathname === "/api/v1/marketplace/plugins/plug_smoke") {
+      await route.fulfill({ contentType: "application/json", json: marketplacePlugin });
+      return;
+    }
+    if (pathname === "/api/v1/marketplace/plugins") {
+      await route.fulfill({ contentType: "application/json", json: [marketplacePlugin] });
+      return;
+    }
+    if (pathname === "/api/v1/marketplace/installations") {
+      await route.fulfill({ contentType: "application/json", json: [marketplaceInstallation] });
+      return;
+    }
+    if (pathname === "/api/v1/marketplace/reviews") {
+      await route.fulfill({ contentType: "application/json", json: [marketplaceReview] });
+      return;
+    }
+    if (pathname === "/api/v1/marketplace/signing-keys") {
+      await route.fulfill({ contentType: "application/json", json: [marketplaceSigningKey] });
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", json: [] });
+  });
+
+  const observabilitySlo = {
+    id: "slo_smoke",
+    organization_id: "org_default",
+    environment_id: "env_default",
+    name: "Task Success",
+    target_type: "agent",
+    target_id: "agent_smoke",
+    sli: "task_success_rate",
+    target_value: 0.95,
+    window: "30d",
+    status: "healthy",
+    created_by: "user_1",
+    created_at: "2026-05-02T10:00:00Z",
+    updated_at: "2026-05-02T10:00:00Z",
+    measurements: [
+      {
+        id: "slomeas_smoke",
+        slo_id: "slo_smoke",
+        value: 0.97,
+        good_events: 97,
+        total_events: 100,
+        error_budget_remaining: 0.8,
+        burn_rate: 0.2,
+        status: "healthy",
+        metadata: { source: "smoke" },
+        measured_at: "2026-05-02T10:00:00Z"
+      }
+    ]
+  };
+  const observabilityCosts = {
+    budgets: [
+      {
+        id: "costbud_smoke",
+        organization_id: "org_default",
+        environment_id: "env_default",
+        target_type: "agent",
+        target_id: "agent_smoke",
+        period: "monthly",
+        amount_limit: 100,
+        used_amount: 12.5,
+        action_on_breach: "warn",
+        breach_action: "none",
+        status: "healthy",
+        created_by: "user_1",
+        created_at: "2026-05-02T10:00:00Z",
+        updated_at: "2026-05-02T10:00:00Z"
+      }
+    ],
+    events: [
+      {
+        id: "costevt_smoke",
+        organization_id: "org_default",
+        environment_id: "env_default",
+        target_type: "agent",
+        target_id: "agent_smoke",
+        provider: "openai",
+        model: "gpt",
+        amount: 1.25,
+        units: 1000,
+        correlation_id: "corr_cost",
+        created_at: "2026-05-02T10:00:00Z"
+      }
+    ],
+    total_amount: 12.5,
+    by_target: { agent_smoke: 12.5 },
+    by_provider: { openai: 12.5 },
+    by_model: { gpt: 12.5 }
+  };
+  const observabilityIncident = {
+    id: "inc_smoke",
+    organization_id: "org_default",
+    environment_id: "env_default",
+    severity: "critical",
+    status: "open",
+    title: "Denial Spike",
+    summary: "Policy denials crossed the incident threshold.",
+    owner_user_id: null,
+    correlation_id: "corr_inc",
+    source_event_id: "evt_policy_smoke",
+    resolution_note: null,
+    started_at: "2026-05-02T10:00:00Z",
+    acknowledged_at: null,
+    resolved_at: null,
+    updated_at: "2026-05-02T10:00:00Z",
+    related_event_ids: ["evt_policy_smoke"]
+  };
+  const observabilityExperiment = {
+    id: "chaos_smoke",
+    organization_id: "org_default",
+    environment_id: "env_default",
+    name: "Latency Drill",
+    fault_type: "latency",
+    target_type: "agent",
+    target_id: "agent_smoke",
+    blast_radius: { max_agents: 1 },
+    guardrails: { max_error_rate: 0.05 },
+    status: "ready",
+    created_by: "user_1",
+    created_at: "2026-05-02T10:00:00Z",
+    updated_at: "2026-05-02T10:00:00Z"
+  };
+  const observabilityRollout = {
+    id: "rollout_smoke",
+    organization_id: "org_default",
+    environment_id: "env_default",
+    name: "Claims Canary",
+    target_type: "agent",
+    target_id: "agent_smoke",
+    strategy: "canary",
+    status: "active",
+    current_stage: 5,
+    config: { stages: [5, 25, 100], gates: { require_slo_healthy: true } },
+    created_by: "user_1",
+    created_at: "2026-05-02T10:00:00Z",
+    updated_at: "2026-05-02T10:00:00Z",
+    events: [
+      {
+        id: "rollevent_smoke",
+        rollout_id: "rollout_smoke",
+        stage: 5,
+        decision: "advanced",
+        metrics: { slo_status: "healthy" },
+        created_at: "2026-05-02T10:00:00Z"
+      }
+    ]
+  };
+  await page.route("**/api/v1/observability/**", async (route) => {
+    const { pathname } = new URL(route.request().url());
+    if (pathname === "/api/v1/observability/slo") {
+      await route.fulfill({ contentType: "application/json", json: [observabilitySlo] });
+      return;
+    }
+    if (pathname === "/api/v1/observability/costs") {
+      await route.fulfill({ contentType: "application/json", json: observabilityCosts });
+      return;
+    }
+    if (pathname === "/api/v1/observability/incidents") {
+      await route.fulfill({ contentType: "application/json", json: [observabilityIncident] });
+      return;
+    }
+    if (pathname === "/api/v1/observability/chaos/experiments") {
+      await route.fulfill({ contentType: "application/json", json: [observabilityExperiment] });
+      return;
+    }
+    if (pathname === "/api/v1/observability/rollouts") {
+      await route.fulfill({ contentType: "application/json", json: [observabilityRollout] });
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", json: [] });
+  });
+
+  const integrationFramework = {
+    id: "openai_agents",
+    integration_type: "framework",
+    name: "OpenAI Agents",
+    description: "Primary demo connector.",
+    status: "primary_demo",
+    supported_versions: ["0.2.x", "0.3.x"],
+    setup_doc_url: "/docs/integrations/openai-agents",
+    example_path: "packages/agent-os/examples/openai_agents",
+    setup_snippet: "ophanix integrations init openai_agents",
+    created_at: "2026-05-02T10:00:00Z",
+    updated_at: "2026-05-02T10:00:00Z"
+  };
+  const frameworkInstance = {
+    id: "fwinst_smoke",
+    organization_id: "org_default",
+    environment_id: "env_default",
+    integration_id: "openai_agents",
+    integration_name: "OpenAI Agents",
+    name: "OpenAI demo connector",
+    config: { project: "demo-project", token: "hidden" },
+    status: "active",
+    created_by: "user_1",
+    created_at: "2026-05-02T10:10:00Z",
+    updated_at: "2026-05-02T10:10:00Z"
+  };
+  const frameworkAgent = {
+    id: "fwagent_smoke",
+    integration_instance_id: "fwinst_smoke",
+    integration_name: "OpenAI Agents",
+    agent_id: "agent_smoke",
+    agent_name: "Smoke Agent",
+    framework_agent_ref: "assistant:smoke-support",
+    sdk_version: "0.3.0",
+    telemetry_status: "unknown",
+    policy_coverage_status: "unknown",
+    linked_at: "2026-05-02T10:20:00Z",
+    updated_at: "2026-05-02T10:20:00Z"
+  };
+  const providerCredential = {
+    id: "provcred_smoke",
+    organization_id: "org_default",
+    name: "OpenAI demo key",
+    provider_type: "model_provider",
+    secret_ref: "secref_smoke",
+    masked_secret: "********",
+    status: "active",
+    created_by: "user_1",
+    created_at: "2026-05-02T10:30:00Z",
+    last_used_at: null
+  };
+  const integrationHealth = {
+    id: "inthealth_smoke",
+    organization_id: "org_default",
+    environment_id: "env_default",
+    target_type: "provider_credential",
+    target_id: "provcred_smoke",
+    status: "failed",
+    latency_ms: 12,
+    message: "Provider secret is invalid or missing.",
+    details: {},
+    checked_at: "2026-05-02T10:31:00Z"
+  };
+  await page.route("**/api/v1/integrations/**", async (route) => {
+    const { pathname } = new URL(route.request().url());
+    if (pathname === "/api/v1/integrations/frameworks") {
+      await route.fulfill({ contentType: "application/json", json: [integrationFramework] });
+      return;
+    }
+    if (pathname === "/api/v1/integrations/framework-instances") {
+      await route.fulfill({ contentType: "application/json", json: [frameworkInstance] });
+      return;
+    }
+    if (pathname === "/api/v1/integrations/framework-agents") {
+      await route.fulfill({ contentType: "application/json", json: [frameworkAgent] });
+      return;
+    }
+    if (pathname === "/api/v1/integrations/provider-credentials") {
+      await route.fulfill({ contentType: "application/json", json: [providerCredential] });
+      return;
+    }
+    if (pathname === "/api/v1/integrations/health-checks") {
+      await route.fulfill({ contentType: "application/json", json: [integrationHealth] });
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", json: [] });
+  });
+
+  const workflowDefinition = {
+    id: "policy_lint",
+    organization_id: "org_default",
+    name: "Policy Lint",
+    workflow_type: "policy",
+    command_ref: "python:policy.lint",
+    input_schema: {
+      type: "object",
+      required: ["policy_body"],
+      properties: {
+        policy_body: { type: "string", title: "Policy Body" },
+        policy_format: { type: "string", title: "Policy Format", default: "yaml" }
+      }
+    },
+    enabled: true,
+    created_at: "2026-05-02T10:00:00Z",
+    updated_at: "2026-05-02T10:00:00Z"
+  };
+  const workflowRun = {
+    id: "wrun_smoke",
+    organization_id: "org_default",
+    environment_id: "env_default",
+    workflow_definition_id: "policy_lint",
+    workflow_type: "policy",
+    command_ref: "python:policy.lint",
+    status: "queued",
+    inputs: { policy_format: "yaml" },
+    started_by: "user_1",
+    started_at: "2026-05-02T10:00:01Z",
+    finished_at: null,
+    exit_code: null,
+    summary: { passed: true, error_count: 0 },
+    created_at: "2026-05-02T10:00:00Z",
+    updated_at: "2026-05-02T10:00:02Z",
+    logs: [
+      {
+        id: "wlog_smoke",
+        workflow_run_id: "wrun_smoke",
+        stream: "stdout",
+        line_number: 1,
+        message: "policy lint passed=True errors=0",
+        created_at: "2026-05-02T10:00:02Z"
+      }
+    ]
+  };
+  const workflowArtifact = {
+    id: "art_workflow_smoke",
+    organization_id: "org_default",
+    environment_id: "env_default",
+    artifact_type: "workflow.output",
+    name: "policy-lint-output.json",
+    content_type: "application/json",
+    storage_uri: "local-artifact://org_default/env_default/art_workflow_smoke/policy-lint-output.json",
+    checksum: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+    size_bytes: 33,
+    created_by: "user_1",
+    created_at: "2026-05-02T10:00:03Z",
+    links: [
+      {
+        id: "alink_smoke",
+        artifact_id: "art_workflow_smoke",
+        target_type: "workflow_run",
+        target_id: "wrun_smoke",
+        link_type: "output",
+        created_at: "2026-05-02T10:00:03Z"
+      }
+    ],
+    attestations: [
+      {
+        id: "aat_smoke",
+        artifact_id: "art_workflow_smoke",
+        attested_by: "user_1",
+        statement: "Checksum reviewed.",
+        signature_ref: "sig-smoke",
+        created_at: "2026-05-02T10:00:04Z"
+      }
+    ]
+  };
+  const complianceArtifact = {
+    id: "art_smoke",
+    organization_id: "org_default",
+    environment_id: "env_default",
+    artifact_type: "compliance.report",
+    name: "crep_smoke.md",
+    content_type: "text/markdown",
+    storage_uri: "compliance-report://crep_smoke.md",
+    checksum: "sha256-smoke-report",
+    size_bytes: 128,
+    created_by: "user_1",
+    created_at: "2026-05-02T10:00:00Z",
+    links: [{ target_type: "compliance_report", target_id: "crep_smoke" }],
+    attestations: []
+  };
+  await page.route("**/api/v1/workflows**", async (route) => {
+    const { pathname } = new URL(route.request().url());
+    if (pathname === "/api/v1/workflows") {
+      await route.fulfill({ contentType: "application/json", json: [workflowDefinition] });
+      return;
+    }
+    if (pathname === "/api/v1/workflows/policy_lint/runs") {
+      await route.fulfill({ contentType: "application/json", json: workflowRun });
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", json: [] });
+  });
+  await page.route("**/api/v1/workflow-runs**", async (route) => {
+    const { pathname } = new URL(route.request().url());
+    await route.fulfill({
+      contentType: "application/json",
+      json: pathname.endsWith("/wrun_smoke") ? workflowRun : [workflowRun]
+    });
+  });
   await page.route("**/api/v1/agents?**", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -407,17 +846,29 @@ test("dev login and top-level navigation smoke", async ({ page }) => {
     await route.fulfill({ contentType: "application/json", json: [complianceReport] });
   });
   await page.route("**/api/v1/artifacts**", async (route) => {
+    const { pathname } = new URL(route.request().url());
+    if (pathname === "/api/v1/artifacts/art_workflow_smoke/download") {
+      await route.fulfill({
+        contentType: "application/json",
+        json: {
+          artifact: workflowArtifact,
+          content_base64: "e30=",
+          metadata: { checksum_verified: true }
+        }
+      });
+      return;
+    }
+    if (pathname === "/api/v1/artifacts/art_workflow_smoke") {
+      await route.fulfill({ contentType: "application/json", json: workflowArtifact });
+      return;
+    }
+    if (pathname === "/api/v1/artifacts/art_smoke") {
+      await route.fulfill({ contentType: "application/json", json: complianceArtifact });
+      return;
+    }
     await route.fulfill({
       contentType: "application/json",
-      json: [
-        {
-          id: "art_smoke",
-          artifact_type: "compliance.report",
-          name: "crep_smoke.md",
-          checksum: "sha256-smoke-report",
-          links: [{ target_type: "compliance_report", target_id: "crep_smoke" }]
-        }
-      ]
+      json: [workflowArtifact, complianceArtifact]
     });
   });
   await page.route("**/api/v1/trust/scores", async (route) => {
@@ -946,9 +1397,24 @@ test("dev login and top-level navigation smoke", async ({ page }) => {
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
 
-  for (const name of ["Agents", "Discovery", "Policies", "Trust", "Mesh", "Compliance", "MCP Security", "Runtime", "Demo Lab"]) {
-    await page.getByRole("link", { name }).click();
-    await expect(page.getByRole("heading", { name, exact: true })).toBeVisible();
+  const topLevelChecks = [
+    { link: "Agents", heading: "Agents" },
+    { link: "Discovery", heading: "Discovery" },
+    { link: "Policies", heading: "Policies" },
+    { link: "Trust", heading: "Trust" },
+    { link: "Mesh", heading: "Mesh" },
+    { link: "Compliance", heading: "Compliance" },
+    { link: "MCP Security", heading: "MCP Security" },
+    { link: "Runtime", heading: "Runtime" },
+    { link: "Marketplace", heading: "Marketplace Operations" },
+    { link: "Observability", heading: "Observability" },
+    { link: "Integrations", heading: "Integrations" },
+    { link: "Workflows", heading: "Workflows" },
+    { link: "Demo Lab", heading: "Demo Lab" }
+  ];
+  for (const { heading, link } of topLevelChecks) {
+    await page.getByRole("link", { name: link }).click();
+    await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible();
   }
   await page.getByRole("link", { name: "Agents" }).click();
   await expect(page.getByRole("heading", { name: "Smoke Agent" })).toBeVisible();
@@ -974,4 +1440,22 @@ test("dev login and top-level navigation smoke", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Runtime Sessions" })).toBeVisible();
   await expect(page.getByText("Refund Saga Smoke").first()).toBeVisible();
   await expect(page.getByText("Python Smoke Sandbox").first()).toBeVisible();
+  await page.getByRole("link", { name: "Marketplace" }).click();
+  await expect(page.getByRole("heading", { name: "Plugin Catalog" })).toBeVisible();
+  await expect(page.getByText("Claims Assistant").first()).toBeVisible();
+  await expect(page.getByText("Marketplace Root")).toBeVisible();
+  await page.getByRole("link", { name: "Observability" }).click();
+  await expect(page.getByRole("heading", { name: "SLO Objectives" })).toBeVisible();
+  await expect(page.getByText("Task Success")).toBeVisible();
+  await expect(page.getByText("Denial Spike")).toBeVisible();
+  await expect(page.getByText("Claims Canary")).toBeVisible();
+  await page.getByRole("link", { name: "Integrations" }).click();
+  await expect(page.getByRole("heading", { name: "Framework Catalog" })).toBeVisible();
+  await expect(page.getByText("OpenAI demo connector")).toBeVisible();
+  await expect(page.getByText("OpenAI demo key")).toBeVisible();
+  await page.getByRole("link", { name: "Workflows" }).click();
+  await expect(page.getByRole("heading", { name: "Workflow Catalog" })).toBeVisible();
+  await expect(page.getByText("Policy Lint", { exact: true })).toBeVisible();
+  await expect(page.getByText("policy lint passed=True errors=0")).toBeVisible();
+  await expect(page.getByText("policy-lint-output.json").first()).toBeVisible();
 });
