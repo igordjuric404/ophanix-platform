@@ -491,6 +491,197 @@ test("dev login and top-level navigation smoke", async ({ page }) => {
       json: pathname.endsWith("/wrun_smoke") ? workflowRun : [workflowRun]
     });
   });
+
+  const demoScenario = {
+    id: "demo_scenario_customer_support_refund",
+    organization_id: "org_default",
+    environment_id: "env_default",
+    name: "Customer Support Refund Governance",
+    slug: "customer-support-refund",
+    description: "Governed refund demo.",
+    value_proof: "Shows policy, runtime, and evidence.",
+    status: "published",
+    required_services: [
+      {
+        key: "product-api",
+        label: "Product API",
+        required: true,
+        health_endpoint: "/health",
+        evidence_route: "/overview"
+      },
+      {
+        key: "sample-mcp-server",
+        label: "Sample MCP server",
+        required: true,
+        health_endpoint: "/mcp/health",
+        evidence_route: "/mcp"
+      }
+    ],
+    created_at: "2026-05-02T10:00:00Z",
+    updated_at: "2026-05-02T10:00:00Z"
+  };
+  const demoStep = {
+    id: "demo_step_refund_import_policies",
+    scenario_id: "demo_scenario_customer_support_refund",
+    step_order: 1,
+    title: "Import refund policy pack",
+    expected_result: "Refund limit and sensitive-tool policies are active.",
+    action_type: "import_policies",
+    action_config: {},
+    proof_links: [
+      {
+        area: "Policies",
+        label: "Policy library",
+        route: "/policies?policy_slug=refund-limit",
+        resource_hint: "refund-limit"
+      }
+    ],
+    created_at: "2026-05-02T10:00:00Z",
+    updated_at: "2026-05-02T10:00:00Z"
+  };
+  const demoRun = {
+    id: "demo_run_smoke",
+    organization_id: "org_default",
+    environment_id: "env_default",
+    scenario_id: "demo_scenario_customer_support_refund",
+    status: "running",
+    started_by: "user_1",
+    started_at: "2026-05-02T10:00:00Z",
+    finished_at: null,
+    summary: { completed_steps: 1, total_steps: 2 },
+    created_at: "2026-05-02T10:00:00Z",
+    updated_at: "2026-05-02T10:00:01Z",
+    scenario: demoScenario,
+    step_runs: [
+      {
+        id: "demo_step_run_smoke",
+        demo_run_id: "demo_run_smoke",
+        demo_step_id: "demo_step_refund_import_policies",
+        status: "succeeded",
+        result: { imported: 2 },
+        started_at: "2026-05-02T10:00:00Z",
+        finished_at: "2026-05-02T10:00:01Z",
+        created_at: "2026-05-02T10:00:00Z",
+        updated_at: "2026-05-02T10:00:01Z",
+        step: demoStep,
+        actual_result: "Imported 2 active demo policies.",
+        evidence_links: [
+          {
+            area: "Policies",
+            label: "Policy library",
+            route: "/policies?policy_slug=refund-limit&correlation_id=corr-demo",
+            resource_id: "policy_refund",
+            correlation_id: "corr-demo"
+          }
+        ],
+        proof_checklist: [
+          {
+            area: "Policies",
+            label: "Policy library",
+            status: "completed",
+            route: "/policies?policy_slug=refund-limit&correlation_id=corr-demo",
+            expected_result: "Refund limit and sensitive-tool policies are active.",
+            actual_result: "Imported 2 active demo policies."
+          }
+        ]
+      }
+    ]
+  };
+  const demoResetRun = {
+    id: "demo_reset_smoke",
+    organization_id: "org_default",
+    environment_id: "env_default",
+    status: "succeeded",
+    requested_by: "user_1",
+    started_at: "2026-05-02T10:05:00Z",
+    finished_at: "2026-05-02T10:05:01Z",
+    summary: {
+      cleared: { demo_runs: 1, demo_step_runs: 9, demo_lab_audit_events: 10 },
+      seeded: { policy_placeholders: 2, demo_scenarios: 1, demo_steps: 9 }
+    },
+    created_at: "2026-05-02T10:05:00Z",
+    updated_at: "2026-05-02T10:05:01Z"
+  };
+  const demoBaselineStatus = {
+    organization_id: "org_default",
+    environment_id: "env_default",
+    overall_status: "degraded",
+    checked_at: "2026-05-02T10:00:00Z",
+    checks: [
+      {
+        key: "policy-pack",
+        label: "Seed policy pack",
+        status: "healthy",
+        required: true,
+        detail: "Required demo policy placeholders are loaded.",
+        count: 2,
+        expected_count: 2,
+        missing: []
+      },
+      {
+        key: "mcp-server",
+        label: "Sample MCP server",
+        status: "degraded",
+        required: true,
+        detail: "Sample refund MCP server is missing.",
+        count: 0,
+        expected_count: 1,
+        missing: ["mcp_demo_refund"]
+      }
+    ],
+    missing_items: ["mcp_demo_refund"]
+  };
+  await page.route("**/api/v1/demo/**", async (route) => {
+    const { pathname } = new URL(route.request().url());
+    const method = route.request().method();
+    if (pathname === "/api/v1/demo/scenarios" && method === "GET") {
+      await route.fulfill({ contentType: "application/json", json: [demoScenario] });
+      return;
+    }
+    if (pathname === "/api/v1/demo/scenarios/demo_scenario_customer_support_refund" && method === "GET") {
+      await route.fulfill({
+        contentType: "application/json",
+        json: { ...demoScenario, steps: [demoStep] }
+      });
+      return;
+    }
+    if (pathname === "/api/v1/demo/scenarios/demo_scenario_customer_support_refund/runs" && method === "POST") {
+      await route.fulfill({ contentType: "application/json", json: demoRun, status: 201 });
+      return;
+    }
+    if (pathname === "/api/v1/demo/runs/demo_run_smoke" && method === "GET") {
+      await route.fulfill({ contentType: "application/json", json: demoRun });
+      return;
+    }
+    if (pathname === "/api/v1/demo/runs/demo_run_smoke/continue" && method === "POST") {
+      await route.fulfill({
+        contentType: "application/json",
+        json: { ...demoRun, summary: { completed_steps: 2, total_steps: 2 } }
+      });
+      return;
+    }
+    if (pathname === "/api/v1/demo/runs/demo_run_smoke/cancel" && method === "POST") {
+      await route.fulfill({ contentType: "application/json", json: { ...demoRun, status: "canceled" } });
+      return;
+    }
+    if (pathname === "/api/v1/demo/reset" && method === "POST") {
+      await route.fulfill({ contentType: "application/json", json: demoResetRun, status: 201 });
+      return;
+    }
+    if (pathname === "/api/v1/demo/reset-runs") {
+      await route.fulfill({ contentType: "application/json", json: [demoResetRun] });
+      return;
+    }
+    if (pathname === "/api/v1/demo/reset-runs/demo_reset_smoke") {
+      await route.fulfill({ contentType: "application/json", json: demoResetRun });
+      return;
+    }
+    if (pathname === "/api/v1/demo/baseline-status") {
+      await route.fulfill({ contentType: "application/json", json: demoBaselineStatus });
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", json: [] });
+  });
   await page.route("**/api/v1/agents?**", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -1458,4 +1649,14 @@ test("dev login and top-level navigation smoke", async ({ page }) => {
   await expect(page.getByText("Policy Lint", { exact: true })).toBeVisible();
   await expect(page.getByText("policy lint passed=True errors=0")).toBeVisible();
   await expect(page.getByText("policy-lint-output.json").first()).toBeVisible();
+  await page.getByRole("link", { name: "Demo Lab" }).click();
+  await expect(page.getByRole("heading", { name: "Scenario Catalog" })).toBeVisible();
+  await expect(page.getByText("Customer Support Refund Governance").first()).toBeVisible();
+  await expect(page.getByText("Sample refund MCP server is missing.")).toBeVisible();
+  await page.getByRole("button", { name: /Start Scenario/ }).click();
+  await expect(page.getByText("Demo scenario started")).toBeVisible();
+  await expect(page.getByText("Imported 2 active demo policies.").first()).toBeVisible();
+  await page.getByLabel("Confirmation").fill("RESET");
+  await page.getByRole("button", { name: /Reset Demo/ }).click();
+  await expect(page.getByText("Demo environment reset")).toBeVisible();
 });

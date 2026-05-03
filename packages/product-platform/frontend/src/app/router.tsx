@@ -12,6 +12,7 @@ import { RequireAuth } from "../components/auth/RequireAuth";
 import { AppShell } from "../components/layout/AppShell";
 import { AgentsPage } from "../features/agents/AgentsPage";
 import { CompliancePage } from "../features/compliance/CompliancePage";
+import { DemoLabPage } from "../features/demo/DemoLabPage";
 import { DiscoveryPage } from "../features/discovery/DiscoveryPage";
 import { IntegrationsPage } from "../features/integrations/IntegrationsPage";
 import { MeshPage } from "../features/mesh/MeshPage";
@@ -159,6 +160,12 @@ const workflowsRoute = createRoute({
   component: WorkflowsPage
 });
 
+const demoLabRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: "/demo-lab",
+  component: DemoLabPage
+});
+
 const featureRoutes = routeRegistry
   .filter(
     (route) =>
@@ -174,7 +181,8 @@ const featureRoutes = routeRegistry
       route.path !== "/marketplace" &&
       route.path !== "/observability" &&
       route.path !== "/integrations" &&
-      route.path !== "/workflows"
+      route.path !== "/workflows" &&
+      route.path !== "/demo-lab"
   )
   .map((route) =>
     createRoute({
@@ -207,6 +215,7 @@ const routeTree = rootRoute.addChildren([
     observabilityRoute,
     integrationsRoute,
     workflowsRoute,
+    demoLabRoute,
     ...featureRoutes
   ])
 ]);
