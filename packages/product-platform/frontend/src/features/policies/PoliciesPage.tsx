@@ -6,10 +6,28 @@ import {
   Play,
   Radio,
   RotateCcw,
-  Upload
+  Upload,
+  X
 } from "lucide-react";
-import { useEffect, useMemo, useState, type FormEvent, type InputHTMLAttributes } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+  type InputHTMLAttributes
+} from "react";
 import { useQuery } from "@tanstack/react-query";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Line,
+  LineChart,
+  Tooltip,
+  XAxis,
+  YAxis
+} from "recharts";
 
 import { useAgents, type AgentSummary } from "../../api/agents";
 import {
@@ -22,7 +40,6 @@ import {
   importPolicy,
   lintPolicy,
   lintPolicyVersion,
-  policyEvaluationStreamUrl,
   promotePolicyBinding,
   rollbackPolicyVersion,
   savePolicyDraftVersion,
@@ -65,6 +82,7 @@ import {
   TableHeader,
   TableRow
 } from "../../components/ui/table";
+import { useEventStream } from "../../lib/eventSource";
 import { readSelectedEnvironmentId } from "../../lib/storage";
 import { cn } from "../../lib/utils";
 
@@ -107,6 +125,26 @@ export function PoliciesPage() {
   const environmentsQuery = useEnvironments();
   const evaluationsQuery = usePolicyEvaluations(evaluationFilters);
   const summaryQuery = usePolicyEvaluationSummary(evaluationFilters);
+  const evaluationStreamParams = useMemo(
+    () => withSelectedEnvironment(evaluationFilters),
+    [evaluationFilters]
+  );
+  const evaluationStreamQueryKeys = useMemo<unknown[][]>(
+    () => [
+      ["policies", "evaluations", evaluationFilters],
+      ["policies", "evaluations", "summary", evaluationFilters]
+    ],
+    [evaluationFilters]
+  );
+  const handlePolicyEvaluationStreamMessage = useCallback(
+    (event: MessageEvent) => {
+      const evaluation = parsePolicyEvaluationStreamEvent(event);
+      if (evaluation && policyEvaluationMatchesFilters(evaluation, evaluationFilters)) {
+        setExtraEvaluationRows((rows) => upsertPolicyEvaluationFeed(rows, evaluation));
+      }
+    },
+    [evaluationFilters]
+  );
   const selectedEvaluationQuery = useQuery({
     enabled: Boolean(selectedEvaluationId),
     queryKey: ["policies", "evaluations", selectedEvaluationId],
@@ -124,24 +162,13 @@ export function PoliciesPage() {
     );
   }, [evaluationFilters, evaluationsQuery.data, extraEvaluationRows]);
 
-  useEffect(() => {
-    if (typeof window.EventSource !== "function") {
-      return undefined;
-    }
-    const params = withSelectedEnvironment(evaluationFilters);
-    const source = new window.EventSource(policyEvaluationStreamUrl(params));
-    const listener = (event: MessageEvent) => {
-      const evaluation = parsePolicyEvaluationStreamEvent(event);
-      if (evaluation && policyEvaluationMatchesFilters(evaluation, evaluationFilters)) {
-        setExtraEvaluationRows((rows) => upsertPolicyEvaluationFeed(rows, evaluation));
-      }
-    };
-    source.addEventListener("policy_evaluation", listener);
-    return () => {
-      source.removeEventListener("policy_evaluation", listener);
-      source.close();
-    };
-  }, [evaluationFilters]);
+  useEventStream({
+    eventName: "policy_evaluation",
+    onMessage: handlePolicyEvaluationStreamMessage,
+    params: evaluationStreamParams,
+    path: "/policy-evaluations/stream",
+    queryKeysToInvalidate: evaluationStreamQueryKeys
+  });
 
   function selectPolicy(policyId: string) {
     setSelectedPolicyId(policyId);
@@ -285,6 +312,7 @@ export function PoliciesPage() {
             evaluations={evaluationRows}
             filters={evaluationFilters}
             onFilter={setEvaluationFilters}
+            onClose={() => setSelectedEvaluationId(null)}
             onOpen={setSelectedEvaluationId}
             selectedEvaluation={
               selectedEvaluationQuery.data ??
@@ -1048,6 +1076,7 @@ function PolicyEvaluationFeed({
   evaluations,
   filters,
   onFilter,
+  onClose,
   onOpen,
   selectedEvaluation,
   summary
@@ -1055,6 +1084,7 @@ function PolicyEvaluationFeed({
   evaluations: PolicyEvaluation[];
   filters: PolicyParams;
   onFilter: (params: PolicyParams) => void;
+  onClose: () => void;
   onOpen: (evaluationId: string) => void;
   selectedEvaluation: PolicyEvaluation | null;
   summary: PolicyEvaluationSummary | null;
@@ -1129,7 +1159,7 @@ function PolicyEvaluationFeed({
         ) : (
           <EmptyState description="Run the simulator or adjust filters." title="No decisions" />
         )}
-        {selectedEvaluation ? <PolicyEvaluationDetail evaluation={selectedEvaluation} /> : null}
+        <PolicyEvaluationDetailDrawer evaluation={selectedEvaluation} onClose={onClose} />
       </CardContent>
     </Card>
   );
@@ -1144,38 +1174,210 @@ function PolicyEvaluationSummaryPanel({ summary }: { summary: PolicyEvaluationSu
         <Metric label="Modes" value={inlineCountMap(summary?.mode_counts)} />
         <Metric label="Actions" value={inlineCountMap(summary?.action_counts)} />
       </div>
-      <div className="mt-3 grid gap-2 md:grid-cols-3" data-policy-evaluation-trends>
-        {(summary?.time_buckets ?? []).map((bucket) => (
-          <div className="rounded-md bg-muted p-3 text-sm" data-policy-evaluation-trend={bucket.bucket} key={bucket.bucket}>
-            <strong>{bucket.bucket}</strong>
-            <span className="block text-muted-foreground">{bucket.total_count ?? 0} decisions</span>
-            <small>{inlineCountMap(bucket.decision_counts)}</small>
-          </div>
-        ))}
+      <div className="mt-4 grid gap-4 xl:grid-cols-2">
+        <PolicyDecisionTrendChart summary={summary} />
+        <PolicyActionDistributionChart summary={summary} />
       </div>
     </section>
   );
 }
 
-function PolicyEvaluationDetail({ evaluation }: { evaluation: PolicyEvaluation }) {
+function PolicyDecisionTrendChart({ summary }: { summary: PolicyEvaluationSummary | null }) {
+  const rows = decisionTrendRows(summary);
+
   return (
-    <section className="rounded-md border p-3" data-policy-evaluation-detail={evaluation.id}>
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="font-semibold">
-          {evaluation.decision} - {evaluation.action}
-        </h3>
-        <Badge tone="muted">{evaluation.backend ?? "native"}</Badge>
-      </div>
-      <dl className="mt-3 grid gap-3 text-sm md:grid-cols-2">
-        <KeyValue label="Reason" value={evaluation.reason ?? "n/a"} />
-        <KeyValue label="Policy" value={evaluation.policy_id ?? "unbound"} />
-        <KeyValue label="Version" value={evaluation.policy_version_id ?? "n/a"} />
-        <KeyValue label="Resource" value={`${evaluation.resource_type ?? "n/a"} / ${evaluation.resource_id ?? "n/a"}`} />
-      </dl>
-      <pre className="mt-3 max-h-48 overflow-auto rounded-md bg-muted p-3 text-xs">
-        {JSON.stringify(evaluation.context ?? {}, null, 2)}
-      </pre>
-    </section>
+    <div className="rounded-md border bg-muted/20 p-4" data-policy-evaluation-trends>
+      <div className="text-sm font-medium">Decision Trend</div>
+      <p className="text-xs text-muted-foreground">Allow and deny decisions over summary buckets.</p>
+      {rows.length === 0 ? (
+        <div className="mt-4">
+          <EmptyState title="No decision trend" description="Run evaluations to populate trend buckets." />
+        </div>
+      ) : (
+        <>
+          <div className="mt-4 overflow-x-auto">
+            <LineChart
+              accessibilityLayer
+              data={rows}
+              height={220}
+              margin={{ bottom: 8, left: 0, right: 16, top: 8 }}
+              width={540}
+            >
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="bucket" tickLine={false} />
+              <YAxis allowDecimals={false} tickLine={false} />
+              <Tooltip />
+              <Line
+                dataKey="allow"
+                dot={{ r: 3 }}
+                isAnimationActive={false}
+                name="Allow"
+                stroke="#16a34a"
+                strokeWidth={2}
+                type="monotone"
+              />
+              <Line
+                dataKey="deny"
+                dot={{ r: 3 }}
+                isAnimationActive={false}
+                name="Deny"
+                stroke="#dc2626"
+                strokeWidth={2}
+                type="monotone"
+              />
+            </LineChart>
+          </div>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Bucket</TableHead>
+                <TableHead>Total</TableHead>
+                <TableHead>Allow</TableHead>
+                <TableHead>Deny</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((row) => (
+                <TableRow data-policy-evaluation-trend={row.bucket} key={row.bucket}>
+                  <TableCell>{row.bucket}</TableCell>
+                  <TableCell>{row.total}</TableCell>
+                  <TableCell>{row.allow}</TableCell>
+                  <TableCell>{row.deny}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </>
+      )}
+    </div>
+  );
+}
+
+function PolicyActionDistributionChart({ summary }: { summary: PolicyEvaluationSummary | null }) {
+  const rows = actionDistributionRows(summary);
+
+  return (
+    <div className="rounded-md border bg-muted/20 p-4" data-policy-evaluation-action-chart>
+      <div className="text-sm font-medium">Action Distribution</div>
+      <p className="text-xs text-muted-foreground">Evaluation volume by governed action.</p>
+      {rows.length === 0 ? (
+        <div className="mt-4">
+          <EmptyState title="No action counts" description="Action counts appear after evaluations run." />
+        </div>
+      ) : (
+        <>
+          <div className="mt-4 overflow-x-auto">
+            <BarChart
+              accessibilityLayer
+              data={rows}
+              height={220}
+              margin={{ bottom: 28, left: 0, right: 16, top: 8 }}
+              width={540}
+            >
+              <CartesianGrid strokeDasharray="3 3" vertical={false} />
+              <XAxis angle={-18} dataKey="action" height={56} interval={0} textAnchor="end" tickLine={false} />
+              <YAxis allowDecimals={false} tickLine={false} />
+              <Tooltip />
+              <Bar dataKey="count" fill="#2563eb" isAnimationActive={false} name="Evaluations" radius={[4, 4, 0, 0]} />
+            </BarChart>
+          </div>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Action</TableHead>
+                <TableHead>Evaluations</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((row) => (
+                <TableRow key={row.action}>
+                  <TableCell>{row.action}</TableCell>
+                  <TableCell>{row.count}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </>
+      )}
+    </div>
+  );
+}
+
+function PolicyEvaluationDetailDrawer({
+  evaluation,
+  onClose
+}: {
+  evaluation: PolicyEvaluation | null;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    if (!evaluation) {
+      return undefined;
+    }
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [evaluation, onClose]);
+
+  if (!evaluation) {
+    return null;
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex justify-end bg-background/60 backdrop-blur-sm"
+      data-policy-evaluation-detail={evaluation.id}
+      onClick={onClose}
+    >
+      <section
+        aria-label={`Policy evaluation ${evaluation.id}`}
+        aria-modal="true"
+        className="h-full w-full max-w-xl overflow-y-auto border-l bg-background p-6 shadow-xl"
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+      >
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h3 className="text-lg font-semibold">
+              {evaluation.decision} - {evaluation.action}
+            </h3>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {evaluation.correlation_id ?? "No correlation id"}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Badge tone="muted">{evaluation.backend ?? "native"}</Badge>
+            <Button
+              aria-label="Close policy evaluation detail"
+              onClick={onClose}
+              type="button"
+              variant="ghost"
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
+        <dl className="mt-5 grid gap-3 text-sm md:grid-cols-2">
+          <KeyValue label="Reason" value={evaluation.reason ?? "n/a"} />
+          <KeyValue label="Policy" value={evaluation.policy_id ?? "unbound"} />
+          <KeyValue label="Version" value={evaluation.policy_version_id ?? "n/a"} />
+          <KeyValue label="Matched Rule" value={evaluation.matched_rule ?? "default"} />
+          <KeyValue label="Resource" value={`${evaluation.resource_type ?? "n/a"} / ${evaluation.resource_id ?? "n/a"}`} />
+          <KeyValue label="Latency" value={`${evaluation.latency_ms ?? 0}ms`} />
+        </dl>
+        <div className="mt-5">
+          <div className="text-sm font-medium">Context Payload</div>
+          <pre className="mt-2 max-h-72 overflow-auto rounded-md bg-muted p-3 text-xs">
+            {JSON.stringify(evaluation.context ?? {}, null, 2)}
+          </pre>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -1349,6 +1551,22 @@ function targetLabel(binding: PolicyBinding, agents: AgentSummary[], environment
     return environments.find((environment) => environment.id === binding.target_id)?.name ?? binding.target_id;
   }
   return binding.target_id;
+}
+
+function decisionTrendRows(summary: PolicyEvaluationSummary | null) {
+  return (summary?.time_buckets ?? []).map((bucket) => ({
+    allow: bucket.decision_counts?.allow ?? 0,
+    bucket: bucket.bucket,
+    deny: bucket.decision_counts?.deny ?? 0,
+    total: bucket.total_count ?? 0
+  }));
+}
+
+function actionDistributionRows(summary: PolicyEvaluationSummary | null) {
+  return Object.entries(summary?.action_counts ?? {})
+    .map(([action, count]) => ({ action, count }))
+    .filter((row) => row.count > 0)
+    .sort((left, right) => right.count - left.count || left.action.localeCompare(right.action));
 }
 
 function inlineCountMap(counts?: Record<string, number>) {

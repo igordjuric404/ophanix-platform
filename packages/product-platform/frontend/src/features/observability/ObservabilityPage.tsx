@@ -1,5 +1,15 @@
 import { Activity, AlertTriangle, CircleDollarSign, FlaskConical, Gauge } from "lucide-react";
 import { useState, type ReactNode } from "react";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Line,
+  LineChart,
+  Tooltip,
+  XAxis,
+  YAxis
+} from "recharts";
 
 import {
   acknowledgeObservabilityIncident,
@@ -213,6 +223,9 @@ function SloPanel({
   onMeasure: (sloId: string, payload: Record<string, unknown>) => void;
   slos: SloObjective[];
 }) {
+  const [selectedSloId, setSelectedSloId] = useState<string | null>(null);
+  const selectedSlo = slos.find((slo) => slo.id === selectedSloId) ?? slos[0] ?? null;
+
   return (
     <Card>
       <CardHeader>
@@ -237,6 +250,7 @@ function SloPanel({
             <Button type="submit">Create SLO</Button>
           </div>
         </form>
+        <SloTrendCard slo={selectedSlo} />
         {slos.length === 0 ? (
           <EmptyState title="No SLOs" description="Create an objective and record measurements." />
         ) : (
@@ -248,6 +262,7 @@ function SloPanel({
                 <TableHead>Status</TableHead>
                 <TableHead>Burn</TableHead>
                 <TableHead>Measure</TableHead>
+                <TableHead>Trend</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -277,6 +292,15 @@ function SloPanel({
                         </Button>
                       </form>
                     </TableCell>
+                    <TableCell>
+                      <Button
+                        onClick={() => setSelectedSloId(slo.id)}
+                        type="button"
+                        variant={selectedSlo?.id === slo.id ? "default" : "outline"}
+                      >
+                        View Trend
+                      </Button>
+                    </TableCell>
                   </TableRow>
                 );
               })}
@@ -285,6 +309,106 @@ function SloPanel({
         )}
       </CardContent>
     </Card>
+  );
+}
+
+function SloTrendCard({ slo }: { slo: SloObjective | null }) {
+  const trend = slo ? sloTrendData(slo) : [];
+  const hasChart = trend.length > 1;
+
+  return (
+    <div className="rounded-md border bg-muted/20 p-4" data-observability-slo-trend>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-medium">SLO Trend</div>
+          <p className="text-xs text-muted-foreground">
+            {slo
+              ? `${slo.name} value, target, and burn rate over recent measurements.`
+              : "Select or create an SLO to inspect its measurement trend."}
+          </p>
+        </div>
+        {slo ? <StatusBadge status={slo.status} /> : null}
+      </div>
+      {!slo ? (
+        <EmptyState title="No SLO selected" description="Create an objective before charting measurements." />
+      ) : !hasChart ? (
+        <div className="mt-4">
+          <EmptyState
+            title="SLO trend unavailable"
+            description="Record at least two measurements to draw a trend chart."
+          />
+        </div>
+      ) : (
+        <div className="mt-4 overflow-x-auto">
+          <LineChart
+            accessibilityLayer
+            data={trend}
+            height={220}
+            margin={{ bottom: 8, left: 0, right: 16, top: 8 }}
+            width={560}
+          >
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="label" tickLine={false} />
+            <YAxis tickLine={false} />
+            <Tooltip formatter={(value, name) => [`${value}`, name]} />
+            <Line
+              dataKey="valuePercent"
+              dot={{ r: 3 }}
+              isAnimationActive={false}
+              name="Value %"
+              stroke="#2563eb"
+              strokeWidth={2}
+              type="monotone"
+            />
+            <Line
+              dataKey="targetPercent"
+              dot={false}
+              isAnimationActive={false}
+              name="Target %"
+              stroke="#16a34a"
+              strokeDasharray="4 4"
+              strokeWidth={2}
+              type="monotone"
+            />
+            <Line
+              dataKey="burnRate"
+              dot={{ r: 3 }}
+              isAnimationActive={false}
+              name="Burn rate"
+              stroke="#f97316"
+              strokeWidth={2}
+              type="monotone"
+            />
+          </LineChart>
+        </div>
+      )}
+      {trend.length > 0 ? (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Measured</TableHead>
+              <TableHead>Value</TableHead>
+              <TableHead>Target</TableHead>
+              <TableHead>Burn</TableHead>
+              <TableHead>Status</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {trend.map((point) => (
+              <TableRow key={point.id}>
+                <TableCell>{point.label}</TableCell>
+                <TableCell>{point.valuePercent.toFixed(2)}%</TableCell>
+                <TableCell>{point.targetPercent.toFixed(2)}%</TableCell>
+                <TableCell>{point.burnRate.toFixed(2)}</TableCell>
+                <TableCell>
+                  <StatusBadge status={point.status} />
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      ) : null}
+    </div>
   );
 }
 
@@ -337,14 +461,7 @@ function CostPanel({
             <Button type="submit">Record Cost</Button>
           </form>
         </div>
-        <div className="grid gap-3 md:grid-cols-3" data-observability-cost-chart>
-          {Object.entries(costs.by_provider).map(([provider, amount]) => (
-            <Metric key={provider} label={provider} value={formatMoney(amount)} />
-          ))}
-          {Object.entries(costs.by_model).map(([model, amount]) => (
-            <Metric key={model} label={model} value={formatMoney(amount)} />
-          ))}
-        </div>
+        <CostDistributionChart costs={costs} />
         {costs.budgets.length === 0 ? (
           <EmptyState title="No budgets" description="Cost controls appear after a budget is created." />
         ) : (
@@ -375,6 +492,68 @@ function CostPanel({
         )}
       </CardContent>
     </Card>
+  );
+}
+
+function CostDistributionChart({ costs }: { costs: CostDashboard }) {
+  const rows = costDistributionRows(costs);
+
+  return (
+    <div className="rounded-md border bg-muted/20 p-4" data-observability-cost-chart>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-medium">Cost Distribution</div>
+          <p className="text-xs text-muted-foreground">
+            Spend grouped by provider, model, and governed target.
+          </p>
+        </div>
+        <div className="text-sm font-semibold">{formatMoney(costs.total_amount)}</div>
+      </div>
+      {rows.length === 0 ? (
+        <div className="mt-4">
+          <EmptyState
+            title="No cost events"
+            description="Record cost events to chart provider, model, and target spend."
+          />
+        </div>
+      ) : (
+        <>
+          <div className="mt-4 overflow-x-auto">
+            <BarChart
+              accessibilityLayer
+              data={rows}
+              height={240}
+              margin={{ bottom: 28, left: 0, right: 16, top: 8 }}
+              width={620}
+            >
+              <CartesianGrid strokeDasharray="3 3" vertical={false} />
+              <XAxis angle={-18} dataKey="label" height={56} interval={0} textAnchor="end" tickLine={false} />
+              <YAxis tickFormatter={(value) => `$${value}`} tickLine={false} />
+              <Tooltip formatter={(value) => [formatMoney(Number(value)), "Spend"]} />
+              <Bar dataKey="amount" fill="#2563eb" isAnimationActive={false} name="Spend" radius={[4, 4, 0, 0]} />
+            </BarChart>
+          </div>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Group</TableHead>
+                <TableHead>Name</TableHead>
+                <TableHead>Spend</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((row) => (
+                <TableRow key={`${row.group}-${row.name}`}>
+                  <TableCell>{row.group}</TableCell>
+                  <TableCell>{row.name}</TableCell>
+                  <TableCell>{formatMoney(row.amount)}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -1016,6 +1195,56 @@ function cleanParams(form: FormData, keys: string[]) {
 
 function formatMoney(value: number) {
   return `$${Number(value ?? 0).toFixed(2)}`;
+}
+
+function costDistributionRows(costs: CostDashboard) {
+  return [
+    ...Object.entries(costs.by_provider).map(([name, amount]) => ({
+      amount,
+      group: "Provider",
+      label: `Provider: ${name}`,
+      name
+    })),
+    ...Object.entries(costs.by_model).map(([name, amount]) => ({
+      amount,
+      group: "Model",
+      label: `Model: ${name}`,
+      name
+    })),
+    ...Object.entries(costs.by_target).map(([name, amount]) => ({
+      amount,
+      group: "Target",
+      label: `Target: ${name}`,
+      name
+    }))
+  ]
+    .filter((row) => row.amount > 0)
+    .sort((left, right) => right.amount - left.amount || left.label.localeCompare(right.label));
+}
+
+function sloTrendData(slo: SloObjective) {
+  return [...slo.measurements]
+    .sort((left, right) => left.measured_at.localeCompare(right.measured_at))
+    .map((measurement) => ({
+      id: measurement.id,
+      label: formatShortDate(measurement.measured_at),
+      status: measurement.status,
+      valuePercent: percentage(measurement.value),
+      targetPercent: percentage(slo.target_value),
+      burnRate: measurement.burn_rate
+    }));
+}
+
+function percentage(value: number) {
+  return Number((Number(value ?? 0) * 100).toFixed(2));
+}
+
+function formatShortDate(value: string) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
 function numberValue(value: unknown) {

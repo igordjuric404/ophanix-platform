@@ -22,6 +22,23 @@ describe("SystemStatusIndicator", () => {
     expect(screen.getByText("API build: test-sha")).toBeInTheDocument();
     expect(screen.getByText("worker")).toBeInTheDocument();
   });
+
+  it("renders a warning when status endpoints cannot be loaded", async () => {
+    vi.stubGlobal(
+      "fetch",
+      async () =>
+        new Response(JSON.stringify({ detail: "status unavailable" }), {
+          headers: { "Content-Type": "application/json" },
+          status: 503
+        })
+    );
+
+    renderWithQueryClient(<SystemStatusIndicator />);
+
+    expect(await screen.findByText("Warning")).toBeInTheDocument();
+    expect(screen.getByText("System status could not be fully loaded.")).toBeInTheDocument();
+    expect(screen.getByText("API build: unknown")).toBeInTheDocument();
+  });
 });
 
 function json(body: unknown) {
@@ -32,4 +49,3 @@ function json(body: unknown) {
     })
   );
 }
-

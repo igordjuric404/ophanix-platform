@@ -10,7 +10,6 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "test:legacy": "node --test test/*.test.js",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "format": "prettier --check .",

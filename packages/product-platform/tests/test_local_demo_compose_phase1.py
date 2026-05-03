@@ -38,6 +38,16 @@ class LocalDemoComposePhase1Tests(unittest.TestCase):
             self.assertIn(service, result.stdout)
         self.assertIn("healthcheck:", result.stdout)
 
+    def test_demo_dockerfile_installs_runtime_sibling_packages(self) -> None:
+        dockerfile = (PACKAGE_DIR / "Dockerfile.demo").read_text()
+
+        self.assertIn("COPY packages/agent-mesh/pyproject.toml", dockerfile)
+        self.assertIn("COPY packages/agent-discovery/pyproject.toml", dockerfile)
+        self.assertIn("packages/product-platform/README.md", dockerfile)
+        self.assertIn("python -m pip install ./packages/agent-mesh", dockerfile)
+        self.assertIn("python -m pip install ./packages/agent-discovery", dockerfile)
+        self.assertIn("python -m pip install -e ./packages/product-platform", dockerfile)
+
     def test_api_health_and_ready_report_compose_dependencies(self) -> None:
         database = create_migrated_test_database()
         app = create_app(

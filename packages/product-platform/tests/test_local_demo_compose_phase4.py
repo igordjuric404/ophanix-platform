@@ -28,11 +28,14 @@ class LocalDemoComposePhase4Tests(unittest.TestCase):
         script = (PACKAGE_DIR / "deploy/local-demo-smoke.sh").read_text()
 
         self.assertIn("docker compose --env-file $ENV_FILE -f docker-compose.demo.yml", script)
+        self.assertIn('PYTHON_BIN="${PYTHON:-python3}"', script)
+        self.assertIn('command -v "$PYTHON_BIN"', script)
         self.assertIn("up --build --wait", script)
         self.assertIn("/ready", script)
         self.assertIn("/api/v1/demo/reset", script)
         self.assertIn("/api/v1/demo/baseline-status", script)
         self.assertIn("/api/v1/demo/scenarios/customer-support-refund/runs", script)
+        self.assertIn('run["scenario"]["slug"] == "customer-support-refund"', script)
         self.assertIn("down", script)
 
 

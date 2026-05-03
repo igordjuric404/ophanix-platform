@@ -6,10 +6,13 @@ PACKAGE_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
 ENV_FILE="${ENV_FILE:-.env.example}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-180}"
 API_BASE="${API_BASE:-http://127.0.0.1:8088}"
+PYTHON_BIN="${PYTHON:-python3}"
 COMPOSE="docker compose --env-file $ENV_FILE -f docker-compose.demo.yml"
 
 cd "$PACKAGE_DIR"
 docker info >/dev/null
+
+command -v "$PYTHON_BIN" >/dev/null
 
 $COMPOSE up --build --wait --wait-timeout "$WAIT_TIMEOUT"
 
@@ -18,7 +21,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-python - "$API_BASE" <<'PY'
+"$PYTHON_BIN" - "$API_BASE" <<'PY'
 from __future__ import annotations
 
 import json
@@ -69,7 +72,7 @@ run_status, run = request(
     token=token,
 )
 assert run_status == 201, run
-assert run["scenario_id"] == "customer-support-refund", run
+assert run["scenario"]["slug"] == "customer-support-refund", run
 
 print("Local demo compose smoke checks passed.")
 PY

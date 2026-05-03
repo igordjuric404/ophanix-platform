@@ -2,7 +2,7 @@
 set -eu
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)"
+REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../../../.." && pwd)"
 API_IMAGE="${API_IMAGE:-ophanix-product-api:smoke}"
 WORKER_IMAGE="${WORKER_IMAGE:-ophanix-product-worker:smoke}"
 FRONTEND_IMAGE="${FRONTEND_IMAGE:-ophanix-product-frontend:smoke}"

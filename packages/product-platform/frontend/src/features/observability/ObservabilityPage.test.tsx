@@ -25,6 +25,18 @@ const slo = {
     {
       id: "slomeas_1",
       slo_id: "slo_1",
+      value: 0.98,
+      good_events: 98,
+      total_events: 100,
+      error_budget_remaining: 0.9,
+      burn_rate: 0.1,
+      status: "healthy",
+      metadata: { source: "test" },
+      measured_at: "2026-05-02T00:00:00Z"
+    },
+    {
+      id: "slomeas_0",
+      slo_id: "slo_1",
       value: 0.97,
       good_events: 97,
       total_events: 100,
@@ -75,6 +87,15 @@ const costs = {
   by_target: { agent_1: 12.5 },
   by_provider: { openai: 12.5 },
   by_model: { gpt: 12.5 }
+};
+
+const emptyCosts = {
+  budgets: [],
+  events: [],
+  total_amount: 0,
+  by_target: {},
+  by_provider: {},
+  by_model: {}
 };
 
 const incident = {
@@ -159,10 +180,36 @@ describe("ObservabilityPage", () => {
 
     expect(await screen.findByRole("heading", { name: "SLO Objectives" })).toBeInTheDocument();
     expect(await screen.findByText("Task Success")).toBeInTheDocument();
+    expect(screen.getByText("SLO Trend")).toBeInTheDocument();
+    expect(screen.getByText("98.00%")).toBeInTheDocument();
+    expect(screen.getByText("Cost Distribution")).toBeInTheDocument();
+    expect(screen.getByText("openai")).toBeInTheDocument();
+    expect(screen.getByText("gpt")).toBeInTheDocument();
+    expect(screen.getByText("agent_1")).toBeInTheDocument();
     expect(screen.getAllByText("$12.50").length).toBeGreaterThan(0);
     expect(await screen.findByText("Denial Spike")).toBeInTheDocument();
     expect(await screen.findByText("Latency Drill")).toBeInTheDocument();
     expect(await screen.findByText("Claims Canary")).toBeInTheDocument();
+  });
+
+  it("renders an SLO trend fallback when measurements are missing", async () => {
+    mockObservabilityFetch({ slos: [{ ...slo, measurements: [] }] });
+
+    renderWithQueryClient(<ObservabilityPage />);
+
+    expect(await screen.findByText("SLO trend unavailable")).toBeInTheDocument();
+    expect(screen.getByText("Record at least two measurements to draw a trend chart.")).toBeInTheDocument();
+  });
+
+  it("renders a cost distribution fallback when no cost events exist", async () => {
+    mockObservabilityFetch({ costs: emptyCosts });
+
+    renderWithQueryClient(<ObservabilityPage />);
+
+    expect(await screen.findByText("No cost events")).toBeInTheDocument();
+    expect(
+      screen.getByText("Record cost events to chart provider, model, and target spend.")
+    ).toBeInTheDocument();
   });
 
   it("submits observability operations through the typed API surface", async () => {
@@ -248,8 +295,21 @@ describe("ObservabilityPage", () => {
   });
 });
 
-function mockObservabilityFetch() {
+function mockObservabilityFetch(
+  overrides: {
+    slos?: unknown[];
+    costs?: unknown;
+    incidents?: unknown[];
+    experiments?: unknown[];
+    rollouts?: unknown[];
+  } = {}
+) {
   const requests: Array<{ url: string; method: string; body?: unknown }> = [];
+  const slosPayload = overrides.slos ?? [slo];
+  const costsPayload = overrides.costs ?? costs;
+  const incidentsPayload = overrides.incidents ?? [incident];
+  const experimentsPayload = overrides.experiments ?? [experiment];
+  const rolloutsPayload = overrides.rollouts ?? [rollout];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -260,19 +320,19 @@ function mockObservabilityFetch() {
       requests.push({ url: path, method, body });
 
       if (path === "/api/v1/observability/slo" && method === "GET") {
-        return json([slo]);
+        return json(slosPayload);
       }
       if (path === "/api/v1/observability/costs" && method === "GET") {
-        return json(costs);
+        return json(costsPayload);
       }
       if (path === "/api/v1/observability/incidents" && method === "GET") {
-        return json([incident]);
+        return json(incidentsPayload);
       }
       if (path === "/api/v1/observability/chaos/experiments" && method === "GET") {
-        return json([experiment]);
+        return json(experimentsPayload);
       }
       if (path === "/api/v1/observability/rollouts" && method === "GET") {
-        return json([rollout]);
+        return json(rolloutsPayload);
       }
       if (path === "/api/v1/observability/slo" && method === "POST") {
         return json({ ...slo, id: "slo_2", name: "Latency SLO" }, 201);

@@ -1637,9 +1637,15 @@ test("dev login and top-level navigation smoke", async ({ page }) => {
   await expect(page.getByText("Marketplace Root")).toBeVisible();
   await page.getByRole("link", { name: "Observability" }).click();
   await expect(page.getByRole("heading", { name: "SLO Objectives" })).toBeVisible();
-  await expect(page.getByText("Task Success")).toBeVisible();
-  await expect(page.getByText("Denial Spike")).toBeVisible();
-  await expect(page.getByText("Claims Canary")).toBeVisible();
+  await expect(
+    page.locator('[data-observability-slo-row="slo_smoke"]').getByRole("cell", { name: "Task Success" })
+  ).toBeVisible();
+  await expect(
+    page.locator('[data-observability-incident-row="inc_smoke"]').getByText("Denial Spike", { exact: true })
+  ).toBeVisible();
+  await expect(
+    page.locator('[data-observability-rollout-row="rollout_smoke"]').getByText("Claims Canary", { exact: true })
+  ).toBeVisible();
   await page.getByRole("link", { name: "Integrations" }).click();
   await expect(page.getByRole("heading", { name: "Framework Catalog" })).toBeVisible();
   await expect(page.getByText("OpenAI demo connector")).toBeVisible();

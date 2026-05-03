@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { renderWithQueryClient } from "../../test/test-utils";
@@ -92,15 +92,20 @@ const evaluation = {
 };
 
 const summary = {
-  total_count: 3,
-  decision_counts: { allow: 2, deny: 1 },
-  mode_counts: { live: 1, simulate: 2 },
-  action_counts: { "mcp.tool_call": 2, "runtime.action": 1 },
+  total_count: 4,
+  decision_counts: { allow: 3, deny: 1 },
+  mode_counts: { live: 2, simulate: 2 },
+  action_counts: { "mcp.tool_call": 3, "runtime.action": 1 },
   time_buckets: [
     {
       bucket: "2026-05-01",
       total_count: 3,
       decision_counts: { allow: 2, deny: 1 }
+    },
+    {
+      bucket: "2026-05-02",
+      total_count: 1,
+      decision_counts: { allow: 1, deny: 0 }
     }
   ]
 };
@@ -122,10 +127,14 @@ describe("PoliciesPage", () => {
     expect(screen.getByText("Policy Bindings")).toBeInTheDocument();
     expect(screen.getByText("Policy Simulator")).toBeInTheDocument();
     expect(screen.getByText("Policy Decisions")).toBeInTheDocument();
+    expect(screen.getByText("Decision Trend")).toBeInTheDocument();
+    expect(screen.getByText("Action Distribution")).toBeInTheDocument();
+    expect(screen.getAllByText("2026-05-02").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("mcp.tool_call").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Claims Agent").length).toBeGreaterThan(0);
     expect(screen.getByText("maintenance")).toBeInTheDocument();
     expect(screen.getByText("deny_delete_customer")).toBeInTheDocument();
-    expect(screen.getAllByText("allow: 2, deny: 1").length).toBeGreaterThan(0);
+    expect(screen.getByText("allow: 3, deny: 1")).toBeInTheDocument();
   });
 
   it("lints, disables fatal saves, simulates decisions, filters, and opens detail", async () => {
@@ -149,7 +158,12 @@ describe("PoliciesPage", () => {
     const evaluationRow = (await screen.findByText("corr-policy-eval")).closest("tr");
     expect(evaluationRow).toBeTruthy();
     fireEvent.click(within(evaluationRow as HTMLElement).getByRole("button", { name: "Open" }));
-    expect(await screen.findByText("mcp-tool / demo.delete_customer")).toBeInTheDocument();
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("corr-policy-eval")).toBeInTheDocument();
+    expect(within(dialog).getByText("mcp-tool / demo.delete_customer")).toBeInTheDocument();
+    expect(within(dialog).getByText(/"tool_name": "delete_customer"/)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close policy evaluation detail" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
   it("keeps streamed evaluation rows deterministic", () => {
@@ -167,7 +181,68 @@ describe("PoliciesPage", () => {
       )
     ).toEqual(["peval_2", "peval_1"]);
   });
+
+  it("renders live evaluation rows emitted through the shared event stream", async () => {
+    const calls = mockPolicyFetch();
+    FakeEventSource.instances = [];
+    vi.stubGlobal("EventSource", FakeEventSource);
+
+    renderWithQueryClient(<PoliciesPage />);
+
+    expect(await screen.findByText("corr-policy-eval")).toBeInTheDocument();
+    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(FakeEventSource.instances[0].url).toBe("/api/v1/policy-evaluations/stream");
+
+    act(() => {
+      FakeEventSource.instances[0].emit("policy_evaluation", {
+        ...evaluation,
+        id: "peval_live",
+        mode: "live",
+        correlation_id: "corr-live-policy",
+        reason: "Live denial."
+      });
+    });
+
+    expect(await screen.findByText("corr-live-policy")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(calls.filter((path) => path.startsWith("/api/v1/policy-evaluations/summary")).length).toBeGreaterThan(1)
+    );
+  });
 });
+
+class FakeEventSource {
+  static instances: FakeEventSource[] = [];
+
+  readonly listeners = new Map<string, Set<(event: MessageEvent) => void>>();
+  readonly url: string;
+  closed = false;
+
+  constructor(url: string) {
+    this.url = url;
+    FakeEventSource.instances.push(this);
+  }
+
+  addEventListener(eventName: string, listener: (event: MessageEvent) => void) {
+    const listeners = this.listeners.get(eventName) ?? new Set();
+    listeners.add(listener);
+    this.listeners.set(eventName, listeners);
+  }
+
+  removeEventListener(eventName: string, listener: (event: MessageEvent) => void) {
+    this.listeners.get(eventName)?.delete(listener);
+  }
+
+  close() {
+    this.closed = true;
+  }
+
+  emit(eventName: string, payload: unknown) {
+    const event = new MessageEvent(eventName, { data: JSON.stringify(payload) });
+    for (const listener of this.listeners.get(eventName) ?? []) {
+      listener(event);
+    }
+  }
+}
 
 function mockPolicyFetch() {
   const calls: string[] = [];

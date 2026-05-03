@@ -1,18 +1,22 @@
-# syntax=docker/dockerfile:1.7
-
 FROM python:3.11-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-WORKDIR /app
+WORKDIR /workspace
 
-COPY packages/product-platform/pyproject.toml ./pyproject.toml
-COPY packages/product-platform/src ./src
+COPY packages/agent-mesh/pyproject.toml packages/agent-mesh/README.md ./packages/agent-mesh/
+COPY packages/agent-mesh/src ./packages/agent-mesh/src
+COPY packages/agent-discovery/pyproject.toml packages/agent-discovery/README.md ./packages/agent-discovery/
+COPY packages/agent-discovery/src ./packages/agent-discovery/src
+COPY packages/product-platform/pyproject.toml packages/product-platform/README.md ./packages/product-platform/
+COPY packages/product-platform/src ./packages/product-platform/src
 
 RUN python -m pip install --upgrade pip \
-    && python -m pip install -e .
+    && python -m pip install ./packages/agent-mesh \
+    && python -m pip install ./packages/agent-discovery \
+    && python -m pip install -e ./packages/product-platform
 
 EXPOSE 8088
 
