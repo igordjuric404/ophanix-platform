@@ -1,8 +1,9 @@
 import { Badge } from "../ui/badge";
 
 export function StatusBadge({ status }: { status?: string | null }) {
-  const label = status || "unknown";
-  const normalized = label.toLowerCase();
+  const rawLabel = status || "unknown";
+  const label = rawLabel.replaceAll("_", " ");
+  const normalized = rawLabel.toLowerCase();
   const tone =
     normalized.includes("healthy") || normalized.includes("active")
       ? "success"

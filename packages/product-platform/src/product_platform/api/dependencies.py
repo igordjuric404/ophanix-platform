@@ -98,7 +98,7 @@ def create_default_dependency_registry(
     settings: Settings | None = None,
     probes: ReadinessProbes | None = None,
 ) -> DependencyRegistry:
-    """Create placeholder dependency checks for the product shell."""
+    """Create dependency checks for the product shell."""
 
     registry = DependencyRegistry()
     resolved_probes = probes or ReadinessProbes()
@@ -145,8 +145,24 @@ def create_default_dependency_registry(
             required=True,
         )
         return registry
-    for name in ("database", "redis", "worker", "event_store", "model_provider"):
-        registry.register(name, static_dependency(name, required=False), required=False)
+    resolved_settings = settings or Settings()
+    local_dependencies: tuple[tuple[str, SettingsProbe, bool], ...] = (
+        ("database", resolved_probes.database or _probe_database, True),
+        ("redis", resolved_probes.redis or _probe_local_redis, False),
+        ("worker", resolved_probes.worker or _probe_worker, True),
+        ("event_store", _probe_event_store, True),
+        ("model_provider", _probe_model_provider, False),
+    )
+    for name, probe, required in local_dependencies:
+        registry.register(
+            name,
+            _with_forced_failure(
+                name,
+                resolved_settings,
+                _probe_dependency(name, resolved_settings, probe),
+            ),
+            required=required,
+        )
     return registry
 
 
@@ -178,6 +194,28 @@ def _probe_dependency(name: str, settings: Settings, probe: SettingsProbe) -> De
         )
 
     return check
+
+
+def _with_forced_failure(
+    name: str,
+    settings: Settings,
+    check: DependencyCheck,
+) -> DependencyCheck:
+    break_names = {value.lower() for value in settings.system_dependency_breaks}
+
+    def wrapped() -> DependencyStatus:
+        if name.lower() in break_names or "*" in break_names:
+            return DependencyStatus(
+                name=name,
+                status="unhealthy",
+                message=(
+                    f"{name} was intentionally broken via "
+                    "OPHANIX_SYSTEM_DEPENDENCY_BREAKS for local verification."
+                ),
+            )
+        return check()
+
+    return wrapped
 
 
 def _probe_database(settings: Settings) -> DependencyStatus:
@@ -246,6 +284,23 @@ def _probe_redis(settings: Settings) -> DependencyStatus:
         status="healthy",
         required=True,
         message="Redis endpoint accepted a TCP connection.",
+    )
+
+
+def _probe_local_redis(settings: Settings) -> DependencyStatus:
+    if not settings.redis_url:
+        return DependencyStatus(
+            name="redis",
+            status="not_configured",
+            required=False,
+            message="OPHANIX_REDIS_URL is not configured for this local run.",
+        )
+    status = _probe_redis(settings)
+    return DependencyStatus(
+        name="redis",
+        status=status.status,
+        required=False,
+        message=status.message,
     )
 
 
@@ -332,6 +387,67 @@ def _probe_worker(settings: Settings) -> DependencyStatus:
         status="healthy",
         required=True,
         message="Worker readiness is covered by the worker no-op smoke command.",
+    )
+
+
+def _probe_event_store(settings: Settings) -> DependencyStatus:
+    try:
+        connection = connect_database(settings.database_url)
+        try:
+            row = connection.execute(
+                "SELECT COUNT(*) AS count FROM audit_events"
+            ).fetchone()
+        finally:
+            connection.close()
+    except sqlite3.Error as exc:
+        return DependencyStatus(
+            name="event_store",
+            status="unhealthy",
+            required=True,
+            message=f"Audit event store is not ready: {exc}",
+        )
+    return DependencyStatus(
+        name="event_store",
+        status="healthy",
+        required=True,
+        message=f"Audit event store is ready with {row['count']} stored events.",
+    )
+
+
+def _probe_model_provider(settings: Settings) -> DependencyStatus:
+    try:
+        connection = connect_database(settings.database_url)
+        try:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM provider_credentials
+                WHERE provider_type = ? AND status = ?
+                """,
+                ("model_provider", "active"),
+            ).fetchone()
+        finally:
+            connection.close()
+    except sqlite3.Error as exc:
+        return DependencyStatus(
+            name="model_provider",
+            status="not_configured",
+            required=False,
+            message=f"Model provider credential store is not ready: {exc}",
+        )
+    count = int(row["count"])
+    if count == 0:
+        return DependencyStatus(
+            name="model_provider",
+            status="not_configured",
+            required=False,
+            message="No active model provider credential is configured.",
+        )
+    return DependencyStatus(
+        name="model_provider",
+        status="healthy",
+        required=False,
+        message=f"{count} active model provider credential(s) configured.",
     )
 
 

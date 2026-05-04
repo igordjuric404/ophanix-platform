@@ -45,6 +45,8 @@ export interface Environment {
 export interface SystemDependency {
   name: string;
   status: string;
+  required: boolean;
+  message?: string | null;
   details?: string | null;
   latency_ms?: number | null;
 }
@@ -56,4 +58,3 @@ export interface VersionInfo {
   environment?: string;
   version?: string;
 }
-

@@ -1,7 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { apiClient } from "./client";
+import { apiClient, createApiClient } from "./client";
 import type { Environment, Organization, SystemDependency, VersionInfo } from "./types";
+
+const rootApiClient = createApiClient({ baseUrl: "" });
 
 export function useSystemDependencies() {
   return useQuery({
@@ -13,7 +15,7 @@ export function useSystemDependencies() {
 export function useVersionInfo() {
   return useQuery({
     queryKey: ["system", "version"],
-    queryFn: () => apiClient.request<VersionInfo>("/version")
+    queryFn: () => rootApiClient.request<VersionInfo>("/version")
   });
 }
 
@@ -30,4 +32,3 @@ export function useEnvironments() {
     queryFn: () => apiClient.request<Environment[]>("/environments")
   });
 }
-

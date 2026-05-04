@@ -1,4 +1,5 @@
-import { Activity, Database, ShieldCheck } from "lucide-react";
+import { Activity, Database, LoaderCircle, ShieldCheck } from "lucide-react";
+import { useState } from "react";
 
 import { useCurrentUser } from "../../api/auth";
 import { useSystemDependencies, useVersionInfo } from "../../api/system";
@@ -12,6 +13,7 @@ import { Button } from "../../components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../components/ui/card";
 
 export function OverviewPage() {
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const currentUser = useCurrentUser();
   const dependencies = useSystemDependencies();
   const version = useVersionInfo();
@@ -40,19 +42,42 @@ export function OverviewPage() {
     (item) => item.status.toLowerCase() === "healthy"
   ).length;
   const user = currentUser.data;
+  const refreshOverview = async () => {
+    setIsRefreshing(true);
+    try {
+      await Promise.allSettled([
+        currentUser.refetch(),
+        dependencies.refetch(),
+        version.refetch()
+      ]);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
 
   return (
     <>
       <PageHeader
         action={
-          <Button type="button" variant="outline">
-            Refresh
+          <Button disabled={isRefreshing} onClick={refreshOverview} type="button" variant="outline">
+            {isRefreshing ? "Refreshing" : "Refresh"}
           </Button>
         }
         description="Governed estate summary, runtime health, and product platform readiness."
         title="Overview"
       />
-      <section className="space-y-5 p-6">
+      <section className="relative space-y-5 p-6">
+        {isRefreshing ? (
+          <div
+            className="absolute inset-0 z-20 flex items-center justify-center bg-background/70 backdrop-blur-sm"
+            role="status"
+          >
+            <div className="flex items-center gap-2 rounded-md border bg-background px-4 py-3 text-sm shadow-sm">
+              <LoaderCircle className="h-4 w-4 animate-spin text-primary" />
+              Refreshing overview
+            </div>
+          </div>
+        ) : null}
         <div className="grid gap-4 md:grid-cols-3">
           <MetricCard
             detail="Current authenticated principal"
@@ -81,7 +106,7 @@ export function OverviewPage() {
                 columns={[
                   { header: "Dependency", cell: (item) => item.name },
                   { header: "Status", cell: (item) => <StatusBadge status={item.status} /> },
-                  { header: "Details", cell: (item) => item.details ?? "No details" }
+                  { header: "Details", cell: (item) => item.message ?? item.details ?? "No details" }
                 ]}
                 getKey={(item) => item.name}
                 items={dependencyItems}
@@ -113,4 +138,3 @@ export function OverviewPage() {
     </>
   );
 }
-

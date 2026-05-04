@@ -80,6 +80,9 @@ class Settings:
     internal_cidrs: list[str] = field(
         default_factory=lambda: _csv_env("OPHANIX_INTERNAL_CIDRS", "10.0.0.0/8")
     )
+    system_dependency_breaks: list[str] = field(
+        default_factory=lambda: _csv_env("OPHANIX_SYSTEM_DEPENDENCY_BREAKS", "")
+    )
 
 
 def load_settings() -> Settings:
