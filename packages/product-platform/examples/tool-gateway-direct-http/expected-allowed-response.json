@@ -1,0 +1,22 @@
+{
+  "request_id": "req-demo-direct-http-allowed",
+  "correlation_id": "demo-direct-http-allowed",
+  "tool_name": "claims.lookup",
+  "decision": {
+    "id": "decision-demo-direct-http-allowed",
+    "decision": "allow",
+    "reason_code": "allowed"
+  },
+  "reason_code": "allowed",
+  "result": {
+    "status": "succeeded",
+    "body": {
+      "claim_id": "claim_123",
+      "claim_status": "open"
+    },
+    "upstream_status_code": 200,
+    "redaction_applied": false,
+    "exposed_to_agent": true
+  },
+  "error": null
+}

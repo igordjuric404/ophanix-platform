@@ -52,6 +52,7 @@ export const routePermissions: Record<string, string> = {
   "/mcp": permissions.AUDIT_READ,
   "/mesh": permissions.SYSTEM_READ,
   "/runtime": permissions.JOB_RUN,
+  "/tool-gateway/decisions": permissions.AUDIT_READ,
   "/discovery": permissions.JOB_RUN,
   "/marketplace": permissions.TENANT_READ,
   "/compliance": permissions.COMPLIANCE_READ,

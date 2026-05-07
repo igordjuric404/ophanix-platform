@@ -523,6 +523,69 @@ from product_platform.trust.repository import (
     trust_score_response,
     trust_threshold_response,
 )
+from product_platform.tool_gateway.models import (
+    AgentToolPermissionActionRequest,
+    AgentToolPermissionGrantRequest,
+    AgentToolPermissionPatchRequest,
+    AgentToolPermissionResponse,
+    ToolDefinitionCreateRequest,
+    ToolDefinitionPatchRequest,
+    ToolDefinitionResponse,
+    ToolDefinitionVersionResponse,
+    ToolLifecycleActionRequest,
+    ToolUpstreamHealthResponse,
+    ToolUpstreamTargetCreateRequest,
+    ToolUpstreamTargetPatchRequest,
+    ToolUpstreamTargetResponse,
+    ToolResponsePolicyPatchRequest,
+    ToolResponsePolicyResponse,
+)
+from product_platform.tool_gateway.repository import (
+    AgentToolPermissionNotFoundError,
+    AgentToolPermissionValidationError,
+    DuplicateAgentToolPermissionError,
+    DuplicateToolNameError,
+    DuplicateToolUpstreamTargetError,
+    ToolDefinitionNotFoundError,
+    ToolLifecycleError,
+    ToolRegistryRepository,
+    ToolUpstreamTargetNotFoundError,
+    ToolUpstreamTargetValidationError,
+    agent_tool_permission_response,
+    tool_definition_response,
+    tool_definition_version_response,
+    tool_response_policy_response,
+    tool_upstream_health_response,
+    tool_upstream_target_response,
+)
+from product_platform.tool_gateway.auth import (
+    GatewayAuthenticationError,
+    GatewayPrincipal,
+    GatewayTokenVerifier,
+)
+from product_platform.tool_gateway.decision import ToolPolicyDecisionService
+from product_platform.tool_gateway.health import ToolUpstreamHealthChecker
+from product_platform.tool_gateway.invocation import (
+    HttpToolInvocationExecutor,
+    InMemoryToolInvocationExecutor,
+    ToolExecutionError,
+    ToolExecutionResult,
+    ToolInvocationRequest,
+    ToolInvocationResponse,
+)
+from product_platform.tool_gateway.schemas import ToolSchemaValidationError, validate_payload
+from product_platform.tool_gateway.response import process_tool_execution_response
+from product_platform.tool_gateway.runtime_audit import (
+    ToolRuntimeActionCreate,
+    ToolRuntimeActionDetailResponse,
+    ToolRuntimeActionEventCreate,
+    ToolRuntimeActionQuery,
+    ToolRuntimeActionRepository,
+    ToolRuntimeActionResponse,
+    ToolRuntimeActionUpdate,
+    tool_runtime_action_detail_response,
+    tool_runtime_action_response,
+)
 from product_platform.worker.api_models import (
     JobCreateRequest,
     JobResponse,
@@ -658,9 +721,18 @@ def create_app(
 
     public_api_paths = {"/api/v1/auth/dev-login"}
 
+    def _uses_gateway_auth_path(path: str) -> bool:
+        return path.startswith("/api/v1/gateway/") or (
+            path.startswith("/api/v1/tools/") and path.endswith("/invoke")
+        )
+
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next: Any) -> Any:
-        if request.url.path.startswith("/api/v1") and request.url.path not in public_api_paths:
+        if (
+            request.url.path.startswith("/api/v1")
+            and request.url.path not in public_api_paths
+            and not _uses_gateway_auth_path(request.url.path)
+        ):
             principal = auth_service.authenticate_request(request)
             if principal is None:
                 authorization = request.headers.get("Authorization", "")
@@ -774,6 +846,168 @@ def create_app(
     def _default_environment_id_for_org(organization_id: str) -> str:
         environments = tenants.list_environments(organization_id)
         return environments[0].id if environments else "env_default"
+
+    def _gateway_token_verification_audit_event(
+        *,
+        request: Request,
+        result: str,
+        reason_code: str,
+        principal: GatewayPrincipal | None = None,
+        error: GatewayAuthenticationError | None = None,
+    ) -> AuditEventEnvelope:
+        context = _request_context_from_request(request)
+        organization_id = (
+            principal.organization_id
+            if principal is not None
+            else error.organization_id
+            if error is not None and error.organization_id is not None
+            else request.headers.get("X-Organization-ID")
+            or resolved_settings.default_organization_id
+        )
+        environment_id = (
+            principal.environment_id
+            if principal is not None
+            else error.environment_id
+            if error is not None and error.environment_id is not None
+            else request.headers.get("X-Environment-ID")
+            or _default_environment_id_for_org(organization_id)
+        )
+        agent_id = principal.agent_id if principal is not None else error.agent_id if error else None
+        credential_id = (
+            principal.credential_id
+            if principal is not None
+            else error.credential_id
+            if error
+            else None
+        )
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type=f"gateway.token_verification.{result}",
+            source_component="tool-gateway-auth",
+            actor_type="agent" if agent_id else "system",
+            agent_id=agent_id,
+            resource_type="agent_credential" if credential_id else "gateway_token_verification",
+            resource_id=credential_id,
+            decision="allow" if result == "succeeded" else "deny",
+            severity="info" if result == "succeeded" else "warning",
+            correlation_id=context.correlation_id,
+            payload_json={
+                "result": result,
+                "reason_code": reason_code,
+                "request_id": context.request_id,
+            },
+        )
+
+    def _append_tool_runtime_event(
+        repository: ToolRuntimeActionRepository,
+        action_id: str,
+        event_type: str,
+        event_summary: dict[str, Any],
+    ) -> None:
+        repository.append_event(
+            action_id,
+            ToolRuntimeActionEventCreate(
+                event_type=event_type,
+                event_summary=event_summary,
+            ),
+        )
+
+    def _record_gateway_auth_failure_runtime_action(
+        *,
+        connection: Any,
+        request: Request,
+        error: GatewayAuthenticationError,
+    ) -> None:
+        if not error.organization_id or not error.environment_id:
+            return
+        if not error.agent_id and not error.credential_id:
+            return
+        context = _request_context_from_request(request)
+        repository = ToolRuntimeActionRepository(
+            connection,
+            error.organization_id,
+            error.environment_id,
+        )
+        row = repository.create_action(
+            ToolRuntimeActionCreate(
+                request_id=context.request_id,
+                correlation_id=context.correlation_id,
+                agent_id=error.agent_id,
+                credential_id=error.credential_id,
+                action_status="authentication_failed",
+                reason_code=error.reason_code,
+                payload_summary={
+                    "path": request.url.path,
+                    "reason_code": error.reason_code,
+                },
+                error_code=error.reason_code,
+            )
+        )
+        _append_tool_runtime_event(
+            repository,
+            row["id"],
+            "tool.runtime.authentication_failed",
+            {"reason_code": error.reason_code},
+        )
+
+    def _runtime_response_summary(execution: Any) -> dict[str, Any]:
+        if isinstance(execution, ToolExecutionResult):
+            return {
+                "status": execution.status,
+                "body": execution.body,
+                "upstream_status_code": execution.upstream_status_code,
+                "response_schema_valid": execution.response_schema_valid,
+                "redaction_applied": execution.redaction_applied,
+                "exposed_to_agent": execution.exposed_to_agent,
+                "warnings": execution.warnings,
+            }
+        if isinstance(execution, dict):
+            return {"result": execution}
+        return {"result": jsonable_encoder(execution)}
+
+    def _runtime_execution_error_code(execution: ToolExecutionResult) -> str:
+        if isinstance(execution.error, dict) and execution.error.get("code"):
+            return str(execution.error["code"])
+        return "upstream_error"
+
+    def _get_gateway_principal(request: Request) -> GatewayPrincipal:
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                principal = GatewayTokenVerifier(connection).verify_authorization_header(
+                    request.headers.get("Authorization"),
+                    request_id=context.request_id,
+                )
+                AuditEventRepository(connection).insert(
+                    _gateway_token_verification_audit_event(
+                        request=request,
+                        result="succeeded",
+                        reason_code="verified",
+                        principal=principal,
+                    )
+                )
+                request.state.gateway_principal = principal
+                return principal
+        except GatewayAuthenticationError as exc:
+            with _audit_database().transaction() as connection:
+                AuditEventRepository(connection).insert(
+                    _gateway_token_verification_audit_event(
+                        request=request,
+                        result="failed",
+                        reason_code=exc.reason_code,
+                        error=exc,
+                    )
+                )
+                _record_gateway_auth_failure_runtime_action(
+                    connection=connection,
+                    request=request,
+                    error=exc,
+                )
+            raise HTTPException(
+                status_code=401,
+                detail=f"Gateway authentication failed: {exc.reason_code}",
+            ) from exc
 
     def _serialize_job(repository: JobStateRepository, job_id: str) -> JobResponse:
         row = repository.get_job(job_id)
@@ -2016,6 +2250,97 @@ def create_app(
             payload_json=route.model_dump(),
         )
 
+    def _tool_definition_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        event_type: str,
+        tool: ToolDefinitionResponse,
+        correlation_id: str | None,
+        previous_status: str | None = None,
+        reason: str | None = None,
+    ) -> AuditEventEnvelope:
+        payload = tool.model_dump()
+        if previous_status is not None:
+            payload["previous_status"] = previous_status
+            payload["status_changed"] = previous_status != tool.status
+        if reason is not None:
+            payload["reason"] = reason
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type=event_type,
+            source_component="tool-gateway-registry",
+            actor_type="user",
+            actor_id=actor_id,
+            resource_type="tool_definition",
+            resource_id=tool.id,
+            correlation_id=correlation_id,
+            payload_json=payload,
+        )
+
+    def _tool_upstream_target_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        event_type: str,
+        target: ToolUpstreamTargetResponse,
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type=event_type,
+            source_component="tool-gateway-upstreams",
+            actor_type="user",
+            actor_id=actor_id,
+            resource_type="tool_upstream_target",
+            resource_id=target.id,
+            correlation_id=correlation_id,
+            payload_json=target.model_dump(),
+        )
+
+    def _agent_tool_permission_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        event_type: str,
+        permission: AgentToolPermissionResponse,
+        correlation_id: str | None,
+        reason: str | None = None,
+    ) -> AuditEventEnvelope:
+        payload = permission.model_dump()
+        if reason is not None:
+            payload["reason"] = reason
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type=event_type,
+            source_component="tool-gateway-permissions",
+            actor_type="user",
+            actor_id=actor_id,
+            agent_id=permission.agent_id,
+            resource_type="agent_tool_permission",
+            resource_id=permission.id,
+            correlation_id=correlation_id,
+            payload_json=payload,
+        )
+
+    def _schema_validation_error_response(
+        request: Request,
+        exc: ToolSchemaValidationError,
+    ) -> JSONResponse:
+        return _error_response(
+            request,
+            status_code=422,
+            code="SCHEMA_VALIDATION_ERROR",
+            message=str(exc),
+            details={"field": exc.field},
+        )
+
     def _mcp_server_audit_event(
         *,
         organization_id: str,
@@ -2571,6 +2896,326 @@ def create_app(
         """Return the authenticated user principal."""
 
         return current_user
+
+    @app.get(
+        "/api/v1/gateway/principal-probe",
+        response_model=GatewayPrincipal,
+        include_in_schema=False,
+    )
+    async def gateway_principal_probe(
+        principal: GatewayPrincipal = Depends(_get_gateway_principal),
+    ) -> GatewayPrincipal:
+        """Hidden test probe for the reusable gateway auth dependency."""
+
+        app.state.gateway_principal_probe_executed = True
+        return principal
+
+    @app.post(
+        "/api/v1/tools/{tool_name}/invoke",
+        response_model=ToolInvocationResponse,
+        tags=["tool-gateway"],
+    )
+    async def invoke_tool_gateway_tool(
+        tool_name: str,
+        body: ToolInvocationRequest,
+        request: Request,
+        principal: GatewayPrincipal = Depends(_get_gateway_principal),
+    ) -> ToolInvocationResponse | JSONResponse:
+        """Authenticate an external agent and invoke a registered tool."""
+
+        context = _request_context_from_request(request)
+        correlation_id = body.correlation_id or context.correlation_id
+        try:
+            with _audit_database().transaction() as connection:
+                repository = ToolRegistryRepository(
+                    connection,
+                    principal.organization_id,
+                    principal.environment_id,
+                )
+                tool = repository.get_tool_by_name(tool_name, active_only=True)
+                if tool is None:
+                    raise HTTPException(status_code=404, detail="Tool not found.")
+                input_schema = (
+                    json.loads(tool["input_schema_json"])
+                    if tool["input_schema_json"] is not None
+                    else None
+                )
+                if input_schema is not None:
+                    validate_payload(body.payload, input_schema)
+                decision = ToolPolicyDecisionService(
+                    connection,
+                    principal.organization_id,
+                    principal.environment_id,
+                ).evaluate_tool_call(
+                    principal,
+                    tool_name,
+                    body.payload,
+                    request_id=context.request_id,
+                    correlation_id=correlation_id,
+                )
+                runtime_repository = ToolRuntimeActionRepository(
+                    connection,
+                    principal.organization_id,
+                    principal.environment_id,
+                )
+                runtime_action = runtime_repository.create_action(
+                    ToolRuntimeActionCreate(
+                        request_id=context.request_id,
+                        correlation_id=correlation_id,
+                        agent_id=principal.agent_id,
+                        credential_id=principal.credential_id,
+                        tool_id=tool["id"],
+                        permission_id=decision.permission_id,
+                        decision_id=decision.id,
+                        action_status="denied" if decision.decision == "deny" else "allowed",
+                        reason_code=decision.reason_code,
+                        payload_summary=body.payload,
+                    )
+                )
+                if decision.decision == "deny":
+                    _append_tool_runtime_event(
+                        runtime_repository,
+                        runtime_action["id"],
+                        "tool.runtime.denied",
+                        {
+                            "decision_id": decision.id,
+                            "reason_code": decision.reason_code,
+                        },
+                    )
+                    return JSONResponse(
+                        status_code=403,
+                        content=jsonable_encoder(
+                            ToolInvocationResponse(
+                                request_id=context.request_id,
+                                correlation_id=correlation_id,
+                                tool_name=tool_name,
+                                decision=decision,
+                                reason_code=decision.reason_code,
+                                result=None,
+                                error={
+                                    "code": decision.reason_code,
+                                    "message": decision.reason_message,
+                                },
+                            )
+                        ),
+                )
+                _append_tool_runtime_event(
+                    runtime_repository,
+                    runtime_action["id"],
+                    "tool.runtime.allowed",
+                    {
+                        "decision_id": decision.id,
+                        "reason_code": decision.reason_code,
+                    },
+                )
+                executor = getattr(app.state, "tool_gateway_executor", None)
+                if executor is None:
+                    executor = HttpToolInvocationExecutor(
+                        repository,
+                        http_client=getattr(app.state, "tool_gateway_http_client", None),
+                    )
+                try:
+                    execution = executor.execute(
+                        tool=tool,
+                        payload=body.payload,
+                        decision=decision,
+                        principal=principal,
+                    )
+                except ToolExecutionError as exc:
+                    runtime_repository.update_action(
+                        runtime_action["id"],
+                        ToolRuntimeActionUpdate(
+                            action_status="upstream_failed",
+                            error_code=exc.code,
+                            response_summary={"error": exc.message},
+                        ),
+                    )
+                    _append_tool_runtime_event(
+                        runtime_repository,
+                        runtime_action["id"],
+                        "tool.runtime.upstream_failed",
+                        {"error_code": exc.code},
+                    )
+                    return JSONResponse(
+                        status_code=exc.status_code,
+                        content=jsonable_encoder(
+                            ToolInvocationResponse(
+                                request_id=context.request_id,
+                                correlation_id=correlation_id,
+                                tool_name=tool_name,
+                                decision=decision,
+                                reason_code=decision.reason_code,
+                                result=None,
+                                error={"code": exc.code, "message": exc.message},
+                            )
+                        ),
+                    )
+                except Exception:
+                    runtime_repository.update_action(
+                        runtime_action["id"],
+                        ToolRuntimeActionUpdate(
+                            action_status="upstream_failed",
+                            error_code="executor_error",
+                            response_summary={"error": "Tool executor failed."},
+                        ),
+                    )
+                    _append_tool_runtime_event(
+                        runtime_repository,
+                        runtime_action["id"],
+                        "tool.runtime.upstream_failed",
+                        {"error_code": "executor_error"},
+                    )
+                    return JSONResponse(
+                        status_code=502,
+                        content=jsonable_encoder(
+                            ToolInvocationResponse(
+                                request_id=context.request_id,
+                                correlation_id=correlation_id,
+                                tool_name=tool_name,
+                                decision=decision,
+                                reason_code=decision.reason_code,
+                                result=None,
+                                error={
+                                    "code": "executor_error",
+                                    "message": "Tool executor failed.",
+                                },
+                            )
+                        ),
+                    )
+                runtime_repository.update_action(
+                    runtime_action["id"],
+                    ToolRuntimeActionUpdate(
+                        action_status="forwarded",
+                        upstream_status_code=execution.upstream_status_code
+                        if isinstance(execution, ToolExecutionResult)
+                        else None,
+                        latency_ms=execution.latency_ms
+                        if isinstance(execution, ToolExecutionResult)
+                        else None,
+                    ),
+                )
+                _append_tool_runtime_event(
+                    runtime_repository,
+                    runtime_action["id"],
+                    "tool.runtime.forwarded",
+                    {
+                        "upstream_status_code": execution.upstream_status_code
+                        if isinstance(execution, ToolExecutionResult)
+                        else None,
+                    },
+                )
+                if isinstance(execution, ToolExecutionResult):
+                    try:
+                        policy = repository.get_response_policy(tool["id"])
+                        if policy is not None:
+                            execution = process_tool_execution_response(tool, policy, execution)
+                    except ToolExecutionError as exc:
+                        runtime_repository.update_action(
+                            runtime_action["id"],
+                            ToolRuntimeActionUpdate(
+                                action_status="response_blocked",
+                                upstream_status_code=execution.upstream_status_code,
+                                latency_ms=execution.latency_ms,
+                                response_summary=_runtime_response_summary(execution),
+                                redaction_applied=execution.redaction_applied,
+                                error_code=exc.code,
+                            ),
+                        )
+                        _append_tool_runtime_event(
+                            runtime_repository,
+                            runtime_action["id"],
+                            "tool.runtime.response_blocked",
+                            {"error_code": exc.code},
+                        )
+                        return JSONResponse(
+                            status_code=exc.status_code,
+                            content=jsonable_encoder(
+                                ToolInvocationResponse(
+                                    request_id=context.request_id,
+                                    correlation_id=correlation_id,
+                                    tool_name=tool_name,
+                                    decision=decision,
+                                    reason_code=decision.reason_code,
+                                    result=None,
+                                    error={"code": exc.code, "message": exc.message},
+                                )
+                            ),
+                        )
+                result = execution.model_dump() if isinstance(execution, ToolExecutionResult) else execution
+                if isinstance(execution, ToolExecutionResult) and execution.status == "failed":
+                    error_code = _runtime_execution_error_code(execution)
+                    runtime_repository.update_action(
+                        runtime_action["id"],
+                        ToolRuntimeActionUpdate(
+                            action_status="upstream_failed",
+                            upstream_status_code=execution.upstream_status_code,
+                            latency_ms=execution.latency_ms,
+                            response_summary=_runtime_response_summary(execution),
+                            redaction_applied=execution.redaction_applied,
+                            error_code=error_code,
+                        ),
+                    )
+                    _append_tool_runtime_event(
+                        runtime_repository,
+                        runtime_action["id"],
+                        "tool.runtime.upstream_failed",
+                        {"error_code": error_code},
+                    )
+                    return JSONResponse(
+                        status_code=502,
+                        content=jsonable_encoder(
+                            ToolInvocationResponse(
+                                request_id=context.request_id,
+                                correlation_id=correlation_id,
+                                tool_name=tool_name,
+                                decision=decision,
+                                reason_code=decision.reason_code,
+                                result=result,
+                                error=execution.error
+                                or {
+                                    "code": "upstream_error",
+                                    "message": "Tool execution failed.",
+                                },
+                            )
+                        ),
+                    )
+                runtime_repository.update_action(
+                    runtime_action["id"],
+                    ToolRuntimeActionUpdate(
+                        action_status="completed",
+                        upstream_status_code=execution.upstream_status_code
+                        if isinstance(execution, ToolExecutionResult)
+                        else None,
+                        latency_ms=execution.latency_ms
+                        if isinstance(execution, ToolExecutionResult)
+                        else None,
+                        response_summary=_runtime_response_summary(execution),
+                        redaction_applied=execution.redaction_applied
+                        if isinstance(execution, ToolExecutionResult)
+                        else False,
+                    ),
+                )
+                _append_tool_runtime_event(
+                    runtime_repository,
+                    runtime_action["id"],
+                    "tool.runtime.completed",
+                    {
+                        "upstream_status_code": execution.upstream_status_code
+                        if isinstance(execution, ToolExecutionResult)
+                        else None,
+                    },
+                )
+                return ToolInvocationResponse(
+                    request_id=context.request_id,
+                    correlation_id=correlation_id,
+                    tool_name=tool_name,
+                    decision=decision,
+                    reason_code=decision.reason_code,
+                    result=result,
+                    error=None,
+                )
+        except ToolSchemaValidationError as exc:
+            return _schema_validation_error_response(request, exc)
 
     @app.get("/api/v1/organizations", response_model=list[Organization], tags=["tenancy"])
     async def list_organizations(
@@ -4447,6 +5092,748 @@ def create_app(
                 )
         except ProtocolBridgeNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/tools",
+        response_model=ToolDefinitionResponse,
+        status_code=201,
+        tags=["tool-gateway"],
+    )
+    async def create_tool_definition(
+        body: ToolDefinitionCreateRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ToolDefinitionResponse | JSONResponse:
+        """Create a tenant-scoped Tool Gateway contract."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = ToolRegistryRepository(connection, organization_id, environment_id)
+                row = repository.create_tool(body, created_by=current_user.id)
+                tool = tool_definition_response(repository, row, include_versions=True)
+                AuditEventRepository(connection).insert(
+                    _tool_definition_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="tool.definition.created",
+                        tool=tool,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return tool
+        except DuplicateToolNameError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ToolSchemaValidationError as exc:
+            return _schema_validation_error_response(request, exc)
+
+    @app.get(
+        "/api/v1/tools",
+        response_model=list[ToolDefinitionResponse],
+        tags=["tool-gateway"],
+    )
+    async def list_tool_definitions(
+        status: str | None = None,
+        owner_team: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[ToolDefinitionResponse]:
+        """List tenant-scoped Tool Gateway contracts."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            repository = ToolRegistryRepository(
+                _audit_database().connect(),
+                organization_id,
+                environment_id,
+            )
+            return [
+                tool_definition_response(repository, row)
+                for row in repository.list_tools(
+                    status=status,
+                    owner_team=owner_team,
+                    limit=limit,
+                    offset=offset,
+                )
+            ]
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/tools/{tool_id}",
+        response_model=ToolDefinitionResponse,
+        tags=["tool-gateway"],
+    )
+    async def get_tool_definition(
+        tool_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ToolDefinitionResponse:
+        """Get one Tool Gateway contract with version history."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = ToolRegistryRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        row = repository.get_tool(tool_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Tool definition not found.")
+        return tool_definition_response(repository, row, include_versions=True)
+
+    @app.patch(
+        "/api/v1/tools/{tool_id}",
+        response_model=ToolDefinitionResponse,
+        tags=["tool-gateway"],
+    )
+    async def patch_tool_definition(
+        tool_id: str,
+        body: ToolDefinitionPatchRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ToolDefinitionResponse | JSONResponse:
+        """Patch a Tool Gateway contract and version contract changes."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = ToolRegistryRepository(connection, organization_id, environment_id)
+                row = repository.update_tool(tool_id, body, updated_by=current_user.id)
+                tool = tool_definition_response(repository, row, include_versions=True)
+                AuditEventRepository(connection).insert(
+                    _tool_definition_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="tool.definition.updated",
+                        tool=tool,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return tool
+        except ToolDefinitionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ToolSchemaValidationError as exc:
+            return _schema_validation_error_response(request, exc)
+
+    @app.post(
+        "/api/v1/tools/{tool_id}/activate",
+        response_model=ToolDefinitionResponse,
+        tags=["tool-gateway"],
+    )
+    async def activate_tool_definition(
+        tool_id: str,
+        request: Request,
+        body: ToolLifecycleActionRequest | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ToolDefinitionResponse | JSONResponse:
+        """Activate a Tool Gateway contract after schema validation."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = ToolRegistryRepository(connection, organization_id, environment_id)
+                existing = repository.get_tool(tool_id)
+                if existing is None:
+                    raise ToolDefinitionNotFoundError("Tool definition not found.")
+                row = repository.activate_tool(
+                    tool_id,
+                    actor_id=current_user.id,
+                    reason=body.reason if body else None,
+                )
+                tool = tool_definition_response(repository, row, include_versions=True)
+                AuditEventRepository(connection).insert(
+                    _tool_definition_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="tool.definition.activated",
+                        tool=tool,
+                        previous_status=existing["status"],
+                        reason=body.reason if body else None,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return tool
+        except ToolDefinitionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ToolLifecycleError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ToolSchemaValidationError as exc:
+            return _schema_validation_error_response(request, exc)
+
+    @app.post(
+        "/api/v1/tools/{tool_id}/disable",
+        response_model=ToolDefinitionResponse,
+        tags=["tool-gateway"],
+    )
+    async def disable_tool_definition(
+        tool_id: str,
+        request: Request,
+        body: ToolLifecycleActionRequest | None = None,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ToolDefinitionResponse:
+        """Disable a Tool Gateway contract without removing version history."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = ToolRegistryRepository(connection, organization_id, environment_id)
+                existing = repository.get_tool(tool_id)
+                if existing is None:
+                    raise ToolDefinitionNotFoundError("Tool definition not found.")
+                row = repository.disable_tool(
+                    tool_id,
+                    actor_id=current_user.id,
+                    reason=body.reason if body else None,
+                )
+                tool = tool_definition_response(repository, row, include_versions=True)
+                AuditEventRepository(connection).insert(
+                    _tool_definition_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="tool.definition.disabled",
+                        tool=tool,
+                        previous_status=existing["status"],
+                        reason=body.reason if body else None,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return tool
+        except ToolDefinitionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/tools/{tool_id}/versions",
+        response_model=list[ToolDefinitionVersionResponse],
+        tags=["tool-gateway"],
+    )
+    async def list_tool_definition_versions(
+        tool_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[ToolDefinitionVersionResponse]:
+        """List version history for a Tool Gateway contract."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = ToolRegistryRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        try:
+            return [
+                tool_definition_version_response(row)
+                for row in repository.list_versions(tool_id)
+            ]
+        except ToolDefinitionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/tool-runtime/actions",
+        response_model=list[ToolRuntimeActionResponse],
+        tags=["tool-gateway"],
+    )
+    async def list_tool_runtime_actions(
+        decision_id: str | None = None,
+        correlation_id: str | None = None,
+        action_status: str | None = None,
+        agent_id: str | None = None,
+        tool_id: str | None = None,
+        created_from: str | None = None,
+        created_to: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[ToolRuntimeActionResponse]:
+        """List Tool Gateway runtime actions in tenant/environment scope."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            query = ToolRuntimeActionQuery(
+                decision_id=decision_id,
+                correlation_id=correlation_id,
+                action_status=action_status,
+                agent_id=agent_id,
+                tool_id=tool_id,
+                created_from=created_from,
+                created_to=created_to,
+                limit=limit,
+                offset=offset,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        repository = ToolRuntimeActionRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        return [tool_runtime_action_response(row) for row in repository.list_actions(query)]
+
+    @app.get(
+        "/api/v1/tool-runtime/actions/{action_id}",
+        response_model=ToolRuntimeActionDetailResponse,
+        tags=["tool-gateway"],
+    )
+    async def get_tool_runtime_action(
+        action_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ToolRuntimeActionDetailResponse:
+        """Get one Tool Gateway runtime action with event timeline."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = ToolRuntimeActionRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        detail = repository.get_action_detail(action_id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="Tool runtime action not found.")
+        return tool_runtime_action_detail_response(detail)
+
+    @app.get(
+        "/api/v1/tools/{tool_id}/response-policy",
+        response_model=ToolResponsePolicyResponse,
+        tags=["tool-gateway"],
+    )
+    async def get_tool_response_policy(
+        tool_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ToolResponsePolicyResponse:
+        """Get response handling policy for a tool."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = ToolRegistryRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        try:
+            row = repository.get_response_policy(tool_id)
+        except ToolDefinitionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if row is None:
+            raise HTTPException(status_code=404, detail="Response policy not found.")
+        return tool_response_policy_response(row)
+
+    @app.patch(
+        "/api/v1/tools/{tool_id}/response-policy",
+        response_model=ToolResponsePolicyResponse,
+        tags=["tool-gateway"],
+    )
+    async def patch_tool_response_policy(
+        tool_id: str,
+        body: ToolResponsePolicyPatchRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ToolResponsePolicyResponse:
+        """Patch response handling policy for a tool."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = ToolRegistryRepository(connection, organization_id, environment_id)
+                row = repository.update_response_policy(tool_id, body)
+                return tool_response_policy_response(row)
+        except ToolDefinitionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/agents/{agent_id}/tool-permissions",
+        response_model=AgentToolPermissionResponse,
+        status_code=201,
+        tags=["tool-gateway"],
+    )
+    async def grant_agent_tool_permission(
+        agent_id: str,
+        body: AgentToolPermissionGrantRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> AgentToolPermissionResponse:
+        """Grant an active agent access to an active tool."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = ToolRegistryRepository(connection, organization_id, environment_id)
+                row = repository.grant_agent_tool_permission(
+                    agent_id,
+                    body,
+                    granted_by=current_user.id,
+                )
+                permission = agent_tool_permission_response(row)
+                AuditEventRepository(connection).insert(
+                    _agent_tool_permission_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="agent_tool_permission.granted",
+                        permission=permission,
+                        correlation_id=context.correlation_id,
+                        reason=body.granted_reason or None,
+                    )
+                )
+                return permission
+        except DuplicateAgentToolPermissionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except AgentToolPermissionValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/agents/{agent_id}/tool-permissions",
+        response_model=list[AgentToolPermissionResponse],
+        tags=["tool-gateway"],
+    )
+    async def list_agent_tool_permissions_for_agent(
+        agent_id: str,
+        status: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[AgentToolPermissionResponse]:
+        """List tool permissions granted to one agent."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = ToolRegistryRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        try:
+            return [
+                agent_tool_permission_response(row)
+                for row in repository.list_agent_tool_permissions(
+                    agent_id=agent_id,
+                    status=status,
+                    limit=limit,
+                    offset=offset,
+                )
+            ]
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/tools/{tool_id}/agent-permissions",
+        response_model=list[AgentToolPermissionResponse],
+        tags=["tool-gateway"],
+    )
+    async def list_agent_tool_permissions_for_tool(
+        tool_id: str,
+        status: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[AgentToolPermissionResponse]:
+        """List agents allowed to call one tool."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = ToolRegistryRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        if repository.get_tool(tool_id) is None:
+            raise HTTPException(status_code=404, detail="Tool definition not found.")
+        try:
+            return [
+                agent_tool_permission_response(row)
+                for row in repository.list_agent_tool_permissions(
+                    tool_id=tool_id,
+                    status=status,
+                    limit=limit,
+                    offset=offset,
+                )
+            ]
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.patch(
+        "/api/v1/agent-tool-permissions/{permission_id}",
+        response_model=AgentToolPermissionResponse,
+        tags=["tool-gateway"],
+    )
+    async def patch_agent_tool_permission(
+        permission_id: str,
+        body: AgentToolPermissionPatchRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> AgentToolPermissionResponse:
+        """Patch an agent-tool permission scope or expiration."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = ToolRegistryRepository(connection, organization_id, environment_id)
+                row = repository.update_agent_tool_permission(
+                    permission_id,
+                    body,
+                    actor_id=current_user.id,
+                )
+                permission = agent_tool_permission_response(row)
+                AuditEventRepository(connection).insert(
+                    _agent_tool_permission_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="agent_tool_permission.updated",
+                        permission=permission,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return permission
+        except AgentToolPermissionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/agent-tool-permissions/{permission_id}/pause",
+        response_model=AgentToolPermissionResponse,
+        tags=["tool-gateway"],
+    )
+    async def pause_agent_tool_permission(
+        permission_id: str,
+        body: AgentToolPermissionActionRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> AgentToolPermissionResponse:
+        """Pause an agent-tool permission with a required reason."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = ToolRegistryRepository(connection, organization_id, environment_id)
+                row = repository.pause_agent_tool_permission(
+                    permission_id,
+                    actor_id=current_user.id,
+                    reason=body.reason,
+                )
+                permission = agent_tool_permission_response(row)
+                AuditEventRepository(connection).insert(
+                    _agent_tool_permission_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="agent_tool_permission.paused",
+                        permission=permission,
+                        correlation_id=context.correlation_id,
+                        reason=body.reason,
+                    )
+                )
+                return permission
+        except AgentToolPermissionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/agent-tool-permissions/{permission_id}/revoke",
+        response_model=AgentToolPermissionResponse,
+        tags=["tool-gateway"],
+    )
+    async def revoke_agent_tool_permission(
+        permission_id: str,
+        body: AgentToolPermissionActionRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> AgentToolPermissionResponse:
+        """Revoke an agent-tool permission with a required reason."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = ToolRegistryRepository(connection, organization_id, environment_id)
+                row = repository.revoke_agent_tool_permission(
+                    permission_id,
+                    actor_id=current_user.id,
+                    reason=body.reason,
+                )
+                permission = agent_tool_permission_response(row)
+                AuditEventRepository(connection).insert(
+                    _agent_tool_permission_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="agent_tool_permission.revoked",
+                        permission=permission,
+                        correlation_id=context.correlation_id,
+                        reason=body.reason,
+                    )
+                )
+                return permission
+        except AgentToolPermissionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/tools/{tool_id}/upstream-target",
+        response_model=ToolUpstreamTargetResponse,
+        status_code=201,
+        tags=["tool-gateway"],
+    )
+    async def create_tool_upstream_target(
+        tool_id: str,
+        body: ToolUpstreamTargetCreateRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ToolUpstreamTargetResponse:
+        """Create an upstream target for a registered tool."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = ToolRegistryRepository(connection, organization_id, environment_id)
+                row = repository.create_upstream_target(tool_id, body)
+                target = tool_upstream_target_response(repository, row)
+                AuditEventRepository(connection).insert(
+                    _tool_upstream_target_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="tool.upstream_target.created",
+                        target=target,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return target
+        except ToolDefinitionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except DuplicateToolUpstreamTargetError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ToolUpstreamTargetValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/tools/{tool_id}/upstream-target",
+        response_model=ToolUpstreamTargetResponse,
+        tags=["tool-gateway"],
+    )
+    async def get_tool_upstream_target(
+        tool_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ToolUpstreamTargetResponse:
+        """Get the active upstream target for a registered tool."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = ToolRegistryRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        if repository.get_tool(tool_id) is None:
+            raise HTTPException(status_code=404, detail="Tool definition not found.")
+        row = repository.get_upstream_target_for_tool(tool_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Upstream target not found.")
+        return tool_upstream_target_response(repository, row)
+
+    @app.patch(
+        "/api/v1/tool-upstream-targets/{target_id}",
+        response_model=ToolUpstreamTargetResponse,
+        tags=["tool-gateway"],
+    )
+    async def patch_tool_upstream_target(
+        target_id: str,
+        body: ToolUpstreamTargetPatchRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ToolUpstreamTargetResponse:
+        """Patch upstream target settings or health-check configuration."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = ToolRegistryRepository(connection, organization_id, environment_id)
+                row = repository.update_upstream_target(target_id, body)
+                target = tool_upstream_target_response(repository, row)
+                AuditEventRepository(connection).insert(
+                    _tool_upstream_target_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="tool.upstream_target.updated",
+                        target=target,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return target
+        except ToolUpstreamTargetNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except DuplicateToolUpstreamTargetError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/tool-upstream-targets/{target_id}/check-health",
+        response_model=ToolUpstreamHealthResponse,
+        tags=["tool-gateway"],
+    )
+    async def check_tool_upstream_target_health(
+        target_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ToolUpstreamHealthResponse:
+        """Run and persist a manual upstream health check."""
+
+        organization_id = _require_organization_id(current_user)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = ToolRegistryRepository(connection, organization_id, environment_id)
+                return ToolUpstreamHealthChecker(
+                    repository,
+                    http_client=getattr(app.state, "tool_gateway_http_client", None),
+                ).check_target(target_id)
+        except ToolUpstreamTargetNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(
+        "/api/v1/tool-upstream-targets/{target_id}/health",
+        response_model=ToolUpstreamHealthResponse,
+        tags=["tool-gateway"],
+    )
+    async def get_tool_upstream_target_health(
+        target_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ToolUpstreamHealthResponse:
+        """Return persisted upstream health-check state."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = ToolRegistryRepository(
+            _audit_database().connect(),
+            organization_id,
+            environment_id,
+        )
+        row = repository.get_upstream_health(target_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Upstream health not found.")
+        return tool_upstream_health_response(row)
 
     @app.post(
         "/api/v1/mcp/servers",

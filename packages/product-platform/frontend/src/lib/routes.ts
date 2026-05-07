@@ -60,6 +60,12 @@ export const routeRegistry: ProductRoute[] = [
     description: "Runtime sessions, sandbox controls, ring decisions, and kill-switches."
   },
   {
+    path: "/tool-gateway/decisions",
+    label: "Tool Gateway",
+    area: "Security",
+    description: "Tool invocation decisions, runtime audit trails, and response redaction outcomes."
+  },
+  {
     path: "/discovery",
     label: "Discovery",
     area: "Operations",
@@ -116,4 +122,3 @@ export function routeGroups() {
   }
   return Array.from(groups, ([area, routes]) => ({ area, routes }));
 }
-

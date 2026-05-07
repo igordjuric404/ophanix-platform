@@ -24,6 +24,7 @@ import { PoliciesPage } from "../features/policies/PoliciesPage";
 import { RuntimePage } from "../features/runtime/RuntimePage";
 import { AccessDeniedPage } from "../features/shared/AccessDeniedPage";
 import { FeaturePlaceholderPage } from "../features/shared/FeaturePlaceholderPage";
+import { ToolDecisionsPage } from "../features/tool-gateway/ToolDecisionsPage";
 import { TrustPage } from "../features/trust/TrustPage";
 import { WorkflowsPage } from "../features/workflows/WorkflowsPage";
 import { canAccessRoute } from "../lib/rbac";
@@ -136,6 +137,12 @@ const runtimeRoute = createRoute({
   component: RuntimePage
 });
 
+const toolGatewayDecisionsRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: "/tool-gateway/decisions",
+  component: ToolDecisionsPage
+});
+
 const marketplaceRoute = createRoute({
   getParentRoute: () => protectedRoute,
   path: "/marketplace",
@@ -178,6 +185,7 @@ const featureRoutes = routeRegistry
       route.path !== "/mesh" &&
       route.path !== "/mcp" &&
       route.path !== "/runtime" &&
+      route.path !== "/tool-gateway/decisions" &&
       route.path !== "/marketplace" &&
       route.path !== "/observability" &&
       route.path !== "/integrations" &&
@@ -211,6 +219,7 @@ const routeTree = rootRoute.addChildren([
     meshRoute,
     mcpRoute,
     runtimeRoute,
+    toolGatewayDecisionsRoute,
     marketplaceRoute,
     observabilityRoute,
     integrationsRoute,

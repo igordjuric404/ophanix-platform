@@ -13,6 +13,7 @@ describe("route registry", () => {
       "/mcp",
       "/mesh",
       "/runtime",
+      "/tool-gateway/decisions",
       "/discovery",
       "/marketplace",
       "/compliance",

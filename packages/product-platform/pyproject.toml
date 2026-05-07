@@ -14,6 +14,7 @@ dependencies = [
     "agentmesh-platform>=3.1.0,<4.0",
     "fastapi>=0.115.0,<1.0",
     "httpx>=0.27.0,<1.0",
+    "jsonschema>=4.22.0,<5.0",
     "pydantic[email]>=2.4.0,<3.0",
     "uvicorn>=0.27.0,<1.0",
 ]

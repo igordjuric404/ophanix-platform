@@ -66,6 +66,17 @@ EXPECTED_MIGRATIONS = [
     "0049",
 ]
 
+FEATURE_MIGRATIONS = [
+    "0050",
+    "0051",
+    "0052",
+    "0053",
+    "0054",
+    "0055",
+]
+
+ALL_EXPECTED_MIGRATIONS = [*EXPECTED_MIGRATIONS, *FEATURE_MIGRATIONS]
+
 
 class DatabaseMigrationPhase1Tests(unittest.TestCase):
     def test_database_url_parsing_supports_sqlite_only(self) -> None:
@@ -97,7 +108,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
                 ).fetchall()
             }
 
-            self.assertEqual(applied, EXPECTED_MIGRATIONS)
+            self.assertEqual(applied, ALL_EXPECTED_MIGRATIONS)
             self.assertIn("organizations", tables)
             self.assertIn("environments", tables)
             self.assertIn("api_keys", tables)
@@ -197,7 +208,17 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertIn("artifacts", tables)
             self.assertIn("artifact_links", tables)
             self.assertIn("artifact_attestations", tables)
-            self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS)
+            self.assertIn("tool_definitions", tables)
+            self.assertIn("tool_definition_versions", tables)
+            self.assertIn("tool_upstream_targets", tables)
+            self.assertIn("tool_upstream_health_checks", tables)
+            self.assertIn("agent_tool_permissions", tables)
+            self.assertIn("agent_tool_permission_history", tables)
+            self.assertIn("tool_policy_decisions", tables)
+            self.assertIn("tool_response_policies", tables)
+            self.assertIn("tool_runtime_actions", tables)
+            self.assertIn("tool_runtime_action_events", tables)
+            self.assertEqual(runner.applied_versions(), ALL_EXPECTED_MIGRATIONS)
         finally:
             connection.close()
 
@@ -207,6 +228,47 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             connection.row_factory = sqlite3.Row
             runner = MigrationRunner(connection)
             runner.apply_all()
+
+            for index, migration in enumerate(reversed(FEATURE_MIGRATIONS), start=1):
+                rolled_back = runner.rollback_last()
+                tables = {
+                    row["name"]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    ).fetchall()
+                }
+
+                self.assertEqual(rolled_back, migration)
+                self.assertEqual(
+                    runner.applied_versions(),
+                    ALL_EXPECTED_MIGRATIONS[:-index],
+                )
+                if migration == "0051":
+                    self.assertNotIn("tool_upstream_targets", tables)
+                    self.assertNotIn("tool_upstream_health_checks", tables)
+                    self.assertIn("tool_definitions", tables)
+                    self.assertIn("tool_definition_versions", tables)
+                if migration == "0052":
+                    self.assertNotIn("agent_tool_permissions", tables)
+                    self.assertNotIn("agent_tool_permission_history", tables)
+                    self.assertIn("tool_upstream_targets", tables)
+                    self.assertIn("tool_upstream_health_checks", tables)
+                if migration == "0053":
+                    self.assertNotIn("tool_policy_decisions", tables)
+                    self.assertIn("agent_tool_permissions", tables)
+                    self.assertIn("agent_tool_permission_history", tables)
+                if migration == "0054":
+                    self.assertNotIn("tool_response_policies", tables)
+                    self.assertIn("tool_policy_decisions", tables)
+                if migration == "0055":
+                    self.assertNotIn("tool_runtime_actions", tables)
+                    self.assertNotIn("tool_runtime_action_events", tables)
+                    self.assertIn("tool_response_policies", tables)
+                if migration == "0050":
+                    self.assertNotIn("tool_definitions", tables)
+                    self.assertNotIn("tool_definition_versions", tables)
+                    self.assertIn("artifacts", tables)
+                    self.assertIn("artifact_links", tables)
 
             rolled_back = runner.rollback_last()
             tables = {
@@ -1598,8 +1660,8 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             finally:
                 reopened.close()
 
-        self.assertEqual(applied, EXPECTED_MIGRATIONS)
-        self.assertEqual(count, len(EXPECTED_MIGRATIONS))
+        self.assertEqual(applied, ALL_EXPECTED_MIGRATIONS)
+        self.assertEqual(count, len(ALL_EXPECTED_MIGRATIONS))
 
 
 if __name__ == "__main__":
