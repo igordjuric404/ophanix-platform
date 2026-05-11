@@ -8,6 +8,7 @@ import httpx
 from ophanix_tool_gateway import (
     OphanixToolGatewayClient,
     StaticTokenProvider,
+    ToolDeniedError,
     ToolGatewayError,
 )
 
@@ -91,6 +92,74 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
             client.call_tool("claims.lookup", {"claim_id": "claim_123"})
 
         self.assertEqual(raised.exception.retry_after_seconds, 5.0)
+
+    def test_generic_403_remains_gateway_error(self) -> None:
+        client = _client(
+            lambda _request: httpx.Response(
+                403,
+                json={"error": {"code": "forbidden", "message": "Proxy denied."}},
+            )
+        )
+
+        with self.assertRaises(ToolGatewayError) as raised:
+            client.call_tool("claims.lookup", {"claim_id": "claim_123"})
+
+        self.assertNotIsInstance(raised.exception, ToolDeniedError)
+        self.assertEqual(raised.exception.code, "forbidden")
+
+    def test_structured_policy_403_raises_denied_error(self) -> None:
+        client = _client(
+            lambda _request: httpx.Response(
+                403,
+                json={
+                    "request_id": "req-denied",
+                    "correlation_id": "corr-denied",
+                    "tool_name": "claims.lookup",
+                    "decision": {"decision": "deny"},
+                    "reason_code": "permission_missing",
+                    "error": {"code": "permission_missing"},
+                },
+            )
+        )
+
+        with self.assertRaises(ToolDeniedError) as raised:
+            client.call_tool("claims.lookup", {"claim_id": "claim_123"})
+
+        self.assertEqual(raised.exception.reason_code, "permission_missing")
+
+    def test_list_all_tools_enforces_max_total(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            offset = int(request.url.params.get("offset", "0"))
+            tool = {**TOOL_FIXTURE, "id": f"tool_{offset}", "name": f"claims.lookup.{offset}"}
+            return httpx.Response(200, json=[tool])
+
+        client = _client(handler)
+
+        with self.assertRaises(ToolGatewayError) as raised:
+            client.list_all_tools(page_size=1, max_total=1)
+
+        self.assertEqual(raised.exception.code, "tool_discovery_too_large")
+
+    def test_streaming_response_cap_blocks_body_without_content_length(self) -> None:
+        client = _client(
+            lambda _request: httpx.Response(
+                200,
+                content=b"x" * 11,
+                headers={"content-type": "application/json"},
+            ),
+        )
+        client.max_response_bytes = 10
+
+        with self.assertRaises(ToolGatewayError) as raised:
+            client.call_tool("claims.lookup", {"claim_id": "claim_123"})
+
+        self.assertEqual(raised.exception.code, "response_too_large")
+
+    def test_list_tools_status_argument_warns_as_deprecated(self) -> None:
+        client = _client(lambda _request: httpx.Response(200, json=[]))
+
+        with self.assertWarns(DeprecationWarning):
+            self.assertEqual(client.list_tools(status="active"), [])
 
 
 def _client(

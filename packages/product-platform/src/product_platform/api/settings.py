@@ -60,6 +60,9 @@ class Settings:
     database_url: str = field(
         default_factory=lambda: os.environ.get("OPHANIX_DATABASE_URL", "sqlite:///ophanix_product.db")
     )
+    allow_sqlite_in_production: bool = field(
+        default_factory=lambda: _bool_env("OPHANIX_ALLOW_SQLITE_IN_PRODUCTION", False)
+    )
     dev_login_allowed_emails: list[str] = field(
         default_factory=_dev_login_allowed_emails
     )
@@ -103,6 +106,9 @@ class Settings:
     )
     secret_manager_ref: str | None = field(
         default_factory=lambda: os.environ.get("OPHANIX_SECRET_MANAGER_REF")
+    )
+    gateway_token_hash_pepper: str | None = field(
+        default_factory=lambda: os.environ.get("OPHANIX_GATEWAY_TOKEN_HASH_PEPPER")
     )
     idp_issuer_url: str | None = field(default_factory=lambda: os.environ.get("OPHANIX_IDP_ISSUER_URL"))
     idp_audience: str | None = field(default_factory=lambda: os.environ.get("OPHANIX_IDP_AUDIENCE"))

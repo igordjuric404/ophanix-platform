@@ -151,6 +151,29 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
         self.assertEqual(response.status_code, 413)
         self.assertEqual(response.json()["code"], "REQUEST_BODY_TOO_LARGE")
 
+    def test_api_gateway_body_limit_blocks_streaming_body_without_content_length(self) -> None:
+        app = create_app(
+            Settings(
+                app_name="Ophanix Test Platform",
+                environment="test",
+                build_sha="test-sha",
+                build_time="2026-05-01T00:00:00Z",
+                session_secret="test-secret",
+                tool_gateway_max_body_bytes=10,
+            ),
+            database=self.database,
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/api/v1/tools/claims.lookup/invoke",
+            headers=self._headers(self.raw_token),
+            content=iter([b'{"payload":', b'{"claim_id":"claim_123"}}']),
+        )
+
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(response.json()["code"], "REQUEST_BODY_TOO_LARGE")
+
     def test_api_gateway_rate_limit_blocks_excess_runtime_requests(self) -> None:
         app = create_app(
             Settings(
@@ -216,6 +239,8 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
                     build_sha="test-sha",
                     build_time="2026-05-01T00:00:00Z",
                     session_secret="test-secret",
+                    allow_sqlite_in_production=True,
+                    gateway_token_hash_pepper="test-pepper",
                     cors_origins=["*"],
                 ),
                 database=self.database,
@@ -229,6 +254,8 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
                 build_sha="test-sha",
                 build_time="2026-05-01T00:00:00Z",
                 session_secret="test-secret",
+                allow_sqlite_in_production=True,
+                gateway_token_hash_pepper="test-pepper",
                 cors_origins=["https://app.example.com"],
             ),
             database=self.database,
@@ -237,6 +264,29 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
 
         self.assertEqual(client.get("/docs").status_code, 404)
         self.assertEqual(client.get("/openapi.json").status_code, 404)
+        self.assertEqual(client.get("/api/openapi.json").status_code, 404)
+
+    def test_api_system_config_hides_docs_url_when_docs_disabled(self) -> None:
+        app = create_app(
+            Settings(
+                app_name="Ophanix Test Platform",
+                environment="test",
+                build_sha="test-sha",
+                build_time="2026-05-01T00:00:00Z",
+                session_secret="test-secret",
+                enable_api_docs=False,
+            ),
+            database=self.database,
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+        login = client.post("/api/v1/auth/dev-login", json={"email": "admin@example.com"})
+        token = login.json()["access_token"]
+        config = client.get(
+            "/api/v1/system/config",
+            headers={"Authorization": f"Bearer {token}"},
+        ).json()
+
+        self.assertIsNone(config["docs_url"])
 
     def test_api_rejects_default_session_secret_in_production(self) -> None:
         with self.assertRaisesRegex(ValueError, "OPHANIX_SESSION_SECRET"):
@@ -247,13 +297,15 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
                     build_sha="test-sha",
                     build_time="2026-05-01T00:00:00Z",
                     session_secret="dev-secret-change-me",
+                    allow_sqlite_in_production=True,
+                    gateway_token_hash_pepper="test-pepper",
                     cors_origins=["https://app.example.com"],
                 ),
                 database=self.database,
             )
 
-    def test_api_requires_configured_database_outside_local_environments(self) -> None:
-        with self.assertRaisesRegex(ValueError, "configured database"):
+    def test_api_rejects_sqlite_database_outside_local_environments_by_default(self) -> None:
+        with self.assertRaisesRegex(ValueError, "SQLite is not supported"):
             create_app(
                 Settings(
                     app_name="Ophanix Test Platform",
@@ -261,8 +313,41 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
                     build_sha="test-sha",
                     build_time="2026-05-01T00:00:00Z",
                     session_secret="test-secret",
+                    gateway_token_hash_pepper="test-pepper",
                     cors_origins=["https://app.example.com"],
                 )
+            )
+
+    def test_api_requires_gateway_token_hash_pepper_in_production(self) -> None:
+        with self.assertRaisesRegex(ValueError, "OPHANIX_GATEWAY_TOKEN_HASH_PEPPER"):
+            create_app(
+                Settings(
+                    app_name="Ophanix Test Platform",
+                    environment="production",
+                    build_sha="test-sha",
+                    build_time="2026-05-01T00:00:00Z",
+                    session_secret="test-secret",
+                    allow_sqlite_in_production=True,
+                    cors_origins=["https://app.example.com"],
+                ),
+                database=self.database,
+            )
+
+    def test_api_rejects_disabled_gateway_safety_limits_in_production(self) -> None:
+        with self.assertRaisesRegex(ValueError, "production safety limits"):
+            create_app(
+                Settings(
+                    app_name="Ophanix Test Platform",
+                    environment="production",
+                    build_sha="test-sha",
+                    build_time="2026-05-01T00:00:00Z",
+                    session_secret="test-secret",
+                    allow_sqlite_in_production=True,
+                    gateway_token_hash_pepper="test-pepper",
+                    tool_gateway_rate_limit_max_requests=0,
+                    cors_origins=["https://app.example.com"],
+                ),
+                database=self.database,
             )
 
     def test_integration_failed_verification_creates_safe_audit_event(self) -> None:

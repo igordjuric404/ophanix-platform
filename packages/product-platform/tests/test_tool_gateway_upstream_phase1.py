@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import socket
 import unittest
 from unittest.mock import patch
 
@@ -91,7 +93,7 @@ class ToolGatewayUpstreamPhase1Tests(unittest.TestCase):
 
         self.assertIn("absolute http or https URL", str(context.exception))
 
-    def test_unit_unsupported_auth_mode_is_rejected_until_secret_backed_auth_exists(self) -> None:
+    def test_unit_secret_backed_auth_modes_require_secret_reference(self) -> None:
         with self.assertRaises(ValidationError) as context:
             ToolUpstreamTargetCreateRequest(
                 base_url="https://claims.internal.example",
@@ -99,7 +101,27 @@ class ToolGatewayUpstreamPhase1Tests(unittest.TestCase):
                 auth_mode="bearer",
             )
 
-        self.assertIn("auth_mode must be one of: none", str(context.exception))
+        self.assertIn("secret_ref is required", str(context.exception))
+
+        target = ToolUpstreamTargetCreateRequest(
+            base_url="https://claims.internal.example",
+            path_template="/claims",
+            auth_mode="bearer",
+            auth_config_json={"secret_ref": "secref_upstream_claims"},
+        )
+        self.assertEqual(target.auth_mode, "bearer")
+        self.assertEqual(target.auth_config_json, {"secret_ref": "secref_upstream_claims"})
+
+    def test_unit_auth_config_rejects_inline_secret_material(self) -> None:
+        with self.assertRaises(ValidationError) as context:
+            ToolUpstreamTargetCreateRequest(
+                base_url="https://claims.internal.example",
+                path_template="/claims",
+                auth_mode="bearer",
+                auth_config_json={"secret_ref": "Bearer raw-token"},
+            )
+
+        self.assertIn("opaque secret reference", str(context.exception))
 
     def test_unit_private_ip_upstream_url_is_rejected(self) -> None:
         with self.assertRaises(ValidationError) as context:
@@ -137,6 +159,20 @@ class ToolGatewayUpstreamPhase1Tests(unittest.TestCase):
                     base_url="https://claims.example.com",
                     path_template="/claims",
                 )
+
+        self.assertIn("private", str(context.exception))
+
+    def test_unit_unresolved_dns_upstream_url_fails_closed_outside_local_envs(self) -> None:
+        with patch.dict(os.environ, {"OPHANIX_ENVIRONMENT": "production"}, clear=False):
+            with patch(
+                "product_platform.tool_gateway.models.socket.getaddrinfo",
+                side_effect=socket.gaierror("unresolved"),
+            ):
+                with self.assertRaises(ValidationError) as context:
+                    ToolUpstreamTargetCreateRequest(
+                        base_url="https://unresolved.example.com",
+                        path_template="/claims",
+                    )
 
         self.assertIn("private", str(context.exception))
 

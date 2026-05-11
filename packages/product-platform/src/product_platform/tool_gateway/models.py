@@ -2,21 +2,25 @@
 
 from __future__ import annotations
 
-import re
 import ipaddress
+import json
+import os
+import re
 import socket
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 SUPPORTED_TOOL_STATUSES = {"draft", "active", "disabled", "retired"}
 TOOL_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]*$")
 SUPPORTED_UPSTREAM_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
-SUPPORTED_UPSTREAM_AUTH_MODES = {"none"}
+SUPPORTED_UPSTREAM_AUTH_MODES = {"none", "api_key", "bearer"}
 SUPPORTED_UPSTREAM_STATUSES = {"configured", "healthy", "degraded", "unhealthy", "disabled"}
 SUPPORTED_AGENT_TOOL_PERMISSION_STATUSES = {"active", "paused", "revoked", "expired"}
+UPSTREAM_AUTH_HEADER_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,127}$")
+UPSTREAM_QUERY_PARAMETER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 
 
 class ToolDefinitionCreateRequest(BaseModel):
@@ -162,12 +166,14 @@ class ToolUpstreamTargetCreateRequest(BaseModel):
     path_template: str = Field(default="/", min_length=1)
     method: str = "POST"
     auth_mode: str = "none"
+    auth_config_json: dict[str, Any] | None = None
     timeout_ms: int = Field(default=5_000, ge=100, le=60_000)
     status: str = "configured"
     health_url: str | None = None
     expected_status: int = Field(default=200, ge=100, le=599)
     interval_seconds: int = Field(default=60, ge=1, le=86_400)
     health_enabled: bool = True
+    query_parameter_allowlist: list[str] = Field(default_factory=list)
 
     @field_validator("base_url")
     @classmethod
@@ -207,6 +213,21 @@ class ToolUpstreamTargetCreateRequest(BaseModel):
             raise ValueError(f"auth_mode must be one of: {supported}.")
         return auth_mode
 
+    @field_validator("auth_config_json")
+    @classmethod
+    def _validate_auth_config_json(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        return normalize_upstream_auth_config(value)
+
+    @field_validator("query_parameter_allowlist")
+    @classmethod
+    def _validate_query_parameter_allowlist(cls, value: list[str]) -> list[str]:
+        return normalize_query_parameter_allowlist(value)
+
+    @model_validator(mode="after")
+    def _validate_auth_config_for_mode(self) -> "ToolUpstreamTargetCreateRequest":
+        validate_upstream_auth_configuration(self.auth_mode, self.auth_config_json)
+        return self
+
     @field_validator("status")
     @classmethod
     def _validate_upstream_status(cls, value: str) -> str:
@@ -224,12 +245,14 @@ class ToolUpstreamTargetPatchRequest(BaseModel):
     path_template: str | None = None
     method: str | None = None
     auth_mode: str | None = None
+    auth_config_json: dict[str, Any] | None = None
     timeout_ms: int | None = Field(default=None, ge=100, le=60_000)
     status: str | None = None
     health_url: str | None = None
     expected_status: int | None = Field(default=None, ge=100, le=599)
     interval_seconds: int | None = Field(default=None, ge=1, le=86_400)
     health_enabled: bool | None = None
+    query_parameter_allowlist: list[str] | None = None
 
     @field_validator("base_url")
     @classmethod
@@ -277,6 +300,24 @@ class ToolUpstreamTargetPatchRequest(BaseModel):
             raise ValueError(f"auth_mode must be one of: {supported}.")
         return auth_mode
 
+    @field_validator("auth_config_json")
+    @classmethod
+    def _validate_optional_auth_config_json(
+        cls,
+        value: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        return normalize_upstream_auth_config(value)
+
+    @field_validator("query_parameter_allowlist")
+    @classmethod
+    def _validate_optional_query_parameter_allowlist(
+        cls,
+        value: list[str] | None,
+    ) -> list[str] | None:
+        if value is None:
+            return None
+        return normalize_query_parameter_allowlist(value)
+
     @field_validator("status")
     @classmethod
     def _validate_optional_status(cls, value: str | None) -> str | None:
@@ -317,6 +358,7 @@ class ToolUpstreamTargetResponse(BaseModel):
     auth_mode: str
     timeout_ms: int
     status: str
+    query_parameter_allowlist: list[str] = Field(default_factory=list)
     created_at: str
     updated_at: str
     health: ToolUpstreamHealthResponse | None = None
@@ -488,6 +530,84 @@ def validate_http_url(value: str, *, field: str) -> str:
     return stripped.rstrip("/")
 
 
+def normalize_upstream_auth_config(value: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Normalize upstream auth config without accepting inline secrets."""
+
+    if value is None:
+        return None
+    allowed = {"header_name", "header_prefix", "secret_ref"}
+    unknown = set(value) - allowed
+    if unknown:
+        raise ValueError(f"unsupported auth_config_json keys: {', '.join(sorted(unknown))}.")
+    normalized: dict[str, Any] = {}
+    secret_ref = _optional_str(value.get("secret_ref"))
+    if secret_ref is not None:
+        if _looks_like_inline_secret_key("secret_ref", secret_ref):
+            raise ValueError("auth_config_json.secret_ref must be an opaque secret reference.")
+        normalized["secret_ref"] = secret_ref
+    header_name = _optional_str(value.get("header_name"))
+    if header_name is not None:
+        if not UPSTREAM_AUTH_HEADER_NAME_PATTERN.fullmatch(header_name):
+            raise ValueError("auth_config_json.header_name must be a valid HTTP header name.")
+        if header_name.lower() in {"authorization", "cookie", "set-cookie"}:
+            raise ValueError("auth_config_json.header_name must not override sensitive headers.")
+        normalized["header_name"] = header_name
+    header_prefix = _optional_str(value.get("header_prefix"))
+    if header_prefix is not None:
+        if any(char in header_prefix for char in "\r\n"):
+            raise ValueError("auth_config_json.header_prefix must not contain line breaks.")
+        normalized["header_prefix"] = header_prefix
+    return normalized or None
+
+
+def validate_upstream_auth_configuration(
+    auth_mode: str,
+    auth_config_json: dict[str, Any] | str | None,
+) -> None:
+    """Validate that an upstream auth mode has the required secret reference."""
+
+    mode = auth_mode.strip().lower()
+    config = _json_mapping(auth_config_json)
+    if mode == "none":
+        if config:
+            raise ValueError("auth_config_json must be omitted when auth_mode is none.")
+        return
+    if mode not in SUPPORTED_UPSTREAM_AUTH_MODES:
+        supported = ", ".join(sorted(SUPPORTED_UPSTREAM_AUTH_MODES))
+        raise ValueError(f"auth_mode must be one of: {supported}.")
+    if not config or not str(config.get("secret_ref", "")).strip():
+        raise ValueError(f"auth_config_json.secret_ref is required when auth_mode is {mode}.")
+    if mode == "bearer":
+        return
+    if mode == "api_key":
+        header_name = str(config.get("header_name") or "X-API-Key")
+        if not UPSTREAM_AUTH_HEADER_NAME_PATTERN.fullmatch(header_name):
+            raise ValueError("auth_config_json.header_name must be a valid HTTP header name.")
+        return
+
+
+def normalize_query_parameter_allowlist(value: list[str]) -> list[str]:
+    """Normalize explicit query-parameter names for GET/DELETE upstream targets."""
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        stripped = item.strip()
+        if not stripped:
+            raise ValueError("query_parameter_allowlist entries must not be blank.")
+        if not UPSTREAM_QUERY_PARAMETER_PATTERN.fullmatch(stripped):
+            raise ValueError(
+                "query_parameter_allowlist entries must start with a letter and contain only "
+                "letters, numbers, dots, underscores, or hyphens."
+            )
+        lowered = stripped.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        normalized.append(stripped)
+    return normalized
+
+
 def _validate_redaction_rules(value: dict[str, Any]) -> dict[str, Any]:
     allowed = {"redact_keys", "redact_patterns"}
     unknown = set(value) - allowed
@@ -507,6 +627,36 @@ def _validate_redaction_rules(value: dict[str, Any]) -> dict[str, Any]:
     for pattern in normalized.get("redact_patterns", []):
         _validate_redaction_pattern(pattern)
     return normalized
+
+
+def _json_mapping(value: dict[str, Any] | str | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if not value.strip():
+            return None
+        loaded = json.loads(value)
+        if not isinstance(loaded, dict):
+            raise ValueError("auth_config_json must be an object.")
+        return loaded
+    return value
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("auth_config_json values must be strings.")
+    stripped = value.strip()
+    return stripped or None
+
+
+def _looks_like_inline_secret_key(key: str, value: str) -> bool:
+    lowered_key = key.lower()
+    lowered_value = value.lower()
+    if lowered_key != "secret_ref":
+        return False
+    return lowered_value.startswith(("bearer ", "sk-", "pk_", "eyj")) or len(value) > 256
 
 
 def _validate_redaction_pattern(pattern: str) -> None:
@@ -539,9 +689,7 @@ def _hostname_resolves_to_forbidden_address(hostname: str) -> bool:
     try:
         resolved = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
     except socket.gaierror:
-        # Test and private DNS names are often not resolvable in local
-        # development. Runtime network policy must still deny private egress.
-        return False
+        return not _allow_unresolved_upstream_hosts()
     for item in resolved:
         sockaddr = item[4]
         if not sockaddr:
@@ -553,6 +701,24 @@ def _hostname_resolves_to_forbidden_address(hostname: str) -> bool:
         if _is_forbidden_upstream_address(address):
             return True
     return False
+
+
+def _allow_unresolved_upstream_hosts() -> bool:
+    if _bool_env("OPHANIX_ALLOW_UNRESOLVED_UPSTREAM_HOSTS", False):
+        return True
+    return os.environ.get("OPHANIX_ENVIRONMENT", "development").strip().lower() in {
+        "development",
+        "dev",
+        "local",
+        "test",
+    }
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _is_forbidden_upstream_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:

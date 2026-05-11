@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from functools import lru_cache
 from typing import Any
 
 from product_platform.tool_gateway.invocation import ToolExecutionError, ToolExecutionResult
@@ -80,9 +81,19 @@ def _redact_value(value: Any, rules: dict[str, Any], *, key: str = "") -> tuple[
 
 
 def _compiled_redaction_rules(rules: dict[str, Any]) -> dict[str, Any]:
+    redact_keys = tuple(_normalize_redaction_key(item) for item in rules.get("redact_keys", []))
+    redact_patterns = tuple(str(pattern) for pattern in rules.get("redact_patterns", []))
+    return _cached_compiled_redaction_rules(redact_keys, redact_patterns)
+
+
+@lru_cache(maxsize=512)
+def _cached_compiled_redaction_rules(
+    redact_keys: tuple[str, ...],
+    redact_patterns: tuple[str, ...],
+) -> dict[str, Any]:
     return {
-        "redact_keys": [_normalize_redaction_key(item) for item in rules.get("redact_keys", [])],
-        "redact_patterns": [re.compile(pattern) for pattern in rules.get("redact_patterns", [])],
+        "redact_keys": list(redact_keys),
+        "redact_patterns": [re.compile(pattern) for pattern in redact_patterns],
     }
 
 

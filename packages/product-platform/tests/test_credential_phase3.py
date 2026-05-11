@@ -165,6 +165,10 @@ class CredentialPhase3Tests(unittest.TestCase):
                     ],
                 )
 
+    def test_unit_credential_scope_rejects_unknown_resource_type(self) -> None:
+        with self.assertRaisesRegex(ValueError, "resource_type must be one of"):
+            CredentialScopeRequest(scope="claims:read", resource_type="ticket")
+
     def test_api_rotate_creates_new_active_credential(self) -> None:
         original = self._issue()["credential"]
 

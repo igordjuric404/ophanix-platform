@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from sqlite3 import Connection, Row
@@ -23,18 +24,29 @@ from product_platform.agents.repository import AgentNotFoundError
 from product_platform.db.ids import generate_id
 from product_platform.db.time import utc_now_iso
 
+SENSITIVE_METADATA_KEY_TOKENS = {
+    "api_key",
+    "apikey",
+    "authorization",
+    "bearer",
+    "password",
+    "private_key",
+    "secret",
+    "token",
+}
+SENSITIVE_METADATA_TEXT_RE = re.compile(
+    r"(?i)\b(bearer\s+[A-Za-z0-9._~+/=-]{8,}|"
+    r"(?:api[-_\s]?key|authorization|password|secret|token)\s*[:=]\s*['\"]?[^,'\"\s]{8,})"
+)
+
 
 def hash_credential_token(token: str) -> str:
     """Return the stable token hash stored by the product database."""
 
     pepper = os.environ.get("OPHANIX_GATEWAY_TOKEN_HASH_PEPPER")
     if pepper:
-        digest = hmac.new(
-            pepper.encode("utf-8"),
-            token.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-        return f"hmac-sha256:{digest}"
+        key_id = os.environ.get("OPHANIX_GATEWAY_TOKEN_HASH_PEPPER_ID")
+        return _hmac_credential_token_hash(token, pepper, key_id=key_id)
     return legacy_credential_token_hash(token)
 
 
@@ -47,9 +59,50 @@ def legacy_credential_token_hash(token: str) -> str:
 def credential_token_hash_candidates(token: str) -> list[str]:
     """Return accepted hashes for lookup during pepper migration."""
 
-    current = hash_credential_token(token)
+    candidates = [hash_credential_token(token)]
+    pepper = os.environ.get("OPHANIX_GATEWAY_TOKEN_HASH_PEPPER")
+    for key_id, previous_pepper in _previous_token_hash_peppers():
+        candidates.append(_hmac_credential_token_hash(token, previous_pepper, key_id=key_id))
     legacy = legacy_credential_token_hash(token)
-    return [current] if current == legacy else [current, legacy]
+    if (not pepper or _bool_env("OPHANIX_GATEWAY_TOKEN_HASH_ACCEPT_LEGACY", False)) and (
+        legacy not in candidates
+    ):
+        candidates.append(legacy)
+    return candidates
+
+
+def _hmac_credential_token_hash(token: str, pepper: str, *, key_id: str | None) -> str:
+    digest = hmac.new(
+        pepper.encode("utf-8"),
+        token.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    normalized_key_id = (key_id or "").strip()
+    if normalized_key_id:
+        return f"hmac-sha256:{normalized_key_id}:{digest}"
+    return f"hmac-sha256:{digest}"
+
+
+def _previous_token_hash_peppers() -> list[tuple[str | None, str]]:
+    raw = os.environ.get("OPHANIX_GATEWAY_TOKEN_HASH_PREVIOUS_PEPPERS", "")
+    previous: list[tuple[str | None, str]] = []
+    for item in raw.split(","):
+        entry = item.strip()
+        if not entry:
+            continue
+        if ":" in entry:
+            key_id, pepper = entry.split(":", 1)
+            previous.append((key_id.strip() or None, pepper))
+        else:
+            previous.append((None, entry))
+    return previous
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def credential_expires_within_threshold(
@@ -719,8 +772,30 @@ class AgentCredentialRepository:
 
     def _ensure_secret_absent(self, raw_token: str, metadata: dict[str, Any]) -> None:
         encoded = json.dumps(metadata, sort_keys=True)
-        if raw_token and raw_token in encoded:
+        if raw_token and (
+            raw_token in encoded
+            or f"Bearer {raw_token}" in encoded
+            or f"bearer {raw_token}" in encoded
+        ):
             raise ValueError("Credential metadata must not include raw token material.")
+        self._ensure_metadata_has_no_secret_markers(metadata)
+
+    def _ensure_metadata_has_no_secret_markers(self, value: Any, *, path: str = "metadata") -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                normalized_key = _normalize_metadata_key(str(key))
+                if _is_sensitive_metadata_key(normalized_key):
+                    raise ValueError(
+                        f"Credential metadata field must not contain secret material: {path}.{key}."
+                    )
+                self._ensure_metadata_has_no_secret_markers(child, path=f"{path}.{key}")
+            return
+        if isinstance(value, list):
+            for index, child in enumerate(value):
+                self._ensure_metadata_has_no_secret_markers(child, path=f"{path}[{index}]")
+            return
+        if isinstance(value, str) and SENSITIVE_METADATA_TEXT_RE.search(value):
+            raise ValueError(f"Credential metadata must not include secret material: {path}.")
 
     def _refresh_agent_credential_status(self, agent_id: str) -> None:
         expiring = self.connection.execute(
@@ -776,6 +851,28 @@ class AgentCredentialRepository:
                 self.environment_id,
             ),
         )
+
+
+def _is_sensitive_metadata_key(normalized_key: str) -> bool:
+    if normalized_key in SENSITIVE_METADATA_KEY_TOKENS:
+        return True
+    return normalized_key.endswith(
+        (
+            "_api_key",
+            "_apikey",
+            "_authorization",
+            "_bearer",
+            "_password",
+            "_private_key",
+            "_secret",
+            "_token",
+        )
+    )
+
+
+def _normalize_metadata_key(key: str) -> str:
+    with_word_boundaries = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key.strip())
+    return re.sub(r"[^a-z0-9]+", "_", with_word_boundaries.lower()).strip("_")
 
 
 class CredentialNotFoundError(ValueError):

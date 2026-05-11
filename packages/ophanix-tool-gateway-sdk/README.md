@@ -75,14 +75,18 @@ Common constructor options:
   short-lived scripts.
 - `timeout_seconds`: per-request timeout, default `5.0`.
 - `max_payload_bytes`: client-side serialized payload cap, default `1_000_000`.
-- `max_response_bytes`: client-side gateway response cap checked before JSON
-  parsing, default `1_000_000`.
+- `max_response_bytes`: client-side gateway response cap, default `1_000_000`.
+  The built-in HTTPX clients enforce this while streaming response bytes and
+  before JSON parsing. Custom injected clients should expose `stream()` for the
+  same pre-materialization protection; otherwise the SDK falls back to checking
+  the materialized response.
 - `cache_tools`: opt-in discovery cache, default `False`.
 - `cache_ttl_seconds`: cache TTL when `cache_tools=True`, default `300.0`.
 - `max_cache_entries`: maximum process-local discovery cache entries when
   caching is enabled, default `256`.
 - `event_hook`: optional callable that receives immutable, token-free telemetry
-  events for tool-call start/success/denial/error.
+  events for tool-call start/success/denial/error. Hook exceptions are swallowed
+  and debug-logged so observability code cannot break tool calls.
 - `discovery_max_retries`: retry count for discovery only, default `2`.
 - `discovery_retry_backoff_seconds`: base exponential backoff, default `0.2`.
 - `discovery_retry_max_sleep_seconds`: cap for retry sleeps and `Retry-After`,
@@ -96,8 +100,9 @@ Main methods:
 - `list_tools(owner_team=None, limit=50, offset=0)`: lists one page of callable
   active tools for the configured credential. The gateway discovery API is
   active-only; the legacy `status="active"` argument remains accepted only for
-  compatibility.
-- `list_all_tools(owner_team=None, page_size=200)`: follows discovery pagination.
+  compatibility and emits `DeprecationWarning`.
+- `list_all_tools(owner_team=None, page_size=200, max_total=None)`: follows
+  discovery pagination and can fail closed if discovery exceeds `max_total`.
 - `get_tool(tool_name_or_id)`: finds one callable tool by name or id.
 - `clear_tool_cache()`: clears cached discovery results when `cache_tools=True`.
 
@@ -151,8 +156,8 @@ automatic retries are safe.
 The SDK validates payloads as strict JSON objects, rejects non-finite numbers,
 non-string object keys, and cyclic Python payloads, rejects header control
 characters, redacts sensitive fields from exception diagnostic bodies, caps
-gateway responses before JSON parsing, and keeps static tokens out of generated
-`repr()` output.
+gateway responses while streaming bytes before JSON parsing when using the
+built-in HTTPX clients, and keeps static tokens out of generated `repr()` output.
 
 When `cache_tools=True`, discovery cache entries are partitioned by a SHA-256
 fingerprint of the current bearer token and expire after `cache_ttl_seconds`.
@@ -170,6 +175,31 @@ lifecycle behavior remains easy to reason about.
 Tool invocations are not retried automatically because the current server
 contract does not yet include idempotency keys. Retry read-only or idempotent
 tools in application code only after the tool contract explicitly permits it.
+
+## Credential Issuance
+
+The SDK consumes gateway bearer tokens; it does not mint them. Production tokens
+must be issued through Product Platform agent credential issuance:
+
+1. Register or select an active agent identity.
+2. Approve the capability scope the credential needs.
+3. Bind the scope to the exact tool resource where possible.
+4. Issue a short-lived bearer credential from the Product Platform API or
+   operator workflow.
+5. Store the raw token in a runtime secret store and expose it to the SDK through
+   `EnvironmentTokenProvider` or a custom provider.
+6. Rotate before expiry and clear discovery caches after emergency permission
+   changes.
+
+Local fixture tokens in direct HTTP examples are deterministic demo data and are
+not production credentials.
+
+## Stability
+
+The package is still `0.1.0` and classified as Beta. Constructor names, typed
+error classes, and the main sync/async methods are treated as the supported
+surface for this line; compatibility shims such as `list_tools(status="active")`
+may emit deprecation warnings before removal in a future pre-1.0 release.
 
 ## Troubleshooting
 
@@ -217,9 +247,10 @@ python3 scripts/validate_release.py
 The release check builds a wheel and sdist, verifies that both artifacts contain
 `ophanix_tool_gateway/__init__.py`, `ophanix_tool_gateway/sdk.py`, and
 `ophanix_tool_gateway/py.typed`, rejects local/generated files such as SQLite
-databases and `__pycache__`, installs the built wheel into a temporary target,
-and runs `twine check` over the generated artifacts. Dependency audit can be
-enforced in CI with:
+databases and `__pycache__`, verifies parity with the product-platform vendored
+SDK copy, installs the built wheel with runtime dependencies into a temporary
+target, and runs `twine check` over the generated artifacts. Dependency audit
+can be enforced in CI with:
 
 ```bash
 python3 -m pip install '.[security]'
@@ -229,12 +260,14 @@ python3 scripts/validate_release.py --strict-git
 
 The SDK depends only on `httpx`. It is also re-exported from `product_platform.tool_gateway`
 for compatibility with earlier internal imports.
+CI exercises the SDK on Python 3.11, 3.12, and 3.13. Dependency range changes
+must keep that matrix green before release.
 
 `--strict-git` additionally requires a clean SDK package worktree and an exact
 release tag matching `v<project.version>` unless `--expected-tag` is supplied.
 
 Publishing is intentionally separate from local artifact validation. A release
 owner must publish only artifacts produced by the validated workflow, preserve
-the build logs and artifact checksums, and document whether the final upload is
-performed through GitHub trusted publishing, Azure DevOps, or another approved
-internal release pipeline.
+the build logs, artifact checksums, provenance attestations, and SBOM, and
+document whether the final upload is performed through GitHub trusted
+publishing, Azure DevOps, or another approved internal release pipeline.

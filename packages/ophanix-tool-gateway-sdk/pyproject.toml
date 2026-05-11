@@ -54,6 +54,7 @@ include = [
     "/scripts",
     "/tests",
     "/README.md",
+    "/API_REFERENCE.md",
     "/LICENSE",
     "/CHANGELOG.md",
     "/SECURITY.md",

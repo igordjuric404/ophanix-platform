@@ -7,7 +7,7 @@ Every agent gets a unique, cryptographically bound identity issued by AgentMesh 
 Identity persists across restarts; revocation propagates in ≤5s.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import ClassVar, Optional, Literal
 from pydantic import BaseModel, Field, field_validator
 from cryptography.hazmat.primitives.asymmetric import ed25519
@@ -20,6 +20,16 @@ import base64
 from agentmesh.exceptions import IdentityError, HandshakeError
 
 logger = logging.getLogger(__name__)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 class AgentDID(BaseModel):
@@ -86,8 +96,8 @@ class AgentIdentity(BaseModel):
     capabilities: list[str] = Field(default_factory=list)
 
     # Metadata
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utc_now)
+    updated_at: datetime = Field(default_factory=_utc_now)
     expires_at: Optional[datetime] = Field(None, description="Identity expiration")
 
     # Status
@@ -291,13 +301,13 @@ class AgentIdentity(BaseModel):
         """Revoke this identity."""
         self.status = "revoked"
         self.revocation_reason = reason
-        self.updated_at = datetime.utcnow()
+        self.updated_at = _utc_now()
 
     def suspend(self, reason: str) -> None:
         """Temporarily suspend this identity."""
         self.status = "suspended"
         self.revocation_reason = reason
-        self.updated_at = datetime.utcnow()
+        self.updated_at = _utc_now()
 
     def reactivate(self, *, override_reason: bool = False) -> None:
         """Reactivate a suspended identity.
@@ -320,13 +330,13 @@ class AgentIdentity(BaseModel):
                 )
         self.status = "active"
         self.revocation_reason = None
-        self.updated_at = datetime.utcnow()
+        self.updated_at = _utc_now()
 
     def is_active(self) -> bool:
         """Check if identity is active and not expired."""
         if self.status != "active":
             return False
-        if self.expires_at and datetime.utcnow() > self.expires_at:
+        if self.expires_at and _utc_now() > _as_utc(self.expires_at):
             return False
         return True
 

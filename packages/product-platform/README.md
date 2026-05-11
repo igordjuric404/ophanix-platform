@@ -85,11 +85,19 @@ Use `AsyncOphanixToolGatewayClient` in async agent runtimes; it mirrors the sync
 
 The SDK validates payloads as strict JSON objects, rejects non-finite numbers and non-string object keys, applies a configurable `max_payload_bytes` cap, adds an SDK `User-Agent`, redacts sensitive fields from exception diagnostic bodies, partitions opt-in discovery caches by credential fingerprint, expires cached discovery with `cache_ttl_seconds`, and keeps static tokens out of generated `repr()` output. Optional SDK telemetry hooks receive immutable token-free metadata only.
 
-Server-side Tool Gateway runtime paths enforce bearer authentication, an explicit runtime-route allowlist, a configurable request body cap (`OPHANIX_TOOL_GATEWAY_MAX_BODY_BYTES`, default `1000000`), a configurable upstream response cap (`OPHANIX_TOOL_GATEWAY_MAX_UPSTREAM_RESPONSE_BYTES`, default `1000000`), and a bounded in-process rate limit (`OPHANIX_TOOL_GATEWAY_RATE_LIMIT_MAX_REQUESTS` per `OPHANIX_TOOL_GATEWAY_RATE_LIMIT_WINDOW_SECONDS`, capped by `OPHANIX_TOOL_GATEWAY_RATE_LIMIT_MAX_KEYS`). Production deployments should still enforce global edge rate limits and request-size limits at the ingress layer.
+Server-side Tool Gateway runtime paths enforce bearer authentication, an explicit runtime-route allowlist, a configurable ASGI request body cap (`OPHANIX_TOOL_GATEWAY_MAX_BODY_BYTES`, default `1000000`), a configurable upstream response cap (`OPHANIX_TOOL_GATEWAY_MAX_UPSTREAM_RESPONSE_BYTES`, default `1000000`), and a bounded in-process rate limit (`OPHANIX_TOOL_GATEWAY_RATE_LIMIT_MAX_REQUESTS` per `OPHANIX_TOOL_GATEWAY_RATE_LIMIT_WINDOW_SECONDS`, capped by `OPHANIX_TOOL_GATEWAY_RATE_LIMIT_MAX_KEYS`). The default HTTPX executor enforces the upstream response cap while streaming bytes and before JSON parsing. Custom executors or injected HTTP clients must provide equivalent streaming limits. Production deployments should still enforce global edge rate limits and request-size limits at the ingress layer because the built-in limiter is process-local.
 
-Upstream targets currently support `auth_mode="none"` only. Secret-backed upstream authentication must be implemented before registering bearer, API-key, or OAuth upstream targets. Upstream base URLs must use HTTPS and reject credentials, query strings, fragments, metadata hosts, loopback addresses, private/link-local/reserved IP literals, and hostnames that resolve to forbidden addresses during validation. Keep egress firewall rules in place as the final SSRF boundary.
+Upstream targets support `auth_mode="none"`, `auth_mode="bearer"`, and `auth_mode="api_key"`. Bearer and API-key targets must use `auth_config_json.secret_ref` to point at an operator-managed secret-provider entry; raw upstream secrets are not accepted in target configuration and are not returned by target read APIs. API-key targets may set `auth_config_json.header_name` and `auth_config_json.header_prefix`; the default header is `X-API-Key`. OAuth and dynamic per-tenant upstream auth remain future product work.
 
-Production app startup fails when `OPHANIX_SESSION_SECRET` is left at the development default, development login is explicitly enabled, or no database is configured. API docs and OpenAPI are enabled by default only in local/test environments; set `OPHANIX_ENABLE_API_DOCS=true` intentionally if an internal environment needs them.
+GET and DELETE upstream targets do not automatically serialize arbitrary payload fields into query parameters. Non-path payload fields require an explicit `query_parameter_allowlist` on the upstream target and still reject credential-like field names such as `token`, `secret`, `password`, `authorization`, and `api_key`.
+
+Upstream base URLs must use HTTPS and reject credentials, query strings, fragments, metadata hosts, loopback addresses, private/link-local/reserved IP literals, and hostnames that resolve to forbidden addresses during validation. In non-local environments, unresolved upstream hostnames fail closed unless `OPHANIX_ALLOW_UNRESOLVED_UPSTREAM_HOSTS=true` is explicitly set for a controlled deployment. Runtime invocation revalidates the persisted base URL before forwarding. Keep egress firewall rules in place as the final SSRF boundary.
+
+Production app startup fails when `OPHANIX_SESSION_SECRET` is left at the development default, development login is explicitly enabled, SQLite is used without `OPHANIX_ALLOW_SQLITE_IN_PRODUCTION=true`, `OPHANIX_GATEWAY_TOKEN_HASH_PEPPER` is missing, any Tool Gateway safety limit is zero or negative, or no database is configured. API docs, `/openapi.json`, and `/api/openapi.json` are enabled by default only in local/test environments; set `OPHANIX_ENABLE_API_DOCS=true` intentionally if an internal environment needs them. `/api/v1/system/config` returns `docs_url: null` when docs are disabled.
+
+Gateway credential token hashes use `OPHANIX_GATEWAY_TOKEN_HASH_PEPPER` when set. Operators can label the current pepper with `OPHANIX_GATEWAY_TOKEN_HASH_PEPPER_ID`, accept old peppers during rotation with `OPHANIX_GATEWAY_TOKEN_HASH_PREVIOUS_PEPPERS` entries like `old-key:old-pepper`, and temporarily allow legacy unpeppered hashes with `OPHANIX_GATEWAY_TOKEN_HASH_ACCEPT_LEGACY=true`. Do not leave legacy acceptance enabled after migration.
+
+The product runtime remains SQLite-backed in this worktree. That is acceptable for local demos and focused SDK tests, but broad production adoption still requires an externally managed production database layer, backup/restore procedure, and multi-worker/load validation.
 
 Direct HTTP examples and deterministic fixture tokens are local-only demonstrations. Production agents should use the SDK so token handling, payload validation, timeouts, error redaction, discovery pagination, and typed errors stay consistent.
 
@@ -104,3 +112,18 @@ CI runs the Python test suites with pytest. The tests are written as
 PYTHONPATH=src python3 -m pytest tests -q --tb=short
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
+
+## Release Validation
+
+Validate product package artifacts before publishing or handing them to an
+internal release pipeline:
+
+```bash
+python3 -m pip install '.[release]'
+python3 scripts/validate_release.py
+```
+
+The validator builds a wheel and source distribution, checks required package
+files and type markers, rejects generated/local artifacts such as SQLite
+databases and `__pycache__`, installs the wheel into a temporary target, imports
+the product package and vendored SDK, and runs `twine check`.

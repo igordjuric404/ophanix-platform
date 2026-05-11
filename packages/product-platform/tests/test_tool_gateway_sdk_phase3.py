@@ -59,7 +59,8 @@ class ToolGatewaySdkPhase3Tests(unittest.TestCase):
 
         client = _client(handler)
 
-        tools = client.list_tools(status="active", limit=25, offset=5)
+        with self.assertWarns(DeprecationWarning):
+            tools = client.list_tools(status="active", limit=25, offset=5)
 
         self.assertEqual(seen["path"], "/api/v1/gateway/tools")
         self.assertEqual(seen["query"], "limit=25&offset=5")
@@ -88,8 +89,9 @@ class ToolGatewaySdkPhase3Tests(unittest.TestCase):
     def test_list_tools_rejects_non_active_status_filter(self) -> None:
         client = _client(lambda _request: httpx.Response(200, json=[]))
 
-        with self.assertRaisesRegex(ValueError, "active callable tools"):
-            client.list_tools(status="draft")
+        with self.assertWarns(DeprecationWarning):
+            with self.assertRaisesRegex(ValueError, "active callable tools"):
+                client.list_tools(status="draft")
 
     def test_list_tools_rejects_limit_above_gateway_maximum(self) -> None:
         client = _client(lambda _request: httpx.Response(200, json=[]))

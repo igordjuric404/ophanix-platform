@@ -15,6 +15,7 @@ import httpx
 from pydantic import BaseModel, Field, field_validator
 
 from product_platform.tool_gateway.decision import ToolPolicyDecisionResult
+from product_platform.tool_gateway.models import validate_http_url
 
 MAX_UPSTREAM_TEXT_BODY_CHARS = 8192
 MAX_UPSTREAM_RESPONSE_BYTES = 1_000_000
@@ -114,12 +115,14 @@ class HttpToolInvocationExecutor:
         repository: Any,
         *,
         http_client: Any | None = None,
+        secret_provider: Any | None = None,
         fail_closed_unhealthy: bool = True,
         max_response_bytes: int = MAX_UPSTREAM_RESPONSE_BYTES,
     ) -> None:
         self.repository = repository
         self._owns_http_client = http_client is None
         self.http_client = http_client or httpx.Client()
+        self.secret_provider = secret_provider
         self.fail_closed_unhealthy = fail_closed_unhealthy
         self.max_response_bytes = max_response_bytes
 
@@ -152,13 +155,6 @@ class HttpToolInvocationExecutor:
                 message="Configured upstream target is unhealthy.",
                 status_code=503,
             )
-        if target["auth_mode"] != "none":
-            raise ToolExecutionError(
-                code="upstream_auth_mode_unsupported",
-                message="Configured upstream authentication mode is not supported.",
-                status_code=502,
-            )
-
         url = build_upstream_url(target, payload)
         headers = {
             "X-Request-ID": decision.request_id,
@@ -166,18 +162,22 @@ class HttpToolInvocationExecutor:
             "X-Ophanix-Decision-ID": decision.id,
             "X-Ophanix-Agent-ID": principal.agent_id,
         }
+        headers.update(_upstream_auth_headers(target, self.secret_provider))
         timeout_seconds = int(target["timeout_ms"]) / 1000
         started = time.perf_counter()
         try:
-            response = self.http_client.request(
-                target["method"],
-                url,
+            response = _send_limited_request(
+                self.http_client,
+                method=target["method"],
+                url=url,
                 headers=headers,
-                timeout=timeout_seconds,
-                **_request_payload_kwargs(
+                timeout_seconds=timeout_seconds,
+                max_response_bytes=self.max_response_bytes,
+                request_kwargs=_request_payload_kwargs(
                     target["method"],
                     payload,
                     path_parameter_names=_path_parameter_names(target),
+                    query_parameter_allowlist=_query_parameter_allowlist(target),
                 ),
             )
         except ToolExecutionError:
@@ -221,12 +221,14 @@ class AsyncHttpToolInvocationExecutor:
         repository: Any,
         *,
         http_client: Any | None = None,
+        secret_provider: Any | None = None,
         fail_closed_unhealthy: bool = True,
         max_response_bytes: int = MAX_UPSTREAM_RESPONSE_BYTES,
     ) -> None:
         self.repository = repository
         self._owns_http_client = http_client is None
         self.http_client = http_client or httpx.AsyncClient()
+        self.secret_provider = secret_provider
         self.fail_closed_unhealthy = fail_closed_unhealthy
         self.max_response_bytes = max_response_bytes
 
@@ -263,13 +265,6 @@ class AsyncHttpToolInvocationExecutor:
                 message="Configured upstream target is unhealthy.",
                 status_code=503,
             )
-        if target["auth_mode"] != "none":
-            raise ToolExecutionError(
-                code="upstream_auth_mode_unsupported",
-                message="Configured upstream authentication mode is not supported.",
-                status_code=502,
-            )
-
         url = build_upstream_url(target, payload)
         headers = {
             "X-Request-ID": decision.request_id,
@@ -277,18 +272,22 @@ class AsyncHttpToolInvocationExecutor:
             "X-Ophanix-Decision-ID": decision.id,
             "X-Ophanix-Agent-ID": principal.agent_id,
         }
+        headers.update(_upstream_auth_headers(target, self.secret_provider))
         timeout_seconds = int(target["timeout_ms"]) / 1000
         started = time.perf_counter()
         try:
-            maybe_response = self.http_client.request(
-                target["method"],
-                url,
+            maybe_response = _send_limited_request_async(
+                self.http_client,
+                method=target["method"],
+                url=url,
                 headers=headers,
-                timeout=timeout_seconds,
-                **_request_payload_kwargs(
+                timeout_seconds=timeout_seconds,
+                max_response_bytes=self.max_response_bytes,
+                request_kwargs=_request_payload_kwargs(
                     target["method"],
                     payload,
                     path_parameter_names=_path_parameter_names(target),
+                    query_parameter_allowlist=_query_parameter_allowlist(target),
                 ),
             )
             response = await maybe_response if inspect.isawaitable(maybe_response) else maybe_response
@@ -352,7 +351,14 @@ class InMemoryToolInvocationExecutor:
 def build_upstream_url(target: Any, payload: dict[str, Any]) -> str:
     """Build an upstream URL from a target row and path-template payload values."""
 
-    base_url = str(target["base_url"]).rstrip("/")
+    try:
+        base_url = validate_http_url(str(target["base_url"]), field="base_url")
+    except ValueError as exc:
+        raise ToolExecutionError(
+            code="unsafe_upstream_url",
+            message="Configured upstream target URL is not safe to invoke.",
+            status_code=502,
+        ) from exc
     path_template = str(target["path_template"])
 
     def replace(match: re.Match[str]) -> str:
@@ -371,19 +377,120 @@ def build_upstream_url(target: Any, payload: dict[str, Any]) -> str:
     return f"{base_url}{path}"
 
 
+def _send_limited_request(
+    http_client: Any,
+    *,
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    timeout_seconds: float,
+    max_response_bytes: int,
+    request_kwargs: dict[str, Any],
+) -> Any:
+    stream = getattr(http_client, "stream", None)
+    if callable(stream):
+        with stream(
+            method,
+            url,
+            headers=headers,
+            timeout=timeout_seconds,
+            **request_kwargs,
+        ) as response:
+            return _limited_response_from_sync_stream(
+                response,
+                max_response_bytes=max_response_bytes,
+            )
+    return http_client.request(
+        method,
+        url,
+        headers=headers,
+        timeout=timeout_seconds,
+        **request_kwargs,
+    )
+
+
+async def _send_limited_request_async(
+    http_client: Any,
+    *,
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    timeout_seconds: float,
+    max_response_bytes: int,
+    request_kwargs: dict[str, Any],
+) -> Any:
+    stream = getattr(http_client, "stream", None)
+    if callable(stream):
+        async with stream(
+            method,
+            url,
+            headers=headers,
+            timeout=timeout_seconds,
+            **request_kwargs,
+        ) as response:
+            return await _limited_response_from_async_stream(
+                response,
+                max_response_bytes=max_response_bytes,
+            )
+    maybe_response = http_client.request(
+        method,
+        url,
+        headers=headers,
+        timeout=timeout_seconds,
+        **request_kwargs,
+    )
+    return await maybe_response if inspect.isawaitable(maybe_response) else maybe_response
+
+
+def _limited_response_from_sync_stream(
+    response: Any,
+    *,
+    max_response_bytes: int,
+) -> httpx.Response:
+    _ensure_content_length_within_limit(response, max_response_bytes=max_response_bytes)
+    content = bytearray()
+    for chunk in response.iter_bytes():
+        content.extend(chunk)
+        if len(content) > max_response_bytes:
+            raise ToolExecutionError(
+                code="upstream_response_too_large",
+                message="Upstream response exceeds the configured size limit.",
+                status_code=502,
+            )
+    return _materialized_response(response, bytes(content))
+
+
+async def _limited_response_from_async_stream(
+    response: Any,
+    *,
+    max_response_bytes: int,
+) -> httpx.Response:
+    _ensure_content_length_within_limit(response, max_response_bytes=max_response_bytes)
+    content = bytearray()
+    async for chunk in response.aiter_bytes():
+        content.extend(chunk)
+        if len(content) > max_response_bytes:
+            raise ToolExecutionError(
+                code="upstream_response_too_large",
+                message="Upstream response exceeds the configured size limit.",
+                status_code=502,
+            )
+    return _materialized_response(response, bytes(content))
+
+
+def _materialized_response(response: Any, content: bytes) -> httpx.Response:
+    request = getattr(response, "request", None)
+    return httpx.Response(
+        int(response.status_code),
+        headers=getattr(response, "headers", None),
+        content=content,
+        request=request,
+        extensions=getattr(response, "extensions", {}) or {},
+    )
+
+
 def _response_body(response: Any, *, max_response_bytes: int = MAX_UPSTREAM_RESPONSE_BYTES) -> Any:
-    headers = getattr(response, "headers", {}) or {}
-    content_length = _header_value(headers, "content-length")
-    if content_length is not None:
-        try:
-            if int(content_length) > max_response_bytes:
-                raise ToolExecutionError(
-                    code="upstream_response_too_large",
-                    message="Upstream response exceeds the configured size limit.",
-                    status_code=502,
-                )
-        except ValueError:
-            pass
+    _ensure_content_length_within_limit(response, max_response_bytes=max_response_bytes)
     content = getattr(response, "content", None)
     if isinstance(content, bytes) and len(content) > max_response_bytes:
         raise ToolExecutionError(
@@ -400,11 +507,29 @@ def _response_body(response: Any, *, max_response_bytes: int = MAX_UPSTREAM_RESP
         return text
 
 
+def _ensure_content_length_within_limit(response: Any, *, max_response_bytes: int) -> None:
+    headers = getattr(response, "headers", {}) or {}
+    content_length = _header_value(headers, "content-length")
+    if content_length is None:
+        return
+    try:
+        too_large = int(content_length) > max_response_bytes
+    except ValueError:
+        return
+    if too_large:
+        raise ToolExecutionError(
+            code="upstream_response_too_large",
+            message="Upstream response exceeds the configured size limit.",
+            status_code=502,
+        )
+
+
 def _request_payload_kwargs(
     method: str,
     payload: dict[str, Any],
     *,
     path_parameter_names: set[str] | None = None,
+    query_parameter_allowlist: set[str] | None = None,
 ) -> dict[str, Any]:
     normalized_method = method.upper()
     if normalized_method in {"GET", "DELETE"}:
@@ -414,8 +539,25 @@ def _request_payload_kwargs(
             for key, value in payload.items()
             if key not in path_parameter_names
         }
+        allowed_query_parameters = query_parameter_allowlist or set()
+        if query_payload:
+            if not allowed_query_parameters:
+                raise ToolExecutionError(
+                    code="query_parameter_not_allowed",
+                    message=(
+                        "GET and DELETE tool targets must declare query_parameter_allowlist "
+                        "before payload fields can be serialized into the query string."
+                    ),
+                    status_code=422,
+                )
         for key, value in query_payload.items():
             normalized_key = _normalize_key(key)
+            if key not in allowed_query_parameters:
+                raise ToolExecutionError(
+                    code="query_parameter_not_allowed",
+                    message="Payload field is not allowed as a query parameter for this tool target.",
+                    status_code=422,
+                )
             if any(token in normalized_key for token in SECRET_LIKE_QUERY_KEY_TOKENS):
                 raise ToolExecutionError(
                     code="unsafe_query_payload",
@@ -434,6 +576,94 @@ def _request_payload_kwargs(
 
 def _path_parameter_names(target: Any) -> set[str]:
     return set(re.findall(r"\{([^{}]+)\}", str(target["path_template"])))
+
+
+def _query_parameter_allowlist(target: Any) -> set[str]:
+    value = _target_optional_value(target, "query_parameter_allowlist_json")
+    if value is None:
+        value = _target_optional_value(target, "query_parameter_allowlist")
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        if not value.strip():
+            return set()
+        loaded = json.loads(value)
+    else:
+        loaded = value
+    if not isinstance(loaded, list):
+        return set()
+    return {str(item) for item in loaded if isinstance(item, str) and item.strip()}
+
+
+def _upstream_auth_headers(target: Any, secret_provider: Any | None) -> dict[str, str]:
+    auth_mode = str(target["auth_mode"]).strip().lower()
+    if auth_mode == "none":
+        return {}
+    auth_config = _target_json_mapping(target, "auth_config_json")
+    secret_ref = str(auth_config.get("secret_ref") or "").strip()
+    if not secret_ref:
+        raise ToolExecutionError(
+            code="upstream_auth_config_invalid",
+            message="Configured upstream authentication is missing a secret reference.",
+            status_code=502,
+        )
+    secret_value = _retrieve_upstream_secret(secret_provider, secret_ref)
+    if auth_mode == "bearer":
+        return {"Authorization": f"Bearer {secret_value}"}
+    if auth_mode == "api_key":
+        header_name = str(auth_config.get("header_name") or "X-API-Key").strip()
+        header_prefix = str(auth_config.get("header_prefix") or "").strip()
+        header_value = f"{header_prefix} {secret_value}" if header_prefix else secret_value
+        return {header_name: header_value}
+    raise ToolExecutionError(
+        code="upstream_auth_mode_unsupported",
+        message="Configured upstream authentication mode is not supported.",
+        status_code=502,
+    )
+
+
+def _retrieve_upstream_secret(secret_provider: Any | None, secret_ref: str) -> str:
+    if secret_provider is None:
+        raise ToolExecutionError(
+            code="upstream_auth_secret_unavailable",
+            message="Configured upstream authentication secret is unavailable.",
+            status_code=502,
+        )
+    retrieve = getattr(secret_provider, "retrieve", None)
+    if not callable(retrieve):
+        raise ToolExecutionError(
+            code="upstream_auth_secret_unavailable",
+            message="Configured upstream authentication secret is unavailable.",
+            status_code=502,
+        )
+    secret_value = retrieve(secret_ref)
+    if not isinstance(secret_value, str) or not secret_value:
+        raise ToolExecutionError(
+            code="upstream_auth_secret_unavailable",
+            message="Configured upstream authentication secret is unavailable.",
+            status_code=502,
+        )
+    return secret_value
+
+
+def _target_json_mapping(target: Any, key: str) -> dict[str, Any]:
+    value = _target_optional_value(target, key)
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        if not value.strip():
+            return {}
+        loaded = json.loads(value)
+    else:
+        loaded = value
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _target_optional_value(target: Any, key: str) -> Any | None:
+    try:
+        return target[key]
+    except Exception:
+        return getattr(target, key, None)
 
 
 def _normalize_key(key: str) -> str:

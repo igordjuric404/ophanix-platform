@@ -40,6 +40,7 @@ class RequestContext(BaseModel):
 
     request_id: str
     correlation_id: str
+    server_request_id: str | None = None
     organization_id: str | None = None
     environment_id: str | None = None
     user_id: str | None = None
@@ -52,7 +53,7 @@ class PublicConfig(BaseModel):
     app_name: str
     environment: str
     api_base_path: str
-    docs_url: str
+    docs_url: str | None
     cors_origins: list[str]
     features: dict[str, bool]
 

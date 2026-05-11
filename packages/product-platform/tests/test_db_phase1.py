@@ -75,6 +75,7 @@ FEATURE_MIGRATIONS = [
     "0055",
     "0056",
     "0057",
+    "0058",
 ]
 
 ALL_EXPECTED_MIGRATIONS = [*EXPECTED_MIGRATIONS, *FEATURE_MIGRATIONS]
@@ -220,6 +221,12 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertIn("tool_response_policies", tables)
             self.assertIn("tool_runtime_actions", tables)
             self.assertIn("tool_runtime_action_events", tables)
+            upstream_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(tool_upstream_targets)").fetchall()
+            }
+            self.assertIn("auth_config_json", upstream_columns)
+            self.assertIn("query_parameter_allowlist_json", upstream_columns)
             self.assertEqual(runner.applied_versions(), ALL_EXPECTED_MIGRATIONS)
         finally:
             connection.close()
@@ -245,6 +252,15 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
                     runner.applied_versions(),
                     ALL_EXPECTED_MIGRATIONS[:-index],
                 )
+                if migration == "0058":
+                    upstream_columns = {
+                        row["name"]
+                        for row in connection.execute(
+                            "PRAGMA table_info(tool_upstream_targets)"
+                        ).fetchall()
+                    }
+                    self.assertNotIn("auth_config_json", upstream_columns)
+                    self.assertNotIn("query_parameter_allowlist_json", upstream_columns)
                 if migration == "0051":
                     self.assertNotIn("tool_upstream_targets", tables)
                     self.assertNotIn("tool_upstream_health_checks", tables)

@@ -240,6 +240,33 @@ class ToolGatewayResponsePhase3Tests(unittest.TestCase):
         self.assertEqual(summary["body"]["token"], "[redacted]")
         self.assertNotIn("secret-token", json.dumps(summary))
 
+    def test_api_disabled_response_policy_never_stores_full_runtime_body(self) -> None:
+        client, app, tool_id = self._client_with_tool(
+            FakeHTTPClient({"claim_status": "open", "token": "secret-token"})
+        )
+        self._patch_policy(
+            client,
+            tool_id,
+            {
+                "status": "disabled",
+                "store_full_response": True,
+                "redaction_rules_json": {"redact_keys": ["token"]},
+            },
+        )
+
+        response = client.post(
+            "/api/v1/tools/claims.lookup/invoke",
+            headers=self._gateway_headers(),
+            json={"payload": {"claim_id": "claim_123"}},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["result"]["body"]["token"], "secret-token")
+        summary = self._latest_response_summary(app)
+        self.assertIsNone(summary["body"])
+        self.assertFalse(summary["body_stored"])
+        self.assertNotIn("secret-token", json.dumps(summary))
+
     def _gateway_headers(self) -> dict[str, str]:
         return {
             "Authorization": "Bearer response-token",

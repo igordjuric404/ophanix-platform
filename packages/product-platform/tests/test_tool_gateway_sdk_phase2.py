@@ -310,6 +310,7 @@ class ToolGatewaySdkPhase2Tests(unittest.TestCase):
                     "request_id": "req-denied",
                     "correlation_id": "corr-denied",
                     "tool_name": "claims.lookup",
+                    "decision": {"decision": "deny"},
                     "reason_code": "permission_missing",
                     "result": None,
                     "error": {

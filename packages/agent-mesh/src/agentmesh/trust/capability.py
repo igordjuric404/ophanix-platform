@@ -6,10 +6,20 @@ Capability Scoping
 Simple string-based capability scope checking.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from pydantic import BaseModel, Field
 import uuid
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 class CapabilityGrant(BaseModel):
@@ -47,7 +57,7 @@ class CapabilityGrant(BaseModel):
     )
 
     # Timing
-    granted_at: datetime = Field(default_factory=datetime.utcnow)
+    granted_at: datetime = Field(default_factory=_utc_now)
     expires_at: Optional[datetime] = Field(None)
 
     # Status
@@ -94,7 +104,7 @@ class CapabilityGrant(BaseModel):
         """Check if the grant is currently active and not expired."""
         if not self.active:
             return False
-        if self.expires_at and datetime.utcnow() > self.expires_at:
+        if self.expires_at and _utc_now() > _as_utc(self.expires_at):
             return False
         return True
 
@@ -141,7 +151,7 @@ class CapabilityGrant(BaseModel):
     def revoke(self) -> None:
         """Revoke this grant immediately."""
         self.active = False
-        self.revoked_at = datetime.utcnow()
+        self.revoked_at = _utc_now()
 
 
 class CapabilityScope(BaseModel):

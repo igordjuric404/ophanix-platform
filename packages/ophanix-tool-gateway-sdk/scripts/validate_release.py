@@ -57,6 +57,7 @@ def main() -> int:
     args = parser.parse_args()
 
     package_root = Path(__file__).resolve().parents[1]
+    _validate_vendored_sdk_parity(package_root)
     if args.strict_git:
         _validate_git_state(package_root, expected_tag=args.expected_tag)
     with _artifact_directory(args.out_dir) as artifact_dir:
@@ -212,7 +213,6 @@ def _validate_installed_wheel(wheel: Path) -> None:
                 "-m",
                 "pip",
                 "install",
-                "--no-deps",
                 "--target",
                 target,
                 str(wheel),
@@ -232,6 +232,19 @@ def _validate_installed_wheel(wheel: Path) -> None:
                 ),
             ],
             cwd=wheel.parent,
+        )
+
+
+def _validate_vendored_sdk_parity(package_root: Path) -> None:
+    repo_root = package_root.parents[1]
+    standalone = package_root / "src" / "ophanix_tool_gateway" / "sdk.py"
+    vendored = repo_root / "packages" / "product-platform" / "src" / "ophanix_tool_gateway" / "sdk.py"
+    if not vendored.exists():
+        raise SystemExit("Product-platform vendored SDK copy is missing.")
+    if standalone.read_bytes() != vendored.read_bytes():
+        raise SystemExit(
+            "Standalone SDK and product-platform vendored SDK copy differ; "
+            "sync packages/product-platform/src/ophanix_tool_gateway/sdk.py before release."
         )
 
 

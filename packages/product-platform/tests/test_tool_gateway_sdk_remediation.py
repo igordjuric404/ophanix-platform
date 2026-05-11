@@ -181,7 +181,7 @@ class ToolGatewaySdkRemediationTests(unittest.TestCase):
         response = self.client.get("/api/v1/gateway/tools")
 
         self.assertEqual(response.status_code, 401)
-        self.assertIn("missing_authorization", response.json()["message"])
+        self.assertEqual(response.json()["message"], "Gateway authentication failed.")
 
     def test_gateway_discovery_lists_only_callable_active_tools(self) -> None:
         response = self.client.get("/api/v1/gateway/tools", headers=self._headers())

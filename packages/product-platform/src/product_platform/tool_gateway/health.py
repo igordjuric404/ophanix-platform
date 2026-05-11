@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import inspect
+import re
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -51,46 +54,126 @@ class ToolUpstreamHealthChecker:
     def check_target(self, target_id: str) -> ToolUpstreamHealthResponse:
         """Run one health check and persist the resulting target status."""
 
+        return self._record_probe_result(target_id, self._probe_target(target_id))
+
+    async def check_target_async(self, target_id: str) -> ToolUpstreamHealthResponse:
+        """Run one health check with either a sync or async HTTP client."""
+
+        return self._record_probe_result(target_id, await self._probe_target_async(target_id))
+
+    def _target_and_health(self, target_id: str) -> tuple[Any, Any]:
         target = self.repository.get_upstream_target(target_id)
         health = self.repository.get_upstream_health(target_id)
         if target is None or health is None:
             raise ToolUpstreamTargetNotFoundError("Upstream target not found.")
+        return target, health
+
+    def _disabled_result(self, target_id: str, health: Any) -> ToolUpstreamHealthProbeResult | None:
         checked_at = utc_now_iso()
         if not bool(health["enabled"]):
-            row = self.repository.record_upstream_health(
-                target_id,
+            return ToolUpstreamHealthProbeResult(
+                target_id=target_id,
                 status="disabled",
                 checked_at=checked_at,
                 error="Health check is disabled.",
             )
-            return tool_upstream_health_response(row)
+        return None
 
+    def _probe_target(self, target_id: str) -> ToolUpstreamHealthProbeResult:
+        target, health = self._target_and_health(target_id)
+        disabled = self._disabled_result(target_id, health)
+        if disabled is not None:
+            return disabled
+        checked_at = utc_now_iso()
         timeout_seconds = int(target["timeout_ms"]) / 1000
         try:
+            if isinstance(self.http_client, httpx.AsyncClient):
+                raise TypeError("Async health clients must use check_target_async().")
             response = self.http_client.get(health["health_url"], timeout=timeout_seconds)
-            observed_status = int(response.status_code)
-            expected_status = int(health["expected_status"])
-            if observed_status == expected_status:
-                status = "healthy"
-                error = None
-            else:
-                status = "degraded"
-                error = f"Expected status {expected_status}, received {observed_status}."
+            if inspect.isawaitable(response):
+                raise TypeError("Async health clients must use check_target_async().")
+            status, error, observed_status = _status_from_response(response, health)
         except httpx.TimeoutException:
             status = "unhealthy"
             error = "Health check timed out."
+            observed_status = None
         except Exception as exc:
             status = "unhealthy"
             error = _summarize_exception(exc)
-        row = self.repository.record_upstream_health(
-            target_id,
+            observed_status = None
+        return ToolUpstreamHealthProbeResult(
+            target_id=target_id,
             status=status,
             checked_at=checked_at,
             error=error,
+            observed_status=observed_status,
+        )
+
+    async def _probe_target_async(self, target_id: str) -> ToolUpstreamHealthProbeResult:
+        target, health = self._target_and_health(target_id)
+        disabled = self._disabled_result(target_id, health)
+        if disabled is not None:
+            return disabled
+        checked_at = utc_now_iso()
+        timeout_seconds = int(target["timeout_ms"]) / 1000
+        try:
+            maybe_response = self.http_client.get(health["health_url"], timeout=timeout_seconds)
+            response = await maybe_response if inspect.isawaitable(maybe_response) else maybe_response
+            status, error, observed_status = _status_from_response(response, health)
+        except httpx.TimeoutException:
+            status = "unhealthy"
+            error = "Health check timed out."
+            observed_status = None
+        except Exception as exc:
+            status = "unhealthy"
+            error = _summarize_exception(exc)
+            observed_status = None
+        return ToolUpstreamHealthProbeResult(
+            target_id=target_id,
+            status=status,
+            checked_at=checked_at,
+            error=error,
+            observed_status=observed_status,
+        )
+
+    def _record_probe_result(
+        self,
+        target_id: str,
+        result: ToolUpstreamHealthProbeResult,
+    ) -> ToolUpstreamHealthResponse:
+        row = self.repository.record_upstream_health(
+            target_id,
+            status=result.status,
+            checked_at=result.checked_at,
+            error=result.error,
         )
         return tool_upstream_health_response(row)
 
 
+def _status_from_response(response: Any, health: Any) -> tuple[str, str | None, int]:
+    observed_status = int(response.status_code)
+    expected_status = int(health["expected_status"])
+    if observed_status == expected_status:
+        return "healthy", None, observed_status
+    return "degraded", f"Expected status {expected_status}, received {observed_status}.", observed_status
+
+
 def _summarize_exception(exc: Exception) -> str:
-    summary = f"{exc.__class__.__name__}: {exc}"
+    summary = _sanitize_error_text(f"{exc.__class__.__name__}: {exc}")
     return summary[:300]
+
+
+def _sanitize_error_text(value: str) -> str:
+    without_credentials = re.sub(r"//[^/@\s]+@", "//", value)
+    return re.sub(r"https?://[^\s]+", _sanitize_url_match, without_credentials)
+
+
+def _sanitize_url_match(match: re.Match[str]) -> str:
+    raw_url = match.group(0)
+    try:
+        parsed = urlsplit(raw_url)
+    except ValueError:
+        return "[redacted-url]"
+    host = parsed.hostname or "[redacted-host]"
+    port = f":{parsed.port}" if parsed.port is not None else ""
+    return urlunsplit((parsed.scheme, f"{host}{port}", "[redacted-path]", "", ""))

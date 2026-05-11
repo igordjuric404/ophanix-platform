@@ -26,6 +26,8 @@ from product_platform.tool_gateway.models import (
     ToolUpstreamTargetResponse,
     ToolResponsePolicyPatchRequest,
     ToolResponsePolicyResponse,
+    normalize_query_parameter_allowlist,
+    validate_upstream_auth_configuration,
 )
 from product_platform.tool_gateway.schemas import validate_tool_contract_schema
 
@@ -608,6 +610,7 @@ class ToolRegistryRepository:
             raise ToolDefinitionNotFoundError("Tool definition not found.")
         if tool["status"] in {"disabled", "retired"}:
             raise ToolUpstreamTargetValidationError("Cannot create upstream target for disabled or retired tool.")
+        validate_upstream_auth_configuration(body.auth_mode, body.auth_config_json)
         target_id = generate_id("target")
         now = utc_now_iso()
         try:
@@ -615,10 +618,10 @@ class ToolRegistryRepository:
                 """
                 INSERT INTO tool_upstream_targets (
                     id, organization_id, environment_id, tool_id, base_url,
-                    path_template, method, auth_mode, timeout_ms, status,
-                    created_at, updated_at
+                    path_template, method, auth_mode, auth_config_json, timeout_ms,
+                    status, query_parameter_allowlist_json, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     target_id,
@@ -629,8 +632,10 @@ class ToolRegistryRepository:
                     body.path_template,
                     body.method,
                     body.auth_mode,
+                    _auth_config_to_json(body.auth_config_json),
                     body.timeout_ms,
                     body.status,
+                    _query_allowlist_to_json(body.query_parameter_allowlist),
                     now,
                     now,
                 ),
@@ -733,6 +738,18 @@ class ToolRegistryRepository:
         existing = self.get_upstream_target(target_id)
         if existing is None:
             raise ToolUpstreamTargetNotFoundError("Upstream target not found.")
+        effective_auth_mode = (
+            body.auth_mode
+            if "auth_mode" in body.model_fields_set and body.auth_mode is not None
+            else str(existing["auth_mode"])
+        )
+        if "auth_config_json" in body.model_fields_set:
+            effective_auth_config = body.auth_config_json
+        elif "auth_mode" in body.model_fields_set and effective_auth_mode == "none":
+            effective_auth_config = None
+        else:
+            effective_auth_config = _auth_config_from_json(existing["auth_config_json"])
+        validate_upstream_auth_configuration(effective_auth_mode, effective_auth_config)
         target_fields: list[str] = []
         target_values: list[object | None] = []
         for column in ["base_url", "path_template", "method", "auth_mode", "timeout_ms", "status"]:
@@ -741,6 +758,15 @@ class ToolRegistryRepository:
                 if value is not None:
                     target_fields.append(f"{column} = ?")
                     target_values.append(value)
+        if "auth_config_json" in body.model_fields_set:
+            target_fields.append("auth_config_json = ?")
+            target_values.append(_auth_config_to_json(effective_auth_config))
+        elif "auth_mode" in body.model_fields_set and effective_auth_mode == "none":
+            target_fields.append("auth_config_json = ?")
+            target_values.append(None)
+        if "query_parameter_allowlist" in body.model_fields_set:
+            target_fields.append("query_parameter_allowlist_json = ?")
+            target_values.append(_query_allowlist_to_json(body.query_parameter_allowlist or []))
         if target_fields:
             target_fields.append("updated_at = ?")
             target_values.append(utc_now_iso())
@@ -1378,6 +1404,11 @@ def tool_upstream_target_response(
         auth_mode=row["auth_mode"],
         timeout_ms=int(row["timeout_ms"]),
         status=row["status"],
+        query_parameter_allowlist=_query_allowlist_from_json(
+            row["query_parameter_allowlist_json"]
+            if "query_parameter_allowlist_json" in row.keys()
+            else None
+        ),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         health=tool_upstream_health_response(health) if health is not None else None,
@@ -1452,3 +1483,35 @@ def _schema_from_json(value: str | None) -> dict[str, Any] | None:
     if value is None:
         return None
     return json.loads(value)
+
+
+def _auth_config_to_json(config: dict[str, Any] | None) -> str | None:
+    if not config:
+        return None
+    return json.dumps(config, sort_keys=True, separators=(",", ":"))
+
+
+def _auth_config_from_json(value: str | None) -> dict[str, Any] | None:
+    if value is None or not str(value).strip():
+        return None
+    loaded = json.loads(value)
+    if not isinstance(loaded, dict):
+        raise ToolUpstreamTargetValidationError("Stored upstream auth config is invalid.")
+    return loaded
+
+
+def _query_allowlist_to_json(value: list[str]) -> str:
+    return json.dumps(
+        normalize_query_parameter_allowlist(value),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _query_allowlist_from_json(value: str | None) -> list[str]:
+    if value is None or not str(value).strip():
+        return []
+    loaded = json.loads(value)
+    if not isinstance(loaded, list) or not all(isinstance(item, str) for item in loaded):
+        return []
+    return normalize_query_parameter_allowlist(loaded)

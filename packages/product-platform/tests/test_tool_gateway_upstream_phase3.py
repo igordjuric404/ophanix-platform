@@ -132,6 +132,30 @@ class ToolGatewayUpstreamPhase3Tests(unittest.TestCase):
         self.assertEqual(health.status_code, 200)
         self.assertEqual(health.json()["expected_status"], 204)
 
+    def test_api_creates_secret_reference_auth_target_without_returning_secret_ref(self) -> None:
+        tool = self._create_tool(name="claims.authenticated")
+        body = {
+            **self._target_body(),
+            "auth_mode": "api_key",
+            "auth_config_json": {
+                "secret_ref": "secref_partner_claims",
+                "header_name": "X-Partner-Key",
+            },
+            "query_parameter_allowlist": ["include_notes"],
+        }
+
+        created = self.client.post(
+            f"/api/v1/tools/{tool['id']}/upstream-target",
+            headers=self._headers(),
+            json=body,
+        )
+
+        self.assertEqual(created.status_code, 201, created.text)
+        payload = created.json()
+        self.assertEqual(payload["auth_mode"], "api_key")
+        self.assertEqual(payload["query_parameter_allowlist"], ["include_notes"])
+        self.assertNotIn("secret_ref", created.text)
+
     def test_api_cannot_create_target_for_disabled_tool(self) -> None:
         tool = self._create_tool(name="claims.disabled")
         disabled = self.client.post(

@@ -8,6 +8,7 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 CAPABILITY_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]*:[a-z][a-z0-9_.-]*(?::[a-z0-9_.-]+)?$")
+SUPPORTED_CREDENTIAL_SCOPE_RESOURCE_TYPES = {"agent", "claim", "tool"}
 
 
 class AgentRegistrationDraftCreate(BaseModel):
@@ -357,6 +358,15 @@ class CredentialScopeRequest(BaseModel):
         if not stripped:
             raise ValueError("Credential scope fields must not be blank.")
         return stripped
+
+    @field_validator("resource_type")
+    @classmethod
+    def _validate_resource_type(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in SUPPORTED_CREDENTIAL_SCOPE_RESOURCE_TYPES:
+            supported = ", ".join(sorted(SUPPORTED_CREDENTIAL_SCOPE_RESOURCE_TYPES))
+            raise ValueError(f"resource_type must be one of: {supported}.")
+        return normalized
 
     @field_validator("resource_id")
     @classmethod

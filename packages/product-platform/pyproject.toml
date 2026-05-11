@@ -10,6 +10,8 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
 license-files = ["LICENSE"]
+authors = [{name = "Ophanix Maintainers"}]
+maintainers = [{name = "Ophanix Maintainers"}]
 dependencies = [
     "agent-discovery>=0.1.0,<1.0",
     "agentmesh-platform>=3.1.0,<4.0",
@@ -19,22 +21,44 @@ dependencies = [
     "pydantic[email]>=2.4.0,<3.0",
     "uvicorn>=0.27.0,<1.0",
 ]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Documentation = "https://github.com/ophanix/ophanix-platform/tree/main/packages/product-platform"
+Source = "https://github.com/ophanix/ophanix-platform"
+Issues = "https://github.com/ophanix/ophanix-platform/issues"
 
 [project.scripts]
 ophanix-product-api = "product_platform.cli:main"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/product_platform", "src/ophanix_tool_gateway"]
-
-[tool.hatch.build.targets.sdist]
-include = [
-    "/src",
-    "/tests",
-    "/examples",
-    "/README.md",
-    "/LICENSE",
-    "/pyproject.toml",
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.10,<2",
+    "pytest==8.4.1",
+    "pytest-asyncio>=0.26,<1",
+    "ruff>=0.12,<1",
 ]
+release = [
+    "build>=1.2.2,<2",
+    "twine>=5.1,<7",
+]
+security = [
+    "pip-audit>=2.7,<3",
+]
+
+[tool.hatch.build]
+ignore-vcs = true
 exclude = [
     "*.db",
     "*.db.*",
@@ -46,6 +70,19 @@ exclude = [
     "/frontend/dist",
 ]
 
+[tool.hatch.build.targets.wheel]
+packages = ["src/product_platform", "src/ophanix_tool_gateway"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/scripts",
+    "/tests",
+    "/examples",
+    "/README.md",
+    "/LICENSE",
+    "/pyproject.toml",
+]
 [tool.ruff]
 target-version = "py311"
 line-length = 100
@@ -54,3 +91,11 @@ src = ["src", "tests"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/product_platform/tool_gateway", "src/ophanix_tool_gateway"]
+ignore_missing_imports = true
+follow_imports = "skip"
+warn_unused_ignores = true

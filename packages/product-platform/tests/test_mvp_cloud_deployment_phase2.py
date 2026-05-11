@@ -52,6 +52,8 @@ class MVPCloudDeploymentPhase2Tests(unittest.TestCase):
                     object_storage_bucket=None,
                     secret_manager_ref=None,
                     session_secret="test-secret",
+                    allow_sqlite_in_production=True,
+                    gateway_token_hash_pepper="test-pepper",
                 )
             )
             client = TestClient(app, raise_server_exceptions=False)
@@ -75,6 +77,7 @@ class MVPCloudDeploymentPhase2Tests(unittest.TestCase):
                 object_storage_bucket="ophanix-product-artifacts",
                 secret_manager_ref="projects/ophanix/secrets/product-platform",
                 session_secret="test-secret",
+                gateway_token_hash_pepper="test-pepper",
             )
         )
         client = TestClient(app, raise_server_exceptions=False)
@@ -97,6 +100,8 @@ class MVPCloudDeploymentPhase2Tests(unittest.TestCase):
                 object_storage_endpoint="https://object-storage.example.com",
                 secret_manager_ref="projects/ophanix/secrets/product-platform",
                 session_secret="test-secret",
+                allow_sqlite_in_production=True,
+                gateway_token_hash_pepper="test-pepper",
             )
             registry = create_default_dependency_registry(
                 settings,
@@ -128,6 +133,8 @@ class MVPCloudDeploymentPhase2Tests(unittest.TestCase):
                 object_storage_endpoint="https://object-storage.example.com",
                 secret_manager_ref="projects/ophanix/secrets/product-platform",
                 session_secret="test-secret",
+                allow_sqlite_in_production=True,
+                gateway_token_hash_pepper="test-pepper",
             )
             registry = create_default_dependency_registry(
                 settings,
@@ -170,6 +177,8 @@ class MVPCloudDeploymentPhase2Tests(unittest.TestCase):
                 object_storage_endpoint="https://object-storage.example.com",
                 secret_manager_ref="projects/ophanix/secrets/product-platform",
                 session_secret="test-secret",
+                allow_sqlite_in_production=True,
+                gateway_token_hash_pepper="test-pepper",
             )
             registry = create_default_dependency_registry(
                 settings,

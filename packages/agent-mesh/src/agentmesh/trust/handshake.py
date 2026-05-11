@@ -6,7 +6,7 @@ Trust Handshake
 Ed25519 challenge/response handshake with registry-backed identity verification.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Literal
 from pydantic import BaseModel, Field
 import logging
@@ -24,12 +24,22 @@ from agentmesh.exceptions import HandshakeError, HandshakeTimeoutError
 logger = logging.getLogger(__name__)
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 class HandshakeChallenge(BaseModel):
     """Challenge issued during a trust handshake."""
 
     challenge_id: str
     nonce: str
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=_utc_now)
     expires_in_seconds: int = 30
 
     @classmethod
@@ -42,7 +52,7 @@ class HandshakeChallenge(BaseModel):
 
     def is_expired(self) -> bool:
         """Check if the challenge has exceeded its time-to-live."""
-        elapsed = (datetime.utcnow() - self.timestamp).total_seconds()
+        elapsed = (_utc_now() - _as_utc(self.timestamp)).total_seconds()
         return elapsed > self.expires_in_seconds
 
 
@@ -65,7 +75,7 @@ class HandshakeResponse(BaseModel):
     user_context: Optional[dict] = Field(None, description="End-user context for OBO flows")
 
     # Metadata
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=_utc_now)
 
 
 class HandshakeResult(BaseModel):
@@ -86,7 +96,7 @@ class HandshakeResult(BaseModel):
     user_context: Optional[UserContext] = Field(None, description="End-user context if acting on behalf of a user")
 
     # Timing
-    handshake_started: datetime = Field(default_factory=datetime.utcnow)
+    handshake_started: datetime = Field(default_factory=_utc_now)
     handshake_completed: Optional[datetime] = None
     latency_ms: Optional[int] = None
 
@@ -104,8 +114,8 @@ class HandshakeResult(BaseModel):
         user_context: Optional[UserContext] = None,
     ) -> "HandshakeResult":
         """Create a successful handshake result."""
-        now = datetime.utcnow()
-        start = started or now
+        now = _utc_now()
+        start = _as_utc(started) if started is not None else now
         latency = int((now - start).total_seconds() * 1000)
 
         if trust_score >= TIER_VERIFIED_PARTNER_THRESHOLD:
@@ -138,8 +148,8 @@ class HandshakeResult(BaseModel):
         started: Optional[datetime] = None,
     ) -> "HandshakeResult":
         """Create a failed handshake result."""
-        now = datetime.utcnow()
-        start = started or now
+        now = _utc_now()
+        start = _as_utc(started) if started is not None else now
         latency = int((now - start).total_seconds() * 1000)
 
         return cls(
@@ -207,14 +217,14 @@ class TrustHandshake:
         """Get cached verification result if still valid."""
         if peer_did in self._verified_peers:
             result, timestamp = self._verified_peers[peer_did]
-            if datetime.utcnow() - timestamp < self._cache_ttl:
+            if _utc_now() - _as_utc(timestamp) < self._cache_ttl:
                 return result
             del self._verified_peers[peer_did]
         return None
 
     def _cache_result(self, peer_did: str, result: HandshakeResult) -> None:
         """Cache a verification result with timestamp."""
-        self._verified_peers[peer_did] = (result, datetime.utcnow())
+        self._verified_peers[peer_did] = (result, _utc_now())
 
     def _purge_expired_challenges(self) -> None:
         """Remove expired challenges to prevent unbounded growth."""
@@ -245,7 +255,7 @@ class TrustHandshake:
             if cached:
                 return cached
 
-        start = datetime.utcnow()
+        start = _utc_now()
 
         try:
             result = await asyncio.wait_for(

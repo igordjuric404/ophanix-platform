@@ -17,6 +17,7 @@ import re
 import threading
 import time
 import tomllib
+import warnings
 from dataclasses import dataclass, field
 from datetime import timezone
 from email.utils import parsedate_to_datetime
@@ -24,7 +25,7 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Awaitable, Callable, Literal, Mapping, Protocol
+from typing import Any, Awaitable, Callable, Literal, Mapping, Protocol, cast
 from urllib.parse import quote
 from urllib.parse import urlparse
 
@@ -367,11 +368,14 @@ class OphanixToolGatewayClient:
             }
         )
         try:
-            response = self._http_client.post(
+            response = _send_limited_sync_request(
+                self._http_client,
+                "POST",
                 (
                     f"{self.base_url}{GATEWAY_TOOL_INVOKE_PATH_PREFIX}/"
                     f"{quote(normalized_tool_name, safe='')}{GATEWAY_TOOL_INVOKE_PATH_SUFFIX}"
                 ),
+                max_response_bytes=self.max_response_bytes,
                 json=body,
                 headers=headers,
                 timeout=self.timeout_seconds,
@@ -431,6 +435,12 @@ class OphanixToolGatewayClient:
         """List Tool Gateway contracts visible to the configured caller."""
 
         auth_context = self._auth_context()
+        if status is not None:
+            warnings.warn(
+                "list_tools(status=...) is deprecated; gateway discovery returns active tools only.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         params = _tool_list_params(status, owner_team, limit, offset)
         return self._list_tools_with_auth(params, auth_context)
 
@@ -439,6 +449,7 @@ class OphanixToolGatewayClient:
         *,
         owner_team: str | None = None,
         page_size: int = 200,
+        max_total: int | None = None,
     ) -> list[ToolDefinition]:
         """List every callable tool by following gateway discovery pagination."""
 
@@ -447,12 +458,18 @@ class OphanixToolGatewayClient:
             raise ValueError("page_size must be greater than zero")
         if page_size > 200:
             raise ValueError("page_size must be less than or equal to 200")
+        max_total = _optional_positive_integer(max_total, "max_total")
         auth_context = self._auth_context()
         tools: list[ToolDefinition] = []
         offset = 0
         while True:
             params = _tool_list_params(None, owner_team, page_size, offset)
             page = self._list_tools_with_auth(params, auth_context)
+            if max_total is not None and len(tools) + len(page) > max_total:
+                raise ToolGatewayError(
+                    "Tool discovery exceeded max_total.",
+                    code="tool_discovery_too_large",
+                )
             tools.extend(page)
             if len(page) < page_size:
                 return tools
@@ -562,8 +579,11 @@ class OphanixToolGatewayClient:
         attempts = 0
         while True:
             try:
-                response = self._http_client.get(
+                response = _send_limited_sync_request(
+                    self._http_client,
+                    "GET",
                     f"{self.base_url}{GATEWAY_TOOL_DISCOVERY_PATH}",
+                    max_response_bytes=self.max_response_bytes,
                     params=dict(params),
                     headers=headers,
                     timeout=self.timeout_seconds,
@@ -777,11 +797,14 @@ class AsyncOphanixToolGatewayClient:
             }
         )
         try:
-            response = await self._http_client.post(
+            response = await _send_limited_async_request(
+                self._http_client,
+                "POST",
                 (
                     f"{self.base_url}{GATEWAY_TOOL_INVOKE_PATH_PREFIX}/"
                     f"{quote(normalized_tool_name, safe='')}{GATEWAY_TOOL_INVOKE_PATH_SUFFIX}"
                 ),
+                max_response_bytes=self.max_response_bytes,
                 json=body,
                 headers=headers,
                 timeout=self.timeout_seconds,
@@ -841,6 +864,12 @@ class AsyncOphanixToolGatewayClient:
         """List Tool Gateway contracts visible to the configured caller."""
 
         auth_context = await self._auth_context()
+        if status is not None:
+            warnings.warn(
+                "list_tools(status=...) is deprecated; gateway discovery returns active tools only.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         params = _tool_list_params(status, owner_team, limit, offset)
         return await self._list_tools_with_auth(params, auth_context)
 
@@ -849,6 +878,7 @@ class AsyncOphanixToolGatewayClient:
         *,
         owner_team: str | None = None,
         page_size: int = 200,
+        max_total: int | None = None,
     ) -> list[ToolDefinition]:
         """List every callable tool by following gateway discovery pagination."""
 
@@ -857,12 +887,18 @@ class AsyncOphanixToolGatewayClient:
             raise ValueError("page_size must be greater than zero")
         if page_size > 200:
             raise ValueError("page_size must be less than or equal to 200")
+        max_total = _optional_positive_integer(max_total, "max_total")
         auth_context = await self._auth_context()
         tools: list[ToolDefinition] = []
         offset = 0
         while True:
             params = _tool_list_params(None, owner_team, page_size, offset)
             page = await self._list_tools_with_auth(params, auth_context)
+            if max_total is not None and len(tools) + len(page) > max_total:
+                raise ToolGatewayError(
+                    "Tool discovery exceeded max_total.",
+                    code="tool_discovery_too_large",
+                )
             tools.extend(page)
             if len(page) < page_size:
                 return tools
@@ -968,8 +1004,11 @@ class AsyncOphanixToolGatewayClient:
         attempts = 0
         while True:
             try:
-                response = await self._http_client.get(
+                response = await _send_limited_async_request(
+                    self._http_client,
+                    "GET",
                     f"{self.base_url}{GATEWAY_TOOL_DISCOVERY_PATH}",
+                    max_response_bytes=self.max_response_bytes,
                     params=dict(params),
                     headers=headers,
                     timeout=self.timeout_seconds,
@@ -1311,7 +1350,7 @@ def _clone_tool_definition(tool: ToolDefinition) -> ToolDefinition:
         required_scope=tool.required_scope,
         input_schema_json=copy.deepcopy(tool.input_schema_json),
         output_schema_json=copy.deepcopy(tool.output_schema_json),
-        raw=_immutable_mapping(copy.deepcopy(dict(tool.raw))),
+        raw=_immutable_mapping(_mutable_mapping(tool.raw)),
     )
 
 
@@ -1321,13 +1360,13 @@ def _trim_cache(cache: dict[Any, Any], max_entries: int) -> None:
 
 
 def _raise_denied(body: dict[str, Any], status_code: int) -> None:
-    error = _optional_mapping(body.get("error")) or {}
-    reason_code = body.get("reason_code") or error.get("code")
-    if reason_code is None:
+    decision = _optional_mapping(body.get("decision"))
+    reason_code = body.get("reason_code")
+    if decision is None or reason_code is None:
         _raise_gateway_error(body, status_code)
     raise ToolDeniedError(
         "Tool call denied by gateway policy.",
-        reason_code=str(reason_code) if reason_code is not None else None,
+        reason_code=str(reason_code),
         status_code=status_code,
         request_id=_optional_string(body.get("request_id")),
         correlation_id=_optional_string(body.get("correlation_id")),
@@ -1364,6 +1403,77 @@ def _raise_gateway_error(
     )
 
 
+def _send_limited_sync_request(
+    http_client: Any,
+    method: str,
+    url: str,
+    *,
+    max_response_bytes: int,
+    **kwargs: Any,
+) -> httpx.Response:
+    stream = getattr(http_client, "stream", None)
+    if callable(stream):
+        with stream(method, url, **kwargs) as response:
+            return _limited_sync_response(response, max_response_bytes=max_response_bytes)
+    request_method = getattr(http_client, method.lower())
+    return cast(httpx.Response, request_method(url, **kwargs))
+
+
+async def _send_limited_async_request(
+    http_client: Any,
+    method: str,
+    url: str,
+    *,
+    max_response_bytes: int,
+    **kwargs: Any,
+) -> httpx.Response:
+    stream = getattr(http_client, "stream", None)
+    if callable(stream):
+        async with stream(method, url, **kwargs) as response:
+            return await _limited_async_response(response, max_response_bytes=max_response_bytes)
+    request_method = getattr(http_client, method.lower())
+    response = request_method(url, **kwargs)
+    return cast(httpx.Response, await response if inspect.isawaitable(response) else response)
+
+
+def _limited_sync_response(
+    response: httpx.Response,
+    *,
+    max_response_bytes: int,
+) -> httpx.Response:
+    _ensure_response_content_length_within_limit(response, max_response_bytes=max_response_bytes)
+    content = bytearray()
+    for chunk in response.iter_bytes():
+        content.extend(chunk)
+        if len(content) > max_response_bytes:
+            raise _response_too_large_error(response.status_code)
+    return _materialized_response(response, bytes(content))
+
+
+async def _limited_async_response(
+    response: httpx.Response,
+    *,
+    max_response_bytes: int,
+) -> httpx.Response:
+    _ensure_response_content_length_within_limit(response, max_response_bytes=max_response_bytes)
+    content = bytearray()
+    async for chunk in response.aiter_bytes():
+        content.extend(chunk)
+        if len(content) > max_response_bytes:
+            raise _response_too_large_error(response.status_code)
+    return _materialized_response(response, bytes(content))
+
+
+def _materialized_response(response: httpx.Response, content: bytes) -> httpx.Response:
+    return httpx.Response(
+        response.status_code,
+        headers=response.headers,
+        content=content,
+        request=getattr(response, "request", None),
+        extensions=getattr(response, "extensions", {}) or {},
+    )
+
+
 def _response_json(
     response: httpx.Response,
     *,
@@ -1395,26 +1505,33 @@ def _ensure_response_within_limit(
     *,
     max_response_bytes: int,
 ) -> None:
+    _ensure_response_content_length_within_limit(response, max_response_bytes=max_response_bytes)
+    content = getattr(response, "content", b"")
+    if isinstance(content, bytes) and len(content) > max_response_bytes:
+        raise _response_too_large_error(response.status_code)
+
+
+def _ensure_response_content_length_within_limit(
+    response: httpx.Response,
+    *,
+    max_response_bytes: int,
+) -> None:
     content_length = response.headers.get("content-length")
     if content_length is not None:
         try:
             if int(content_length) > max_response_bytes:
-                raise ToolGatewayError(
-                    "Tool Gateway response exceeds max_response_bytes.",
-                    code="response_too_large",
-                    status_code=response.status_code,
-                    response_body={"error": {"code": "response_too_large"}},
-                )
+                raise _response_too_large_error(response.status_code)
         except ValueError:
             pass
-    content = getattr(response, "content", b"")
-    if isinstance(content, bytes) and len(content) > max_response_bytes:
-        raise ToolGatewayError(
-            "Tool Gateway response exceeds max_response_bytes.",
-            code="response_too_large",
-            status_code=response.status_code,
-            response_body={"error": {"code": "response_too_large"}},
-        )
+
+
+def _response_too_large_error(status_code: int | None) -> ToolGatewayError:
+    return ToolGatewayError(
+        "Tool Gateway response exceeds max_response_bytes.",
+        code="response_too_large",
+        status_code=status_code,
+        response_body={"error": {"code": "response_too_large"}},
+    )
 
 
 def _mapping_response(value: Any) -> dict[str, Any]:
@@ -1440,7 +1557,7 @@ def _optional_response_mapping_field(
             code="invalid_response",
             response_body=body,
         )
-    return value
+    return copy.deepcopy(value)
 
 
 def _optional_response_string_field(body: dict[str, Any], field_name: str) -> str | None:
@@ -1461,7 +1578,35 @@ def _optional_string(value: Any) -> str | None:
 
 
 def _immutable_mapping(value: dict[str, Any]) -> Mapping[str, Any]:
-    return MappingProxyType(dict(value))
+    return MappingProxyType(
+        {str(key): _immutable_value(child_value) for key, child_value in value.items()}
+    )
+
+
+def _immutable_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return _immutable_mapping(value)
+    if isinstance(value, Mapping):
+        return _immutable_mapping(_mutable_mapping(value))
+    if isinstance(value, list):
+        return tuple(_immutable_value(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_immutable_value(item) for item in value)
+    return copy.deepcopy(value)
+
+
+def _mutable_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {str(key): _mutable_value(child_value) for key, child_value in value.items()}
+
+
+def _mutable_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return _mutable_mapping(value)
+    if isinstance(value, tuple):
+        return [_mutable_value(item) for item in value]
+    if isinstance(value, list):
+        return [_mutable_value(item) for item in value]
+    return copy.deepcopy(value)
 
 
 def _response_text_excerpt(response: httpx.Response) -> str:
@@ -1494,6 +1639,15 @@ def _require_integer(value: object, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{field_name} must be an integer")
     return value
+
+
+def _optional_positive_integer(value: object | None, field_name: str) -> int | None:
+    if value is None:
+        return None
+    integer = _require_integer(value, field_name)
+    if integer <= 0:
+        raise ValueError(f"{field_name} must be greater than zero")
+    return integer
 
 
 def _require_bool(value: object, field_name: str) -> bool:

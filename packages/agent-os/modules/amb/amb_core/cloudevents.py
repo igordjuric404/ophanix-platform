@@ -22,10 +22,9 @@ Example:
 """
 
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Union
-from pydantic import BaseModel, Field, field_validator, ConfigDict
+from typing import Any, Dict, Optional
+from pydantic import BaseModel, Field, field_serializer, field_validator, ConfigDict
 import json
-import uuid
 
 from amb_core.models import Message, MessagePriority
 
@@ -69,13 +68,13 @@ class CloudEvent(BaseModel):
         - sender: Sender identifier (amb extension)
         - correlationid: Correlation ID for request-response (amb extension)
     """
-    
+
     # Required attributes (CloudEvents spec)
     id: str = Field(..., description="Unique identifier for the event")
     source: str = Field(..., description="URI-reference identifying the context")
     specversion: str = Field(default=CLOUDEVENTS_SPEC_VERSION, description="CloudEvents spec version")
     type: str = Field(..., description="Event type (reverse-DNS naming)")
-    
+
     # Optional attributes (CloudEvents spec)
     datacontenttype: Optional[str] = Field(
         default="application/json",
@@ -97,7 +96,7 @@ class CloudEvent(BaseModel):
         default_factory=dict,
         description="Event payload"
     )
-    
+
     # Extension attributes (Agent OS / AMB specific)
     # Prefixed with 'amb' namespace per CloudEvents extension naming conventions
     ambpriority: Optional[int] = Field(
@@ -132,14 +131,16 @@ class CloudEvent(BaseModel):
         None,
         description="Topic to reply to (AMB extension)"
     )
-    
+
     model_config = ConfigDict(
-        json_encoders={
-            datetime: lambda v: v.isoformat() if v else None
-        },
         extra="allow",  # Allow additional extension attributes
     )
-    
+
+    @field_serializer("time")
+    def serialize_time(self, value: datetime | None) -> str | None:
+        """Serialize CloudEvent time as an ISO 8601 string."""
+        return value.isoformat() if value else None
+
     @field_validator('specversion')
     @classmethod
     def validate_specversion(cls, v: str) -> str:
@@ -147,7 +148,7 @@ class CloudEvent(BaseModel):
         if v != CLOUDEVENTS_SPEC_VERSION:
             raise ValueError(f"Unsupported specversion: {v}. Expected: {CLOUDEVENTS_SPEC_VERSION}")
         return v
-    
+
     @field_validator('source')
     @classmethod
     def validate_source(cls, v: str) -> str:
@@ -155,7 +156,7 @@ class CloudEvent(BaseModel):
         if not v:
             raise ValueError("source cannot be empty")
         return v
-    
+
     @field_validator('type')
     @classmethod
     def validate_type(cls, v: str) -> str:
@@ -163,7 +164,7 @@ class CloudEvent(BaseModel):
         if not v:
             raise ValueError("type cannot be empty")
         return v
-    
+
     def to_json(self, **kwargs) -> str:
         """
         Serialize to CloudEvents JSON format (structured content mode).
@@ -172,7 +173,7 @@ class CloudEvent(BaseModel):
             JSON string representation
         """
         return self.model_dump_json(exclude_none=True, **kwargs)
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """
         Convert to dictionary (excludes None values).
@@ -181,7 +182,7 @@ class CloudEvent(BaseModel):
             Dictionary representation
         """
         return self.model_dump(exclude_none=True)
-    
+
     @classmethod
     def from_json(cls, json_str: str) -> "CloudEvent":
         """
@@ -195,7 +196,7 @@ class CloudEvent(BaseModel):
         """
         data = json.loads(json_str)
         return cls.model_validate(data)
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "CloudEvent":
         """
@@ -301,7 +302,7 @@ def to_cloudevent(
         time=message.timestamp,
         data=message.payload,
         dataschema=dataschema,
-        
+
         # AMB extensions
         ambpriority=message.priority.value if message.priority else None,
         ambtraceid=message.trace_id,
@@ -343,7 +344,7 @@ def from_cloudevent(
     """
     # Determine topic from type or subject
     topic = event.subject or type_to_topic(event.type, type_prefix)
-    
+
     # Map priority
     priority = MessagePriority.NORMAL
     if event.ambpriority is not None:
@@ -363,7 +364,7 @@ def from_cloudevent(
                 priority = MessagePriority.LOW
             else:
                 priority = MessagePriority.BACKGROUND
-    
+
     return Message(
         id=event.id,
         topic=topic,
@@ -391,9 +392,9 @@ class CloudEventBatch(BaseModel):
     
     CloudEvents batching spec: https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/formats/json-format.md#4-json-batch-format
     """
-    
+
     events: list[CloudEvent] = Field(default_factory=list)
-    
+
     def to_json(self) -> str:
         """Serialize batch to JSON array."""
         def serialize_event(e: CloudEvent) -> Dict[str, Any]:
@@ -402,19 +403,19 @@ class CloudEventBatch(BaseModel):
             if "time" in d and isinstance(d["time"], datetime):
                 d["time"] = d["time"].isoformat()
             return d
-        
+
         return json.dumps([serialize_event(e) for e in self.events])
-    
+
     @classmethod
     def from_json(cls, json_str: str) -> "CloudEventBatch":
         """Parse batch from JSON array."""
         data = json.loads(json_str)
         events = [CloudEvent.from_dict(e) for e in data]
         return cls(events=events)
-    
+
     def __len__(self) -> int:
         return len(self.events)
-    
+
     def __iter__(self):
         return iter(self.events)
 
@@ -465,7 +466,7 @@ def to_http_headers(event: CloudEvent) -> Dict[str, str]:
     """
     headers = {}
     event_dict = event.to_dict()
-    
+
     for attr, header in HTTP_HEADERS.items():
         if attr in event_dict and event_dict[attr] is not None:
             value = event_dict[attr]
@@ -474,7 +475,7 @@ def to_http_headers(event: CloudEvent) -> Dict[str, str]:
             elif not isinstance(value, str):
                 value = str(value)
             headers[header] = value
-    
+
     return headers
 
 
@@ -491,10 +492,10 @@ def from_http_headers(headers: Dict[str, str], data: Optional[Dict[str, Any]] = 
     """
     # Normalize header names to lowercase
     normalized = {k.lower(): v for k, v in headers.items()}
-    
+
     # Reverse mapping
     header_to_attr = {v.lower(): k for k, v in HTTP_HEADERS.items()}
-    
+
     event_data = {}
     for header, value in normalized.items():
         if header in header_to_attr:
@@ -503,7 +504,7 @@ def from_http_headers(headers: Dict[str, str], data: Optional[Dict[str, Any]] = 
             if attr in ("ambpriority", "ambttl"):
                 value = int(value)
             event_data[attr] = value
-    
+
     event_data["data"] = data
-    
+
     return CloudEvent.from_dict(event_data)

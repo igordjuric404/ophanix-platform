@@ -10,9 +10,15 @@ a product defect.
 ## Reporting A Vulnerability
 
 Report suspected vulnerabilities in the SDK, gateway contract, token handling,
-or packaging pipeline through the repository security process before public
-disclosure. If your organization has a private security intake for this
-repository, use that channel first.
+or packaging pipeline through GitHub private vulnerability reporting for this
+repository before public disclosure:
+
+`https://github.com/ophanix/ophanix-platform/security/advisories/new`
+
+If your organization has a private security intake for this repository, use
+that channel first and reference the GitHub advisory once it is created. Do not
+open a public issue for unpatched credential, authentication, SSRF, release, or
+data-exposure bugs.
 
 The expected response target is:
 

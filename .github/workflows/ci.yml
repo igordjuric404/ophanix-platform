@@ -83,13 +83,28 @@ jobs:
       - name: Install ruff
         run: pip install --require-hashes --no-cache-dir -r requirements/ci-lint.txt
       - name: Lint ${{ matrix.package }}
-        run: ruff check packages/${{ matrix.package }}/src/ --select E,F,W --ignore E501
+        run: |
+          if [[ "${{ matrix.package }}" == "product-platform" || "${{ matrix.package }}" == "ophanix-tool-gateway-sdk" ]]; then
+            cd packages/${{ matrix.package }}
+            paths=(src)
+            [[ -d tests ]] && paths+=(tests)
+            [[ -d scripts ]] && paths+=(scripts)
+            ruff check "${paths[@]}" --select E,F,W --ignore E501
+          else
+            ruff check packages/${{ matrix.package }}/src/ --select E,F,W --ignore E501
+          fi
       - name: Type check Tool Gateway SDK
         if: matrix.package == 'ophanix-tool-gateway-sdk'
         working-directory: packages/ophanix-tool-gateway-sdk
         run: |
           pip install --no-cache-dir ".[dev]"
           python -m mypy src/ophanix_tool_gateway
+      - name: Type check Product Tool Gateway surface
+        if: matrix.package == 'product-platform'
+        working-directory: packages/product-platform
+        run: |
+          pip install --no-cache-dir -e ../agent-discovery -e ../agent-mesh -e ".[dev]"
+          python -m mypy src/product_platform/tool_gateway src/ophanix_tool_gateway
 
   # ── Python test (only when Python files change) ───────────────────────
   test:
@@ -124,8 +139,14 @@ jobs:
       - name: Install ${{ matrix.package }}
         working-directory: packages/${{ matrix.package }}
         run: |
-          pip install --no-cache-dir -e ".[dev]" 2>/dev/null || pip install --no-cache-dir -e ".[test]" 2>/dev/null || pip install --no-cache-dir -e .  # Install local package (Scorecard: pinned via pyproject.toml)
-          pip install --no-cache-dir pytest==8.4.1 pytest-asyncio==0.26.0 2>/dev/null || true
+          if [[ "${{ matrix.package }}" == "product-platform" ]]; then
+            pip install --no-cache-dir -e ../agent-discovery -e ../agent-mesh -e ".[dev]"
+          elif [[ "${{ matrix.package }}" == "ophanix-tool-gateway-sdk" ]]; then
+            pip install --no-cache-dir -e ".[dev]"
+          else
+            pip install --no-cache-dir -e ".[dev]" 2>/dev/null || pip install --no-cache-dir -e ".[test]" 2>/dev/null || pip install --no-cache-dir -e .
+            pip install --no-cache-dir pytest==8.4.1 pytest-asyncio==0.26.0 2>/dev/null || true
+          fi
       - name: Test ${{ matrix.package }}
         working-directory: packages/${{ matrix.package }}
         run: pytest tests/ -q --tb=short
@@ -158,6 +179,12 @@ jobs:
         run: |
           python -m pip install --no-cache-dir ".[release,security]"
           python scripts/validate_release.py --out-dir /tmp/ophanix-sdk-ci-release --require-dependency-audit
+      - name: Validate Product Platform release artifacts
+        if: matrix.package == 'product-platform'
+        working-directory: packages/product-platform
+        run: |
+          python -m pip install --no-cache-dir ".[release]"
+          python scripts/validate_release.py --out-dir /tmp/ophanix-product-ci-release
 
   # ── Python dependency safety (only when Python files change) ──────────
   security:
@@ -169,9 +196,8 @@ jobs:
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.11"
-      - name: Install safety
-        run: |
-          pip install --no-cache-dir safety==3.2.1
+      - name: Install dependency audit tooling
+        run: pip install --no-cache-dir pip-audit==2.9.0
       - name: Check dependencies
         env:
           GIT_TERMINAL_PROMPT: "0"
@@ -179,10 +205,16 @@ jobs:
           for pkg in agent-os agent-mesh agent-hypervisor agent-sre agent-compliance agent-runtime agent-lightning product-platform ophanix-tool-gateway-sdk; do
             echo "=== $pkg ==="
             cd packages/$pkg
-            pip install --no-cache-dir -e . 2>/dev/null || true  # Install local package (Scorecard: pinned via pyproject.toml)
+            if [[ "$pkg" == "product-platform" ]]; then
+              pip install --no-cache-dir -e ../agent-discovery -e ../agent-mesh -e ".[security]"
+            elif [[ "$pkg" == "ophanix-tool-gateway-sdk" ]]; then
+              pip install --no-cache-dir -e ".[security]"
+            else
+              pip install --no-cache-dir -e . 2>/dev/null || true
+            fi
             cd ../..
           done
-          safety check 2>/dev/null || echo "Safety check completed with warnings"
+          pip-audit --progress-spinner off
 
   # ── .NET build + test (only when C# files change) ────────────────────
   test-dotnet:

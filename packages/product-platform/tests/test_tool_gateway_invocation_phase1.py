@@ -87,7 +87,8 @@ class ToolGatewayInvocationPhase1Tests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 401)
-        self.assertIn("missing_authorization", response.json()["message"])
+        self.assertEqual(response.json()["message"], "Gateway authentication failed.")
+        self.assertNotIn("missing_authorization", response.text)
 
     def test_api_valid_token_reaches_route_handler(self) -> None:
         response = self.client.post(

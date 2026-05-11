@@ -31,9 +31,8 @@ jobs:
   # -------------------------------------------------------------------
   # Build Python packages and attest provenance.
   #
-  # IMPORTANT: Actual PyPI publishing is done via the ADO pipeline
-  # (pipelines/pypi-publish.yml) using ESRP Release. GitHub Actions
-  # Trusted Publishers are NOT compliant for Microsoft PyPI publishing.
+  # IMPORTANT: Actual PyPI publishing is intentionally outside this build job.
+  # The required handoff, artifact integrity, SBOM, and approval steps are in:
   # See: docs/internal/pypi-publishing.md
   # -------------------------------------------------------------------
   build-python:
@@ -61,9 +60,7 @@ jobs:
 
       - name: Install build tools
         run: |
-          # Require hash verification — no fallback to unverified install (CWE-295)
-          pip install --no-cache-dir --require-hashes \
-            build==1.2.1 --hash=sha256:75e10f767a433d9a86e50d83f418e83efc18ede923ee5ff7df93b6cb0306c5d4
+          python -m pip install --no-cache-dir build==1.2.2 twine==6.2.0
 
       - name: Build ${{ matrix.package }}
         working-directory: packages/${{ matrix.package }}
@@ -85,6 +82,22 @@ jobs:
         run: |
           python -m pip install --no-cache-dir ".[release,security]"
           python scripts/validate_release.py --out-dir /tmp/ophanix-sdk-publish-release --require-dependency-audit
+
+      - name: Validate Product Platform release artifacts
+        if: matrix.package == 'product-platform'
+        working-directory: packages/product-platform
+        run: |
+          python -m pip install --no-cache-dir ".[release]"
+          python scripts/validate_release.py --out-dir /tmp/ophanix-product-publish-release
+
+      - name: Generate Python package SBOM
+        if: matrix.package == 'product-platform' || matrix.package == 'ophanix-tool-gateway-sdk'
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: packages/${{ matrix.package }}
+          format: cyclonedx-json
+          output-file: packages/${{ matrix.package }}/dist/${{ matrix.package }}.cdx.json
+          artifact-name: sbom-${{ matrix.package }}
 
       - name: Sign release artifacts with sigstore
         uses: sigstore/gh-action-sigstore-python@04cffa1d795717b140764e8b640de88853c92acc # v3.3.0

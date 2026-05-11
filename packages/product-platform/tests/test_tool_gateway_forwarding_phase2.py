@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 
+import httpx
+
 from product_platform.db.seed import DEMO_ADMIN_USER_ID, DEMO_ENV_ID, DEMO_ORG_ID, seed_demo_data
 from product_platform.db.testing import create_migrated_test_database
 from product_platform.tool_gateway.auth import GatewayPrincipal
@@ -41,6 +43,14 @@ class RecordingHTTPClient:
     def request(self, method: str, url: str, **kwargs):
         self.calls.append({"method": method, "url": url, **kwargs})
         return FakeHTTPResponse()
+
+
+class StaticSecretProvider:
+    def __init__(self, secrets: dict[str, str]) -> None:
+        self.secrets = secrets
+
+    def retrieve(self, secret_ref: str) -> str | None:
+        return self.secrets.get(secret_ref)
 
 
 class ToolGatewayForwardingPhase2Tests(unittest.TestCase):
@@ -132,6 +142,18 @@ class ToolGatewayForwardingPhase2Tests(unittest.TestCase):
             "https://claims.internal.example/v1/claims/ABC%20123/notes/n%2F1",
         )
 
+    def test_unit_target_url_is_revalidated_at_execution_time(self) -> None:
+        with self.assertRaises(ToolExecutionError) as context:
+            build_upstream_url(
+                {
+                    "base_url": "https://127.0.0.1:9000",
+                    "path_template": "/v1/claims/{claim_id}",
+                },
+                {"claim_id": "claim_123"},
+            )
+
+        self.assertEqual(context.exception.code, "unsafe_upstream_url")
+
     def test_unit_missing_target_returns_controlled_error(self) -> None:
         with self.database.transaction():
             tool = self._create_active_tool(self.repository)
@@ -212,6 +234,7 @@ class ToolGatewayForwardingPhase2Tests(unittest.TestCase):
                     auth_mode="none",
                     timeout_ms=1200,
                     health_url="https://claims.internal.example/health",
+                    query_parameter_allowlist=["claim_id"],
                 ),
             )
             http_client = RecordingHTTPClient()
@@ -226,6 +249,30 @@ class ToolGatewayForwardingPhase2Tests(unittest.TestCase):
         self.assertNotIn("json", http_client.calls[0])
         self.assertEqual(http_client.calls[0]["params"], {"claim_id": "claim_123"})
 
+    def test_unit_get_target_rejects_query_params_without_explicit_allowlist(self) -> None:
+        with self.database.transaction():
+            tool = self._create_active_tool(self.repository)
+            self.repository.create_upstream_target(
+                tool["id"],
+                ToolUpstreamTargetCreateRequest(
+                    base_url="https://claims.internal.example",
+                    path_template="/v1/claims",
+                    method="GET",
+                    auth_mode="none",
+                    timeout_ms=1200,
+                    health_url="https://claims.internal.example/health",
+                ),
+            )
+            with self.assertRaises(ToolExecutionError) as context:
+                HttpToolInvocationExecutor(self.repository, http_client=RecordingHTTPClient()).execute(
+                    tool=tool,
+                    payload={"claim_id": "claim_123"},
+                    decision=self._decision(tool_id=tool["id"]),
+                    principal=self._principal(),
+                )
+
+        self.assertEqual(context.exception.code, "query_parameter_not_allowed")
+
     def test_unit_get_target_does_not_duplicate_path_params_in_query(self) -> None:
         with self.database.transaction():
             tool = self._create_active_tool(self.repository)
@@ -238,6 +285,7 @@ class ToolGatewayForwardingPhase2Tests(unittest.TestCase):
                     auth_mode="none",
                     timeout_ms=1200,
                     health_url="https://claims.internal.example/health",
+                    query_parameter_allowlist=["include_notes"],
                 ),
             )
             http_client = RecordingHTTPClient()
@@ -262,6 +310,7 @@ class ToolGatewayForwardingPhase2Tests(unittest.TestCase):
                     auth_mode="none",
                     timeout_ms=1200,
                     health_url="https://claims.internal.example/health",
+                    query_parameter_allowlist=["api_key"],
                 ),
             )
             with self.assertRaises(ToolExecutionError) as context:
@@ -273,6 +322,92 @@ class ToolGatewayForwardingPhase2Tests(unittest.TestCase):
                 )
 
         self.assertEqual(context.exception.code, "unsafe_query_payload")
+
+    def test_unit_bearer_upstream_auth_uses_secret_reference_without_exposing_secret(self) -> None:
+        with self.database.transaction():
+            tool = self._create_active_tool(self.repository)
+            self.repository.create_upstream_target(
+                tool["id"],
+                ToolUpstreamTargetCreateRequest(
+                    base_url="https://claims.internal.example",
+                    path_template="/v1/claims/{claim_id}",
+                    method="POST",
+                    auth_mode="bearer",
+                    auth_config_json={"secret_ref": "secref_forward"},
+                    timeout_ms=1200,
+                    health_url="https://claims.internal.example/health",
+                ),
+            )
+            http_client = RecordingHTTPClient()
+            HttpToolInvocationExecutor(
+                self.repository,
+                http_client=http_client,
+                secret_provider=StaticSecretProvider({"secref_forward": "upstream-token"}),
+            ).execute(
+                tool=tool,
+                payload={"claim_id": "claim_123"},
+                decision=self._decision(tool_id=tool["id"]),
+                principal=self._principal(),
+            )
+
+        self.assertEqual(http_client.calls[0]["headers"]["Authorization"], "Bearer upstream-token")
+
+    def test_unit_upstream_auth_fails_closed_when_secret_is_missing(self) -> None:
+        with self.database.transaction():
+            tool = self._create_active_tool(self.repository)
+            self.repository.create_upstream_target(
+                tool["id"],
+                ToolUpstreamTargetCreateRequest(
+                    base_url="https://claims.internal.example",
+                    path_template="/v1/claims/{claim_id}",
+                    method="POST",
+                    auth_mode="api_key",
+                    auth_config_json={"secret_ref": "missing", "header_name": "X-Partner-Key"},
+                    timeout_ms=1200,
+                    health_url="https://claims.internal.example/health",
+                ),
+            )
+            with self.assertRaises(ToolExecutionError) as context:
+                HttpToolInvocationExecutor(
+                    self.repository,
+                    http_client=RecordingHTTPClient(),
+                    secret_provider=StaticSecretProvider({}),
+                ).execute(
+                    tool=tool,
+                    payload={"claim_id": "claim_123"},
+                    decision=self._decision(tool_id=tool["id"]),
+                    principal=self._principal(),
+                )
+
+        self.assertEqual(context.exception.code, "upstream_auth_secret_unavailable")
+
+    def test_unit_streaming_response_cap_blocks_body_without_content_length(self) -> None:
+        with self.database.transaction():
+            tool = self._create_active_tool(self.repository)
+            self.repository.create_upstream_target(tool["id"], self._target_body())
+
+        http_client = httpx.Client(
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(
+                    200,
+                    content=b"x" * 11,
+                    headers={"content-type": "text/plain"},
+                )
+            )
+        )
+        with self.assertRaises(ToolExecutionError) as context:
+            HttpToolInvocationExecutor(
+                self.repository,
+                http_client=http_client,
+                max_response_bytes=10,
+            ).execute(
+                tool=tool,
+                payload={"claim_id": "claim_123"},
+                decision=self._decision(tool_id=tool["id"]),
+                principal=self._principal(),
+            )
+
+        self.assertEqual(context.exception.code, "upstream_response_too_large")
 
 
 if __name__ == "__main__":

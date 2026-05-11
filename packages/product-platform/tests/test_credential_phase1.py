@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from product_platform import create_app
-from product_platform.agents.credentials import AgentCredentialRepository, hash_credential_token
+from product_platform.agents.credentials import (
+    AgentCredentialRepository,
+    credential_token_hash_candidates,
+    hash_credential_token,
+    legacy_credential_token_hash,
+)
 from product_platform.agents.models import CredentialScopeRequest
 from product_platform.api.settings import Settings
 from product_platform.db.seed import seed_demo_data
@@ -128,6 +135,61 @@ class CredentialPhase1Tests(unittest.TestCase):
         persisted = json.dumps([dict(row) for row in rows], sort_keys=True)
         self.assertNotIn(raw_token, persisted)
         self.assertIn(hash_credential_token(raw_token), persisted)
+
+    def test_security_token_hash_uses_pepper_key_id_and_previous_peppers(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OPHANIX_GATEWAY_TOKEN_HASH_PEPPER": "current-pepper",
+                "OPHANIX_GATEWAY_TOKEN_HASH_PEPPER_ID": "current",
+                "OPHANIX_GATEWAY_TOKEN_HASH_PREVIOUS_PEPPERS": "previous:old-pepper",
+                "OPHANIX_GATEWAY_TOKEN_HASH_ACCEPT_LEGACY": "false",
+            },
+            clear=False,
+        ):
+            current_hash = hash_credential_token("phase1-secret-token")
+            candidates = credential_token_hash_candidates("phase1-secret-token")
+
+        self.assertTrue(current_hash.startswith("hmac-sha256:current:"))
+        self.assertTrue(any(candidate.startswith("hmac-sha256:previous:") for candidate in candidates))
+        self.assertNotIn(legacy_credential_token_hash("phase1-secret-token"), candidates)
+
+    def test_security_legacy_hash_candidate_requires_explicit_opt_in_when_peppered(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OPHANIX_GATEWAY_TOKEN_HASH_PEPPER": "current-pepper",
+                "OPHANIX_GATEWAY_TOKEN_HASH_ACCEPT_LEGACY": "true",
+            },
+            clear=False,
+        ):
+            candidates = credential_token_hash_candidates("phase1-secret-token")
+
+        self.assertIn(legacy_credential_token_hash("phase1-secret-token"), candidates)
+
+    def test_security_metadata_rejects_sensitive_keys_and_secret_like_values(self) -> None:
+        repository = self._repository()
+        with self.assertRaisesRegex(ValueError, "secret material"):
+            repository.create_metadata(
+                agent_id="agent_credentials_demo",
+                credential_type="bearer",
+                raw_token="phase1-secret-token",
+                issuer="local-agentmesh",
+                expires_at="2026-05-01T00:00:00+00:00",
+                scopes=[],
+                metadata_json={"apiToken": "masked-or-not-this-is-not-allowed"},
+            )
+
+        with self.assertRaisesRegex(ValueError, "secret material"):
+            repository.create_metadata(
+                agent_id="agent_credentials_demo",
+                credential_type="bearer",
+                raw_token="phase1-secret-token",
+                issuer="local-agentmesh",
+                expires_at="2026-05-01T00:00:00+00:00",
+                scopes=[],
+                metadata_json={"note": "Authorization: secret-token-value"},
+            )
 
     def test_api_list_filters_by_status_and_hides_hashes(self) -> None:
         repository = self._repository()

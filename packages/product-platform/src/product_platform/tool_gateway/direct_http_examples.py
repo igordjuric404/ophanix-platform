@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from sqlite3 import Connection
+from typing import cast
 
 from product_platform.agents.credentials import hash_credential_token
 from product_platform.db.seed import DEMO_ADMIN_USER_ID, DEMO_ENV_ID, DEMO_ORG_ID
@@ -222,7 +223,7 @@ def seed_support_demo_tool_gateway_fixtures(
             display_name=str(tool["display_name"]),
             description=str(tool["description"]),
             required_scope=str(tool["required_scope"]),
-            input_schema=tool["input_schema"],
+            input_schema=cast(dict[str, object], tool["input_schema"]),
             output_schema=DIRECT_HTTP_OUTPUT_SCHEMA,
             change_summary="Initial support demo denied contract.",
         )

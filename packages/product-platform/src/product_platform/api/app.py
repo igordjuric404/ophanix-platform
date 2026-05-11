@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -622,10 +623,12 @@ def _request_context_from_request(request: Request) -> RequestContext:
     existing = getattr(request.state, "request_context", None)
     if isinstance(existing, RequestContext):
         return existing
-    fallback_id = _trusted_trace_id(request.headers.get("X-Request-ID")) or str(uuid4())
+    server_request_id = str(uuid4())
+    fallback_id = _trusted_trace_id(request.headers.get("X-Request-ID")) or server_request_id
     return RequestContext(
         request_id=fallback_id,
         correlation_id=_trusted_trace_id(request.headers.get("X-Correlation-ID")) or fallback_id,
+        server_request_id=server_request_id,
         organization_id=request.headers.get("X-Organization-ID"),
         environment_id=request.headers.get("X-Environment-ID"),
         user_id=request.headers.get("X-User-ID"),
@@ -684,6 +687,30 @@ def _validate_production_settings(settings: Settings) -> None:
     )
     if enable_dev_login:
         raise ValueError("Development login must be disabled in production.")
+    if settings.database_url.startswith("sqlite:///") and not settings.allow_sqlite_in_production:
+        raise ValueError(
+            "SQLite is not supported for production without "
+            "OPHANIX_ALLOW_SQLITE_IN_PRODUCTION=true."
+        )
+    if not settings.gateway_token_hash_pepper:
+        raise ValueError("OPHANIX_GATEWAY_TOKEN_HASH_PEPPER must be set in production.")
+    positive_gateway_limits = {
+        "OPHANIX_TOOL_GATEWAY_MAX_BODY_BYTES": settings.tool_gateway_max_body_bytes,
+        "OPHANIX_TOOL_GATEWAY_RATE_LIMIT_WINDOW_SECONDS": (
+            settings.tool_gateway_rate_limit_window_seconds
+        ),
+        "OPHANIX_TOOL_GATEWAY_RATE_LIMIT_MAX_REQUESTS": settings.tool_gateway_rate_limit_max_requests,
+        "OPHANIX_TOOL_GATEWAY_RATE_LIMIT_MAX_KEYS": settings.tool_gateway_rate_limit_max_keys,
+        "OPHANIX_TOOL_GATEWAY_MAX_UPSTREAM_RESPONSE_BYTES": (
+            settings.tool_gateway_max_upstream_response_bytes
+        ),
+    }
+    unsafe_limits = [name for name, value in positive_gateway_limits.items() if int(value) <= 0]
+    if unsafe_limits:
+        raise ValueError(
+            "Tool Gateway production safety limits must be positive: "
+            + ", ".join(sorted(unsafe_limits))
+        )
 
 
 def _is_tool_gateway_runtime_path(path: str) -> bool:
@@ -713,47 +740,137 @@ def _tool_gateway_rate_limit_exceeded(app: FastAPI, request: Request) -> bool:
     key = _gateway_rate_limit_key(request)
     limits: dict[str, tuple[float, int]] = app.state.tool_gateway_rate_limits
     max_keys = int(getattr(settings, "tool_gateway_rate_limit_max_keys", 10_000))
-    window_started_at, count = limits.get(key, (now, 0))
-    if now - window_started_at >= window_seconds:
-        limits[key] = (now, 1)
-        return False
-    if key not in limits and max_keys > 0 and len(limits) >= max_keys:
-        expired_keys = [
-            existing_key
-            for existing_key, (started_at, _) in limits.items()
-            if now - started_at >= window_seconds
-        ]
-        for expired_key in expired_keys:
-            limits.pop(expired_key, None)
-        if len(limits) >= max_keys:
-            return True
-    count += 1
-    limits[key] = (window_started_at, count)
-    return count > max_requests
+    lock = getattr(app.state, "tool_gateway_rate_limit_lock", None)
+    if lock is None:
+        lock = threading.Lock()
+        app.state.tool_gateway_rate_limit_lock = lock
+    with lock:
+        window_started_at, count = limits.get(key, (now, 0))
+        if now - window_started_at >= window_seconds:
+            limits[key] = (now, 1)
+            return False
+        if key not in limits and max_keys > 0 and len(limits) >= max_keys:
+            expired_keys = [
+                existing_key
+                for existing_key, (started_at, _) in limits.items()
+                if now - started_at >= window_seconds
+            ]
+            for expired_key in expired_keys:
+                limits.pop(expired_key, None)
+            if len(limits) >= max_keys:
+                return True
+        count += 1
+        limits[key] = (window_started_at, count)
+        return count > max_requests
 
 
-class _ToolGatewayRequestBodyTooLarge(Exception):
-    pass
+class ToolGatewayBodyLimitMiddleware:
+    """ASGI receive wrapper that enforces gateway body caps without private Request mutation."""
 
+    def __init__(self, app: Any, *, max_body_bytes: int) -> None:
+        self.app = app
+        self.max_body_bytes = int(max_body_bytes)
 
-def _install_tool_gateway_body_limiter(request: Request, max_body_bytes: int) -> None:
-    if max_body_bytes <= 0:
-        return
-    original_receive = request._receive  # type: ignore[attr-defined]
-    received_bytes = 0
-
-    async def limited_receive() -> dict[str, Any]:
-        nonlocal received_bytes
-        message = await original_receive()
-        if message.get("type") == "http.request":
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if (
+            scope.get("type") != "http"
+            or self.max_body_bytes <= 0
+            or not _is_tool_gateway_runtime_path(str(scope.get("path") or ""))
+        ):
+            await self.app(scope, receive, send)
+            return
+        received_bytes = 0
+        chunks: list[bytes] = []
+        while True:
+            message = await receive()
+            if message.get("type") != "http.request":
+                await self.app(scope, receive, send)
+                return
             body = message.get("body", b"")
             if isinstance(body, bytes):
                 received_bytes += len(body)
-                if received_bytes > max_body_bytes:
-                    raise _ToolGatewayRequestBodyTooLarge
-        return message
+                if received_bytes > self.max_body_bytes:
+                    await _send_asgi_error_response(
+                        scope,
+                        send,
+                        status_code=413,
+                        code="REQUEST_BODY_TOO_LARGE",
+                        message="Tool Gateway request body exceeds the configured size limit.",
+                    )
+                    return
+                chunks.append(body)
+            if not bool(message.get("more_body", False)):
+                break
+        replayed = False
 
-    request._receive = limited_receive  # type: ignore[attr-defined]
+        async def replay_receive() -> dict[str, Any]:
+            nonlocal replayed
+            if replayed:
+                return {"type": "http.request", "body": b"", "more_body": False}
+            replayed = True
+            return {
+                "type": "http.request",
+                "body": b"".join(chunks),
+                "more_body": False,
+            }
+
+        await self.app(scope, replay_receive, send)
+
+
+async def _send_asgi_error_response(
+    scope: dict[str, Any],
+    send: Any,
+    *,
+    status_code: int,
+    code: str,
+    message: str,
+) -> None:
+    headers = _scope_headers(scope)
+    request_id = _trusted_trace_id(headers.get("x-request-id")) or str(uuid4())
+    correlation_id = _trusted_trace_id(headers.get("x-correlation-id")) or request_id
+    body = json.dumps(
+        {
+            "code": code,
+            "message": message,
+            "request_id": request_id,
+            "details": {},
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status_code,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"x-request-id", request_id.encode("utf-8")),
+                (b"x-correlation-id", correlation_id.encode("utf-8")),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
+
+
+def _scope_headers(scope: dict[str, Any]) -> dict[str, str]:
+    output: dict[str, str] = {}
+    for raw_key, raw_value in scope.get("headers", []) or []:
+        try:
+            key = raw_key.decode("latin-1").lower()
+            value = raw_value.decode("latin-1")
+        except Exception:
+            continue
+        output[key] = value
+    return output
+
+
+class _PreloadedToolUpstreamTargetRepository:
+    """Repository adapter that lets invocation avoid DB work during upstream I/O."""
+
+    def __init__(self, target: Any | None) -> None:
+        self._target = target
+
+    def get_upstream_target_for_tool(self, _tool_id: str) -> Any | None:
+        return self._target
 
 
 def create_app(
@@ -807,6 +924,7 @@ def create_app(
     app.state.started_at = started_at
     app.state.tool_gateway_http_client = httpx.AsyncClient()
     app.state.tool_gateway_rate_limits = {}
+    app.state.tool_gateway_rate_limit_lock = threading.Lock()
 
     async def _close_tool_gateway_http_client() -> None:
         client = app.state.tool_gateway_http_client
@@ -843,15 +961,21 @@ def create_app(
             "X-User-ID",
         ],
     )
+    app.add_middleware(
+        ToolGatewayBodyLimitMiddleware,
+        max_body_bytes=int(resolved_settings.tool_gateway_max_body_bytes),
+    )
 
     @app.middleware("http")
     async def request_context_middleware(request: Request, call_next: Any) -> Any:
-        request_id = _trusted_trace_id(request.headers.get("X-Request-ID")) or str(uuid4())
+        server_request_id = str(uuid4())
+        request_id = _trusted_trace_id(request.headers.get("X-Request-ID")) or server_request_id
         correlation_id = _trusted_trace_id(request.headers.get("X-Correlation-ID")) or request_id
         principal = getattr(request.state, "principal", None)
         request.state.request_context = RequestContext(
             request_id=request_id,
             correlation_id=correlation_id,
+            server_request_id=server_request_id,
             organization_id=getattr(
                 request.state,
                 "selected_organization_id",
@@ -899,7 +1023,6 @@ def create_app(
                         code="REQUEST_BODY_TOO_LARGE",
                         message="Tool Gateway request body exceeds the configured size limit.",
                     )
-            _install_tool_gateway_body_limiter(request, max_body_bytes)
             if _tool_gateway_rate_limit_exceeded(app, request):
                 return _error_response(
                     request,
@@ -907,63 +1030,55 @@ def create_app(
                     code="TOOL_GATEWAY_RATE_LIMITED",
                     message="Tool Gateway rate limit exceeded.",
                 )
-        try:
-            if (
-                request.url.path.startswith("/api/v1")
-                and request.url.path not in public_api_paths
-                and not _uses_gateway_auth_path(request.url.path)
-            ):
-                principal = auth_service.authenticate_request(request)
-                if principal is None:
-                    authorization = request.headers.get("Authorization", "")
-                    scheme, _, token = authorization.partition(" ")
-                    if scheme.lower() == "bearer" and token:
-                        principal = api_keys.authenticate(token)
-                if principal is None:
-                    return _error_response(
-                        request,
-                        status_code=401,
-                        code="UNAUTHENTICATED",
-                        message="Authentication is required.",
-                    )
-                request.state.principal = principal
-                selected_organization_id = (
-                    request.headers.get("X-Organization-ID") or principal.organization_id
+        if (
+            request.url.path.startswith("/api/v1")
+            and request.url.path not in public_api_paths
+            and not _uses_gateway_auth_path(request.url.path)
+        ):
+            principal = auth_service.authenticate_request(request)
+            if principal is None:
+                authorization = request.headers.get("Authorization", "")
+                scheme, _, token = authorization.partition(" ")
+                if scheme.lower() == "bearer" and token:
+                    principal = api_keys.authenticate(token)
+            if principal is None:
+                return _error_response(
+                    request,
+                    status_code=401,
+                    code="UNAUTHENTICATED",
+                    message="Authentication is required.",
                 )
-                if not selected_organization_id or selected_organization_id != principal.organization_id:
-                    return _error_response(
-                        request,
-                        status_code=403,
-                        code="FORBIDDEN",
-                        message="Organization access is denied.",
-                    )
-                if tenants.get_organization(selected_organization_id) is None:
-                    return _error_response(
-                        request,
-                        status_code=403,
-                        code="FORBIDDEN",
-                        message="Organization access is denied.",
-                    )
-                selected_environment_id = request.headers.get("X-Environment-ID")
-                if selected_environment_id:
-                    environment = tenants.get_environment(selected_environment_id)
-                    if environment is None or environment.organization_id != selected_organization_id:
-                        return _error_response(
-                            request,
-                            status_code=403,
-                            code="FORBIDDEN",
-                            message="Environment access is denied.",
-                        )
-                request.state.selected_organization_id = selected_organization_id
-                request.state.selected_environment_id = selected_environment_id
-            return await call_next(request)
-        except _ToolGatewayRequestBodyTooLarge:
-            return _error_response(
-                request,
-                status_code=413,
-                code="REQUEST_BODY_TOO_LARGE",
-                message="Tool Gateway request body exceeds the configured size limit.",
+            request.state.principal = principal
+            selected_organization_id = (
+                request.headers.get("X-Organization-ID") or principal.organization_id
             )
+            if not selected_organization_id or selected_organization_id != principal.organization_id:
+                return _error_response(
+                    request,
+                    status_code=403,
+                    code="FORBIDDEN",
+                    message="Organization access is denied.",
+                )
+            if tenants.get_organization(selected_organization_id) is None:
+                return _error_response(
+                    request,
+                    status_code=403,
+                    code="FORBIDDEN",
+                    message="Organization access is denied.",
+                )
+            selected_environment_id = request.headers.get("X-Environment-ID")
+            if selected_environment_id:
+                environment = tenants.get_environment(selected_environment_id)
+                if environment is None or environment.organization_id != selected_organization_id:
+                    return _error_response(
+                        request,
+                        status_code=403,
+                        code="FORBIDDEN",
+                        message="Environment access is denied.",
+                    )
+            request.state.selected_organization_id = selected_organization_id
+            request.state.selected_environment_id = selected_environment_id
+        return await call_next(request)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(
@@ -1174,6 +1289,17 @@ def create_app(
             return str(execution.error["code"])
         return "upstream_error"
 
+    def _response_policy_store_full_response(response_policy: Any | None) -> bool:
+        if response_policy is None:
+            return False
+        try:
+            status = str(response_policy["status"]).strip().lower()
+        except Exception:
+            status = "active"
+        if status != "active":
+            return False
+        return bool(response_policy["store_full_response"])
+
     def _get_gateway_principal(request: Request) -> GatewayPrincipal:
         context = _request_context_from_request(request)
         try:
@@ -1209,7 +1335,7 @@ def create_app(
                 )
             raise HTTPException(
                 status_code=401,
-                detail=f"Gateway authentication failed: {exc.reason_code}",
+                detail="Gateway authentication failed.",
             ) from exc
 
     def _serialize_job(repository: JobStateRepository, job_id: str) -> JobResponse:
@@ -3046,6 +3172,8 @@ def create_app(
     async def api_openapi_alias() -> dict:
         """Expose OpenAPI at the product API alias expected by the plan."""
 
+        if not enable_api_docs:
+            raise HTTPException(status_code=404, detail="OpenAPI schema is disabled.")
         return app.openapi()
 
     @app.get("/api/v1/system/config", response_model=PublicConfig, tags=["system"])
@@ -3056,7 +3184,7 @@ def create_app(
             app_name=resolved_settings.app_name,
             environment=resolved_settings.environment,
             api_base_path=resolved_settings.api_base_path,
-            docs_url="/docs",
+            docs_url="/docs" if enable_api_docs else None,
             cors_origins=resolved_settings.cors_origins,
             features={
                 "auth": True,
@@ -3269,40 +3397,140 @@ def create_app(
                         "reason_code": decision.reason_code,
                     },
                 )
-                executor = getattr(app.state, "tool_gateway_executor", None)
-                if executor is None:
-                    executor = AsyncHttpToolInvocationExecutor(
-                        repository,
-                        http_client=getattr(app.state, "tool_gateway_http_client", None),
-                        max_response_bytes=int(
-                            resolved_settings.tool_gateway_max_upstream_response_bytes
-                        ),
+                runtime_action_id = str(runtime_action["id"])
+                response_policy = repository.get_response_policy(tool["id"])
+                upstream_target = repository.get_upstream_target_for_tool(tool["id"])
+
+            def _update_runtime_action(
+                update: ToolRuntimeActionUpdate,
+                event_type: str,
+                event_summary: dict[str, Any],
+            ) -> None:
+                with _audit_database().transaction() as update_connection:
+                    update_repository = ToolRuntimeActionRepository(
+                        update_connection,
+                        principal.organization_id,
+                        principal.environment_id,
                     )
-                try:
-                    maybe_execution = executor.execute(
-                        tool=tool,
-                        payload=body.payload,
-                        decision=decision,
-                        principal=principal,
-                    )
-                    execution = (
-                        await maybe_execution
-                        if inspect.isawaitable(maybe_execution)
-                        else maybe_execution
-                    )
-                except ToolExecutionError as exc:
-                    runtime_repository.update_action(
-                        runtime_action["id"],
-                        ToolRuntimeActionUpdate(
-                            action_status="upstream_failed",
-                            error_code=exc.code,
-                            response_summary={"error": exc.message},
-                        ),
-                    )
+                    update_repository.update_action(runtime_action_id, update)
                     _append_tool_runtime_event(
-                        runtime_repository,
-                        runtime_action["id"],
-                        "tool.runtime.upstream_failed",
+                        update_repository,
+                        runtime_action_id,
+                        event_type,
+                        event_summary,
+                    )
+
+            executor = getattr(app.state, "tool_gateway_executor", None)
+            if executor is None:
+                executor = AsyncHttpToolInvocationExecutor(
+                    _PreloadedToolUpstreamTargetRepository(upstream_target),
+                    http_client=getattr(app.state, "tool_gateway_http_client", None),
+                    secret_provider=_secret_provider(),
+                    max_response_bytes=int(
+                        resolved_settings.tool_gateway_max_upstream_response_bytes
+                    ),
+                )
+            try:
+                maybe_execution = executor.execute(
+                    tool=tool,
+                    payload=body.payload,
+                    decision=decision,
+                    principal=principal,
+                )
+                execution = (
+                    await maybe_execution
+                    if inspect.isawaitable(maybe_execution)
+                    else maybe_execution
+                )
+            except ToolExecutionError as exc:
+                _update_runtime_action(
+                    ToolRuntimeActionUpdate(
+                        action_status="upstream_failed",
+                        error_code=exc.code,
+                        response_summary={"error": exc.message},
+                    ),
+                    "tool.runtime.upstream_failed",
+                    {"error_code": exc.code},
+                )
+                return JSONResponse(
+                    status_code=exc.status_code,
+                    content=jsonable_encoder(
+                        ToolInvocationResponse(
+                            request_id=context.request_id,
+                            correlation_id=correlation_id,
+                            tool_name=tool_name,
+                            decision=decision,
+                            reason_code=decision.reason_code,
+                            result=None,
+                            error={"code": exc.code, "message": exc.message},
+                        )
+                    ),
+                )
+            except Exception:
+                _update_runtime_action(
+                    ToolRuntimeActionUpdate(
+                        action_status="upstream_failed",
+                        error_code="executor_error",
+                        response_summary={"error": "Tool executor failed."},
+                    ),
+                    "tool.runtime.upstream_failed",
+                    {"error_code": "executor_error"},
+                )
+                return JSONResponse(
+                    status_code=502,
+                    content=jsonable_encoder(
+                        ToolInvocationResponse(
+                            request_id=context.request_id,
+                            correlation_id=correlation_id,
+                            tool_name=tool_name,
+                            decision=decision,
+                            reason_code=decision.reason_code,
+                            result=None,
+                            error={
+                                "code": "executor_error",
+                                "message": "Tool executor failed.",
+                            },
+                        )
+                    ),
+                )
+
+            _update_runtime_action(
+                ToolRuntimeActionUpdate(
+                    action_status="forwarded",
+                    upstream_status_code=execution.upstream_status_code
+                    if isinstance(execution, ToolExecutionResult)
+                    else None,
+                    latency_ms=execution.latency_ms
+                    if isinstance(execution, ToolExecutionResult)
+                    else None,
+                ),
+                "tool.runtime.forwarded",
+                {
+                    "upstream_status_code": execution.upstream_status_code
+                    if isinstance(execution, ToolExecutionResult)
+                    else None,
+                },
+            )
+            if isinstance(execution, ToolExecutionResult):
+                try:
+                    if response_policy is not None:
+                        execution = process_tool_execution_response(tool, response_policy, execution)
+                except ToolExecutionError as exc:
+                    _update_runtime_action(
+                        ToolRuntimeActionUpdate(
+                            action_status="response_blocked",
+                            upstream_status_code=execution.upstream_status_code,
+                            latency_ms=execution.latency_ms,
+                            response_summary=_runtime_response_summary(
+                                execution,
+                                store_full_response=_response_policy_store_full_response(
+                                    response_policy
+                                ),
+                            ),
+                            redaction_applied=execution.redaction_applied,
+                            error_code=exc.code,
+                        ),
+                        "tool.runtime.response_blocked",
                         {"error_code": exc.code},
                     )
                     return JSONResponse(
@@ -3319,192 +3547,83 @@ def create_app(
                             )
                         ),
                     )
-                except Exception:
-                    runtime_repository.update_action(
-                        runtime_action["id"],
-                        ToolRuntimeActionUpdate(
-                            action_status="upstream_failed",
-                            error_code="executor_error",
-                            response_summary={"error": "Tool executor failed."},
-                        ),
-                    )
-                    _append_tool_runtime_event(
-                        runtime_repository,
-                        runtime_action["id"],
-                        "tool.runtime.upstream_failed",
-                        {"error_code": "executor_error"},
-                    )
-                    return JSONResponse(
-                        status_code=502,
-                        content=jsonable_encoder(
-                            ToolInvocationResponse(
-                                request_id=context.request_id,
-                                correlation_id=correlation_id,
-                                tool_name=tool_name,
-                                decision=decision,
-                                reason_code=decision.reason_code,
-                                result=None,
-                                error={
-                                    "code": "executor_error",
-                                    "message": "Tool executor failed.",
-                                },
-                            )
-                        ),
-                    )
-                runtime_repository.update_action(
-                    runtime_action["id"],
+            result = execution.model_dump() if isinstance(execution, ToolExecutionResult) else execution
+            if isinstance(execution, ToolExecutionResult) and execution.status == "failed":
+                if isinstance(result, dict):
+                    result = {
+                        **result,
+                        "body": None,
+                        "exposed_to_agent": False,
+                    }
+                error_code = _runtime_execution_error_code(execution)
+                _update_runtime_action(
                     ToolRuntimeActionUpdate(
-                        action_status="forwarded",
-                        upstream_status_code=execution.upstream_status_code
-                        if isinstance(execution, ToolExecutionResult)
-                        else None,
-                        latency_ms=execution.latency_ms
-                        if isinstance(execution, ToolExecutionResult)
-                        else None,
-                    ),
-                )
-                _append_tool_runtime_event(
-                    runtime_repository,
-                    runtime_action["id"],
-                    "tool.runtime.forwarded",
-                    {
-                        "upstream_status_code": execution.upstream_status_code
-                        if isinstance(execution, ToolExecutionResult)
-                        else None,
-                    },
-                )
-                response_policy: Any | None = None
-                if isinstance(execution, ToolExecutionResult):
-                    try:
-                        response_policy = repository.get_response_policy(tool["id"])
-                        if response_policy is not None:
-                            execution = process_tool_execution_response(tool, response_policy, execution)
-                    except ToolExecutionError as exc:
-                        runtime_repository.update_action(
-                            runtime_action["id"],
-                            ToolRuntimeActionUpdate(
-                                action_status="response_blocked",
-                                upstream_status_code=execution.upstream_status_code,
-                                latency_ms=execution.latency_ms,
-                                response_summary=_runtime_response_summary(
-                                    execution,
-                                    store_full_response=bool(response_policy["store_full_response"])
-                                    if response_policy is not None
-                                    else False,
-                                ),
-                                redaction_applied=execution.redaction_applied,
-                                error_code=exc.code,
-                            ),
-                        )
-                        _append_tool_runtime_event(
-                            runtime_repository,
-                            runtime_action["id"],
-                            "tool.runtime.response_blocked",
-                            {"error_code": exc.code},
-                        )
-                        return JSONResponse(
-                            status_code=exc.status_code,
-                            content=jsonable_encoder(
-                                ToolInvocationResponse(
-                                    request_id=context.request_id,
-                                    correlation_id=correlation_id,
-                                    tool_name=tool_name,
-                                    decision=decision,
-                                    reason_code=decision.reason_code,
-                                    result=None,
-                                    error={"code": exc.code, "message": exc.message},
-                                )
-                            ),
-                        )
-                result = execution.model_dump() if isinstance(execution, ToolExecutionResult) else execution
-                if isinstance(execution, ToolExecutionResult) and execution.status == "failed":
-                    if isinstance(result, dict):
-                        result = {
-                            **result,
-                            "body": None,
-                            "exposed_to_agent": False,
-                        }
-                    error_code = _runtime_execution_error_code(execution)
-                    runtime_repository.update_action(
-                        runtime_action["id"],
-                        ToolRuntimeActionUpdate(
-                            action_status="upstream_failed",
-                            upstream_status_code=execution.upstream_status_code,
-                            latency_ms=execution.latency_ms,
-                            response_summary=_runtime_response_summary(
-                                execution,
-                                store_full_response=bool(response_policy["store_full_response"])
-                                if response_policy is not None
-                                else False,
-                            ),
-                            redaction_applied=execution.redaction_applied,
-                            error_code=error_code,
-                        ),
-                    )
-                    _append_tool_runtime_event(
-                        runtime_repository,
-                        runtime_action["id"],
-                        "tool.runtime.upstream_failed",
-                        {"error_code": error_code},
-                    )
-                    return JSONResponse(
-                        status_code=502,
-                        content=jsonable_encoder(
-                            ToolInvocationResponse(
-                                request_id=context.request_id,
-                                correlation_id=correlation_id,
-                                tool_name=tool_name,
-                                decision=decision,
-                                reason_code=decision.reason_code,
-                                result=result,
-                                error=execution.error
-                                or {
-                                    "code": "upstream_error",
-                                    "message": "Tool execution failed.",
-                                },
-                            )
-                        ),
-                    )
-                runtime_repository.update_action(
-                    runtime_action["id"],
-                    ToolRuntimeActionUpdate(
-                        action_status="completed",
-                        upstream_status_code=execution.upstream_status_code
-                        if isinstance(execution, ToolExecutionResult)
-                        else None,
-                        latency_ms=execution.latency_ms
-                        if isinstance(execution, ToolExecutionResult)
-                        else None,
+                        action_status="upstream_failed",
+                        upstream_status_code=execution.upstream_status_code,
+                        latency_ms=execution.latency_ms,
                         response_summary=_runtime_response_summary(
                             execution,
-                            store_full_response=bool(response_policy["store_full_response"])
-                            if response_policy is not None
-                            else False,
+                            store_full_response=_response_policy_store_full_response(
+                                response_policy
+                            ),
                         ),
-                        redaction_applied=execution.redaction_applied
-                        if isinstance(execution, ToolExecutionResult)
-                        else False,
+                        redaction_applied=execution.redaction_applied,
+                        error_code=error_code,
+                    ),
+                    "tool.runtime.upstream_failed",
+                    {"error_code": error_code},
+                )
+                return JSONResponse(
+                    status_code=502,
+                    content=jsonable_encoder(
+                        ToolInvocationResponse(
+                            request_id=context.request_id,
+                            correlation_id=correlation_id,
+                            tool_name=tool_name,
+                            decision=decision,
+                            reason_code=decision.reason_code,
+                            result=result,
+                            error=execution.error
+                            or {
+                                "code": "upstream_error",
+                                "message": "Tool execution failed.",
+                            },
+                        )
                     ),
                 )
-                _append_tool_runtime_event(
-                    runtime_repository,
-                    runtime_action["id"],
-                    "tool.runtime.completed",
-                    {
-                        "upstream_status_code": execution.upstream_status_code
-                        if isinstance(execution, ToolExecutionResult)
-                        else None,
-                    },
-                )
-                return ToolInvocationResponse(
-                    request_id=context.request_id,
-                    correlation_id=correlation_id,
-                    tool_name=tool_name,
-                    decision=decision,
-                    reason_code=decision.reason_code,
-                    result=result,
-                    error=None,
-                )
+            _update_runtime_action(
+                ToolRuntimeActionUpdate(
+                    action_status="completed",
+                    upstream_status_code=execution.upstream_status_code
+                    if isinstance(execution, ToolExecutionResult)
+                    else None,
+                    latency_ms=execution.latency_ms
+                    if isinstance(execution, ToolExecutionResult)
+                    else None,
+                    response_summary=_runtime_response_summary(
+                        execution,
+                        store_full_response=_response_policy_store_full_response(response_policy),
+                    ),
+                    redaction_applied=execution.redaction_applied
+                    if isinstance(execution, ToolExecutionResult)
+                    else False,
+                ),
+                "tool.runtime.completed",
+                {
+                    "upstream_status_code": execution.upstream_status_code
+                    if isinstance(execution, ToolExecutionResult)
+                    else None,
+                },
+            )
+            return ToolInvocationResponse(
+                request_id=context.request_id,
+                correlation_id=correlation_id,
+                tool_name=tool_name,
+                decision=decision,
+                reason_code=decision.reason_code,
+                result=result,
+                error=None,
+            )
         except ToolSchemaValidationError as exc:
             return _schema_validation_error_response(request, exc)
 
@@ -6096,10 +6215,10 @@ def create_app(
         try:
             with _audit_database().transaction() as connection:
                 repository = ToolRegistryRepository(connection, organization_id, environment_id)
-                return ToolUpstreamHealthChecker(
+                return await ToolUpstreamHealthChecker(
                     repository,
                     http_client=getattr(app.state, "tool_gateway_http_client", None),
-                ).check_target(target_id)
+                ).check_target_async(target_id)
         except ToolUpstreamTargetNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
