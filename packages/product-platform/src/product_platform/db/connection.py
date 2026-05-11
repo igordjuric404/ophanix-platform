@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -15,6 +16,7 @@ class Database:
     def __init__(self, database_url: str) -> None:
         self.database_url = database_url
         self._connection: sqlite3.Connection | None = None
+        self._transaction_lock = threading.RLock()
 
     def connect(self) -> sqlite3.Connection:
         if self._connection is None:
@@ -26,15 +28,16 @@ class Database:
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        connection = self.connect()
-        try:
-            connection.execute("BEGIN")
-            yield connection
-        except Exception:
-            connection.rollback()
-            raise
-        else:
-            connection.commit()
+        with self._transaction_lock:
+            connection = self.connect()
+            try:
+                connection.execute("BEGIN")
+                yield connection
+            except Exception:
+                connection.rollback()
+                raise
+            else:
+                connection.commit()
 
     def close(self) -> None:
         if self._connection is not None:

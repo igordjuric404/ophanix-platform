@@ -28,7 +28,6 @@ jobs:
       - name: Install dependencies
         run: pip install --no-cache-dir "pyyaml==6.0.2"
       - name: Run security skills scan
-        continue-on-error: true
         run: |
           python scripts/security_scan.py packages/ \
             --exclude-tests \

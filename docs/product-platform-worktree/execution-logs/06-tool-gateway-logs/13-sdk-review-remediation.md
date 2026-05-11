@@ -869,3 +869,268 @@ is now defensible for controlled teams that can accept the documented remaining
 risks and run the new validation gates, but broad external production adoption is
 not yet defensible until the installed-wheel live gateway contract test,
 idempotency contract, and supply-chain release policy are complete.
+
+## 2026-05-11 V2 Production-Readiness Remediation Pass
+
+Pass name: V2 exhaustive issue-register remediation execution.
+
+Starting repository state:
+
+- Worktree had no tracked staged or unstaged changes.
+- One untracked audit artifact existed:
+  `docs/product-platform-worktree/execution-logs/06-tool-gateway-logs/15-sdk-production-readiness-audit-v2.md`.
+- This pass uses the V2 audit issue register from
+  `15-sdk-production-readiness-audit-v2.md` as the source of issue IDs.
+- This section was appended before runtime/source-code edits for this pass.
+
+### Initial Remediation Tracking Table
+
+| Issue ID | Title | Severity | Category | Current status | Planned action | Files likely affected | Validation required | Score impact |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| SDK-AUDIT-001 | Hidden principal probe endpoint exposes credential context | High | Security/API | Pending | Remove or hard-gate route | `api/app.py`, auth tests | Route unavailable/admin-only test | Security/reliability |
+| SDK-AUDIT-002 | Upstream URL validation permits loopback and DNS-private SSRF | Critical | Security/SSRF | Pending | Block local/private/DNS-private targets by default | `tool_gateway/models.py`, upstream tests, docs | SSRF URL validation tests | Security/reliability |
+| SDK-AUDIT-003 | Blocking upstream HTTP calls run inside async endpoint | High | Runtime/Reliability | Pending | Add async executor path or safe bounded dispatch | `tool_gateway/invocation.py`, `api/app.py`, forwarding tests | Async invocation/load-focused tests | Implementation/reliability |
+| SDK-AUDIT-004 | Shared SQLite connection and transaction handling are not production-safe | High | Runtime/Reliability | Pending | Serialize SQLite transaction access or defer real DB pooling | `db/connection.py`, DB tests | Concurrent transaction test | Implementation/reliability |
+| SDK-AUDIT-005 | App can fall back to an in-memory seeded demo database | High | Runtime/Deployment | Pending | Fail closed outside dev/test when DB missing | `api/app.py`, settings/tests/docs | Production-mode startup test | Implementation/reliability |
+| SDK-AUDIT-006 | Upstream authentication supports only auth_mode none | High | Security/Adoption | Pending | Implement minimal secret-backed bearer/API-key auth or defer larger auth modes | `tool_gateway/models.py`, `invocation.py`, migrations/tests/docs | Upstream auth integration tests | DX/security |
+| SDK-AUDIT-007 | Tool invocation lacks idempotency and safe retry contract | High | Reliability/API | Pending | Add idempotency key contract or defer with explicit design note | `api/app.py`, `invocation.py`, repository/migrations/SDK/docs/tests | Replay/duplicate tests | Reliability/DX |
+| SDK-AUDIT-008 | Gateway and SDK parse response bodies without pre-parse byte cap | High | Reliability/Security | Pending | Enforce content-length/read caps before JSON parse | SDK, `invocation.py`, response tests | Oversized response tests | Security/reliability |
+| SDK-AUDIT-009 | Secret and security scans are advisory, not blocking | High | CI/Supply Chain | Pending | Make scanners blocking with allowlist path | GitHub workflows | Static workflow validation | Security/reliability |
+| SDK-AUDIT-010 | Permission expiration is accepted as arbitrary text | High | Authorization/Data Integrity | Pending | Canonical datetime validation | `tool_gateway/models.py`, repository tests | Malformed/past/future tests | Security/reliability |
+| SDK-AUDIT-011 | Gateway token hashes use plain SHA-256 without pepper | Medium | Security/Credential Storage | Pending | Add optional peppered HMAC path or document migration | `agents/credentials.py`, `auth.py`, settings/tests/docs | Hash verification tests | Security |
+| SDK-AUDIT-012 | Runtime rate limiter is process-local and unbounded | Medium | Reliability/Security | Pending | Bound memory and document distributed limiter need | `api/app.py`, settings/tests/docs | Eviction/high-cardinality tests | Reliability |
+| SDK-AUDIT-013 | Correlation and request IDs are caller-controllable | Medium | Audit Integrity | Pending | Validate and separate caller/server IDs | `api/app.py`, `invocation.py`, tests | Invalid ID tests | Security/reliability |
+| SDK-AUDIT-014 | Allow decisions are persisted before schema validation | Medium | Audit/Correctness | Pending | Reorder validation or record validation-failed action | `api/app.py`, invocation/audit tests | Invalid payload audit test | Implementation |
+| SDK-AUDIT-015 | Response policy status appears ignored | Medium | Runtime/Security | Pending | Enforce active policy status | `response.py`, repository/tests | Disabled policy test | Security/reliability |
+| SDK-AUDIT-016 | Failed upstream response bodies can be returned to agents | Medium | Security/Data Exposure | Pending | Hide or sanitize failed upstream bodies by default | `api/app.py`, `invocation.py`, response tests | Upstream 500 secret test | Security |
+| SDK-AUDIT-017 | HTTP 3xx upstream responses are treated as success | Medium | Runtime Correctness | Pending | Treat redirects as failure unless explicitly allowed | `invocation.py`, forwarding tests | 3xx tests | Reliability |
+| SDK-AUDIT-018 | GET and DELETE payloads are serialized into query parameters | Medium | Security/API Ergonomics | Pending | Constrain query mapping and document/defer schema placement | `invocation.py`, docs/tests | Sensitive query tests | Security/DX |
+| SDK-AUDIT-019 | Redaction regexes are not sufficiently ReDoS-safe | Medium | Security/Reliability | Pending | Strengthen regex rejection and cap text processed | `response.py`, tests | ReDoS pattern tests | Security/reliability |
+| SDK-AUDIT-020 | Payload and audit summaries redact by key, not by value | Medium | Data Protection | Pending | Add value-pattern redaction | `decision.py`, runtime audit tests | Secret-like value tests | Security |
+| SDK-AUDIT-021 | Credential scope issuance does not validate resource references | Medium | Authorization | Pending | Validate resource type/id against known tenant resources | `agents/credentials.py`, tests | Invalid resource tests | Security/DX |
+| SDK-AUDIT-022 | Credential scope uniqueness can be bypassed for NULL resource IDs | Low | Data Integrity/Authz | Pending | Add normalized sentinel or duplicate check | migrations/repository/tests | Duplicate wildcard test | Minor |
+| SDK-AUDIT-023 | Runtime latency type mismatch between DB and models | Low | Correctness/Portability | Pending | Align schema/model typing | migration/model/tests | Fractional latency test | Minor |
+| SDK-AUDIT-024 | SDK does not extract top-level gateway error codes | Medium | SDK DX/Error Handling | Pending | Parse top-level error code/message safely | SDK/tests | Error-code tests | DX/reliability |
+| SDK-AUDIT-025 | SDK maps every invocation HTTP 403 to ToolDeniedError | Medium | SDK Correctness/DX | Pending | Require structured denial reason | SDK/tests | Generic 403 test | DX/reliability |
+| SDK-AUDIT-026 | SDK cache returns mutable nested schema data | Medium | SDK Correctness | Pending | Deep-copy/freeze cached definitions | SDK/tests | Mutation isolation test | Implementation |
+| SDK-AUDIT-027 | SDK payload validation has no cycle protection | Low | SDK Correctness | Pending | Add cycle detection | SDK/tests | Cyclic payload test | Minor |
+| SDK-AUDIT-028 | SDK discovery caches are unbounded | Low | SDK Reliability | Pending | Add bounded cache size | SDK/tests | Eviction test | Minor |
+| SDK-AUDIT-029 | list_tools(status=active) exposes a misleading parameter | Low | SDK API Ergonomics | Pending | Document or deprecate parameter without breaking API | SDK README/tests | Docs/API check | DX |
+| SDK-AUDIT-030 | SDK event hook exceptions are swallowed silently | Low | SDK Observability | Pending | Add optional hook error callback/logging | SDK/tests/docs | Hook error test | DX |
+| SDK-AUDIT-031 | SDK errors do not expose retry metadata | Low | SDK Reliability/DX | Pending | Add retry-after metadata to errors where available | SDK/tests/docs | 429/503 metadata tests | DX/reliability |
+| SDK-AUDIT-032 | Direct HTTP callers bypass SDK payload hardening | Medium | API/Security | Pending | Apply server-side payload constraints | `api/app.py`/schemas/tests | Direct HTTP invalid payload tests | Security/reliability |
+| SDK-AUDIT-033 | Standalone SDK package has only a smoke test | Medium | Testing | Pending | Add standalone behavioral tests or share suite | SDK tests | Standalone test suite | Implementation |
+| SDK-AUDIT-034 | No convincing production-like concurrency/load/SSRF integration tests | Medium | Testing/Reliability | Pending | Add focused concurrency/SSRF/integration tests where feasible | product tests | New integration tests | Reliability |
+| SDK-AUDIT-035 | CI matrix appears to test SDK on unsupported Python 3.10 | Medium | CI/Packaging | Pending | Fix matrix exclusion | `.github/workflows/ci.yml` | Workflow static validation | CI |
+| SDK-AUDIT-036 | Dependabot omits product-platform and standalone SDK Python packages | Medium | Supply Chain | Pending | Add package directories | `.github/dependabot.yml` | Config review | Security |
+| SDK-AUDIT-037 | Product-platform wheel lacks included license file | Low | Packaging/Compliance | Pending | Include license file in package metadata | product pyproject/LICENSE | Wheel metadata test | Packaging |
+| SDK-AUDIT-038 | Local database artifacts exist in product-platform package directory | Low | Repo Hygiene/Packaging | Pending | Remove ignored local DB artifacts and enforce ignore | package root/.gitignore/tests | Git status/package content test | Packaging |
+| SDK-AUDIT-039 | Release validator does not enforce clean worktree or tag/version match | Low | Release | Pending | Add strict release checks | SDK release validator/tests/docs | Validator tests | Release |
+| SDK-AUDIT-040 | Product-platform README has stale test instructions | Low | Documentation/DX | Pending | Update README test commands | product README | Doc review | DX |
+| SDK-AUDIT-041 | Documentation understates upstream URL and SSRF risk | Medium | Documentation/Security | Pending | Update docs to match hardened behavior | product README/SDK README | Doc review | Security/DX |
+| SDK-AUDIT-042 | SDK SECURITY.md is minimal | Low | Documentation/Security Process | Pending | Expand security policy | SDK SECURITY.md | Doc review | DX/security |
+| SDK-AUDIT-043 | Deterministic local fixture tokens appear in docs/examples | Low | Security/DX | Pending | Strengthen fixture warnings | examples/docs | Doc/example tests | DX/security |
+| SDK-AUDIT-044 | Local release validation has dependency friction | Low | Release/DX | Pending | Improve preflight messaging | SDK validator/README | Validator preflight test | DX |
+| SDK-AUDIT-045 | Actual publishing path is opaque in repo | Medium | Release/Adoption | Pending | Document publishing controls or defer external pipeline | publish workflow/docs | Doc review | Release/DX |
+| SDK-AUDIT-046 | SDK source is duplicated between standalone package and product-platform | Medium | Maintainability/Release | Pending | Add CI/source parity check or refactor source ownership | CI/tests/scripts | Drift test | Implementation |
+| SDK-AUDIT-047 | API docs and OpenAPI appear enabled unconditionally | Low | Security/Deployment | Pending | Gate docs by env setting | `api/app.py`, settings/tests/docs | Production docs disabled test | Security |
+| SDK-AUDIT-048 | Development defaults are not fail-closed | Medium | Security/Deployment | Pending | Add production startup validation | settings/app/tests/docs | Production config tests | Security |
+| SDK-AUDIT-049 | Bearer token parsing is permissive | Low | Security/Auth | Pending | Enforce token format | `auth.py`, tests | Malformed bearer tests | Security |
+| SDK-AUDIT-050 | Public SDK remains pre-1.0/beta for production adoption | Low | API Stability/DX | Pending | Document stability policy, keep version unless release decision made | SDK pyproject/docs | Metadata/doc review | DX |
+
+### Final V2 Remediation Status
+
+Processed issue count: 50.
+
+Status counts:
+
+- Fixed: 45.
+- Already resolved: 0.
+- Invalid finding: 0.
+- Deferred with rationale: 3.
+- Accepted remaining risk: 2.
+
+This table supersedes the initial pending table above. All issue IDs from the V2
+audit register were triaged. Prior remediation claims were not treated as proof;
+each disposition below is based on the current source, tests, packaging, docs, or
+explicit remaining-risk decision from this pass.
+
+| Issue ID | Original severity/category | Final status | Files changed or checked | Root cause/current evidence | Fix implemented and production-grade rationale | Tests/validation evidence | Remaining risk | Score impact |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| SDK-AUDIT-001 | High / Security/API | Fixed | `api/app.py`, `test_tool_gateway_auth_phase3.py` | The principal probe route exposed credential context through the gateway auth path. | Removed the runtime probe route and excluded it from gateway runtime auth classification; discovery remains available through the authenticated tools route. | Focused auth tests and full product suite passed. | None known. | Raises security/reliability. |
+| SDK-AUDIT-002 | Critical / Security/SSRF | Fixed | `models.py`, `test_tool_gateway_upstream_phase1.py`, product README | URL validation allowed loopback, private, link-local, metadata, and DNS-private targets. | Upstream targets must use HTTPS and reject forbidden hostnames, forbidden IP literals, and DNS resolutions to forbidden addresses. Docs now call out egress controls as the final SSRF boundary. | SSRF validation tests, full gateway suite, full product suite, ruff. | DNS names that cannot resolve at registration time still require runtime network egress policy. | Removes critical score cap; residual infra risk remains. |
+| SDK-AUDIT-003 | High / Runtime/Reliability | Fixed | `invocation.py`, `api/app.py`, forwarding tests | Async FastAPI route used a blocking HTTP executor. | Added async upstream executor using `httpx.AsyncClient`, awaitable execution handling, and shutdown cleanup for owned clients. | Forwarding phase 3 tests, full gateway suite, full product suite. | No load test proving event-loop behavior under production traffic. | Raises implementation/reliability. |
+| SDK-AUDIT-004 | High / Runtime/Reliability | Fixed | `db/connection.py`, full DB/product tests | Shared SQLite transaction usage could interleave across threads. | Added transaction serialization around the shared SQLite connection, preserving current SQLite architecture without pretending it is a production DB pool. | Full product suite including DB tests passed. | Real multi-instance production still needs a production database/pool architecture. | Raises implementation; residual architecture caveat. |
+| SDK-AUDIT-005 | High / Runtime/Deployment | Fixed | `api/app.py`, cloud readiness tests, auth tests, README | Non-local app creation could drift into demo/in-memory behavior. | Non-local startup fails when only the default DB URL is present; configured DB URLs are used lazily without demo seeding outside local/test. | Production startup tests, cloud readiness tests, full product suite. | Operators must still provide a real supported DB configuration. | Raises implementation/reliability. |
+| SDK-AUDIT-006 | High / Security/Adoption | Deferred with rationale | `models.py`, `invocation.py`, README | Upstream auth remains intentionally unsupported beyond `auth_mode="none"`. | Deferred because secret-backed upstream auth requires product design for secret storage, rotation, per-tool auth material, audit, and migration. Current behavior stays fail-closed for non-`none` auth modes and docs state the limitation. | Existing unsupported-auth tests and full gateway suite passed. | External adopters needing upstream bearer/API-key auth cannot use this path without a product feature. | Caps ease of use and security/reliability. |
+| SDK-AUDIT-007 | High / Reliability/API | Deferred with rationale | SDK README, runtime code checked | Automatic invocation retries remain unsafe for mutating tools without idempotency semantics. | Deferred because durable idempotency needs server-side idempotency keys, per-tool mutability metadata, persistence, replay behavior, and SDK contract updates. SDK docs explicitly avoid automatic invocation retries. | Discovery retry tests pass; full SDK and product suites pass. | Consumers must implement their own idempotency discipline for mutating tools. | Caps implementation and reliability. |
+| SDK-AUDIT-008 | High / Reliability/Security | Fixed | SDK `sdk.py`, `invocation.py`, SDK/forwarding tests | Gateway and SDK parsed response bodies before bounding bytes. | Added configurable pre-parse response caps for SDK gateway responses and upstream executor responses using `Content-Length`/content byte checks. | Oversized SDK and upstream response tests, full gateway suite, standalone SDK tests. | Streaming response enforcement is still not implemented. | Raises security/reliability. |
+| SDK-AUDIT-009 | High / CI/Supply Chain | Fixed | `.github/workflows/secret-scanning.yml`, `.github/workflows/security-scan.yml` | Secret/security scans were advisory via non-blocking behavior. | Removed advisory continuation and made high-entropy findings emit CI errors. | Workflow diff review, `git diff --check`, full test suite unaffected. | CI must run in GitHub to prove environment-specific behavior. | Raises security/reliability. |
+| SDK-AUDIT-010 | High / Authorization/Data Integrity | Fixed | `models.py`, permissions tests | Permission expiration accepted arbitrary text. | Expiration fields are parsed as timezone-aware datetimes and normalized to UTC ISO text. | Permission expiration rejection/normalization tests, full gateway suite. | None known. | Raises auth correctness. |
+| SDK-AUDIT-011 | Medium / Security/Credential Storage | Fixed | `agents/credentials.py`, `auth.py`, auth tests | Gateway token hashes used plain SHA-256 only. | Added optional HMAC-SHA256 pepper support with legacy hash lookup compatibility for rotation. | Peppered-hash verification tests and full gateway suite. | Production must set `OPHANIX_GATEWAY_TOKEN_HASH_PEPPER`; legacy hashes remain accepted during migration. | Raises security, with configuration caveat. |
+| SDK-AUDIT-012 | Medium / Reliability/Security | Fixed | `settings.py`, `api/app.py`, auth tests, README | Rate limiter was process-local and key storage unbounded. | Added max-key bound and fail-closed behavior when high-cardinality keys exceed capacity; documented distributed limiter need. | Rate-limit bounded-key test, full product suite. | Process-local rate limiting is not a distributed production control. | Raises reliability; residual infra cap remains. |
+| SDK-AUDIT-013 | Medium / Audit Integrity | Fixed | `api/app.py`, `invocation.py`, auth tests | Caller-supplied request/correlation IDs could become trusted audit IDs. | Added strict trusted ID validation and replacement for malformed IDs; SDK validates correlation ID characters and length. | Invalid request/correlation ID tests and full gateway suite. | Valid-looking caller IDs are still accepted as correlation context. | Raises audit reliability. |
+| SDK-AUDIT-014 | Medium / Audit/Correctness | Fixed | `api/app.py`, `runtime_audit.py`, invocation tests | Allowed runtime action was persisted before payload schema validation. | Schema failures now persist explicit `validation_failed` runtime actions and events after authorization instead of masquerading as allowed executions. | Validation-failed audit test and full gateway suite. | None known. | Raises implementation correctness. |
+| SDK-AUDIT-015 | Medium / Runtime/Security | Fixed | `response.py`, response tests | Response policy status was not enforced. | Disabled/non-active response policies are ignored; active policies still apply. | Disabled policy test and full gateway suite. | None known. | Raises security/reliability. |
+| SDK-AUDIT-016 | Medium / Security/Data Exposure | Fixed | `api/app.py`, response/forwarding tests | Failed upstream response bodies could be returned to agents. | Failed upstream invocation responses now hide result bodies from agents and mark them not exposed. | Upstream 500 response tests and full gateway suite. | Audit/debug storage policy should be revisited if upstream failures include sensitive payloads. | Raises security. |
+| SDK-AUDIT-017 | Medium / Runtime Correctness | Fixed | `invocation.py`, forwarding tests | 3xx upstream responses were treated as success. | Upstream success is now limited to HTTP 2xx. | Redirect failure test and full gateway suite. | None known. | Raises reliability. |
+| SDK-AUDIT-018 | Medium / Security/API Ergonomics | Fixed | `invocation.py`, forwarding tests | GET/DELETE payloads became query params, including path params and possible secrets. | Path params are excluded from query serialization, credential-like query keys are rejected, and non-scalar query values fail clearly. | Query param exclusion and unsafe-query tests, full gateway suite. | There is still no formal per-tool query/body schema split. | Raises security/DX. |
+| SDK-AUDIT-019 | Medium / Security/Reliability | Fixed | `models.py`, `response.py`, response tests | Redaction regexes could be pathological and applied to unbounded strings. | Added pattern length/nesting/wildcard checks and caps for redaction string processing. | ReDoS pattern tests and full gateway suite. | Regex safety is heuristic, not a formal safe-regex engine. | Raises security/reliability. |
+| SDK-AUDIT-020 | Medium / Data Protection | Fixed | `decision.py`, decision tests | Secret-like values could leak when keys were benign. | Added value-pattern redaction for bearer/token-like strings in payload summaries. | Secret-like value summary test and full gateway suite. | Heuristic redaction may miss novel secret formats. | Raises data protection. |
+| SDK-AUDIT-021 | Medium / Authorization | Fixed | `agents/credentials.py`, credential tests | Tool-scoped credential issuance did not validate referenced resources. | Tool resource scopes now require a resource id and active same-org/env tool by id or name. | Credential scope resource validation test and full product suite. | Other resource types still rely on existing validation model. | Raises authorization safety. |
+| SDK-AUDIT-022 | Low / Data Integrity/Authz | Fixed | migrations `0056`, DB tests | NULL resource IDs could bypass uniqueness. | Added normalized unique index using `COALESCE(resource_id,'')`. | Migration apply/rollback tests and full product suite. | Existing duplicate data in deployed DBs would need pre-migration cleanup if present. | Minor score lift. |
+| SDK-AUDIT-023 | Low / Correctness/Portability | Fixed | migration `0055`, migration `0057`, DB tests | Model allowed fractional latency but DB column was integer. | New installations and migrated existing installations use `REAL` latency column; rollback migration provided. | Migration apply/rollback tests and full product suite. | Existing deployments need migration rollout. | Minor score lift. |
+| SDK-AUDIT-024 | Medium / SDK DX/Error Handling | Fixed | standalone and vendored SDK, SDK tests | SDK ignored top-level gateway error codes. | Gateway errors now preserve top-level `code` and `message` forms where present. | Product SDK and standalone SDK tests. | None known. | Raises ease of use. |
+| SDK-AUDIT-025 | Medium / SDK Correctness/DX | Fixed | standalone and vendored SDK, SDK tests | Every invocation 403 became `ToolDeniedError`. | SDK only raises `ToolDeniedError` for structured policy denials and leaves generic 403s as `ToolGatewayError`. | Generic 403 test and SDK suites. | None known. | Raises DX/reliability. |
+| SDK-AUDIT-026 | Medium / SDK Correctness | Fixed | standalone and vendored SDK, SDK tests | Cached tool definitions exposed mutable nested schemas. | Cache stores and returns cloned tool definitions with deep-copied schemas/raw mappings. | Mutation isolation tests in product and standalone SDK suites. | None known. | Raises implementation. |
+| SDK-AUDIT-027 | Low / SDK Correctness | Fixed | standalone and vendored SDK, SDK tests | Payload validator had no cycle protection. | JSON payload validation tracks seen containers and rejects cycles. | Cyclic payload tests and SDK suites. | None known. | Minor score lift. |
+| SDK-AUDIT-028 | Low / SDK Reliability | Fixed | standalone and vendored SDK, SDK tests | Discovery caches were unbounded. | Added `max_cache_entries` configuration and LRU-style trimming for discovery caches. | Cache bound tests and SDK suites. | None known. | Minor reliability lift. |
+| SDK-AUDIT-029 | Low / SDK API Ergonomics | Fixed | SDK README | `list_tools(status="active")` was easy to misread because gateway only returns active callable tools. | Documented active-only behavior and compatibility purpose of the parameter without breaking API. | Doc review, SDK tests. | API remains for compatibility. | DX lift. |
+| SDK-AUDIT-030 | Low / SDK Observability | Fixed | standalone and vendored SDK | Event hook failures were silently swallowed. | Hook exceptions are now logged at debug level with traceback while preserving SDK call behavior. | SDK tests and ruff/mypy validation. | No dedicated hook-error unit test was added. | Small DX/observability lift. |
+| SDK-AUDIT-031 | Low / SDK Reliability/DX | Fixed | standalone and vendored SDK, SDK README, SDK tests | Gateway errors lacked retry metadata. | `ToolGatewayError` now exposes `retry_after_seconds` from `Retry-After` on invocation/discovery gateway errors. | Product SDK retry-after test, standalone SDK retry-after test, mypy, ruff. | Date-form `Retry-After` is not parsed; numeric seconds are supported. | DX/reliability lift. |
+| SDK-AUDIT-032 | Medium / API/Security | Fixed | `invocation.py`, SDK and invocation tests | Direct HTTP callers could send payloads the SDK would reject. | Server-side invocation request model now rejects non-JSON values, non-finite numbers, cycles, excessive nesting, and invalid correlation IDs. | Direct HTTP NaN/correlation tests, full gateway suite. | Payload depth limit is coarse and may need tuning. | Raises security/reliability. |
+| SDK-AUDIT-033 | Medium / Testing | Fixed | `packages/ophanix-tool-gateway-sdk/tests/test_sdk_behavior.py` | Standalone package only had smoke coverage. | Added standalone behavioral tests for calls, cache isolation, top-level error codes, and retry metadata. | Standalone SDK suite passed. | Standalone suite is still smaller than vendored SDK suite. | Raises implementation confidence. |
+| SDK-AUDIT-034 | Medium / Testing/Reliability | Deferred with rationale | SSRF/concurrency areas tested; no load harness added | Audit asked for production-like concurrency/load/SSRF integration coverage. | Added focused SSRF, async executor, rate-limit, and full-suite regression tests, but deferred true load/concurrency integration harness because it needs a running service environment and operational test target. | Full product suite, full gateway suite, focused SSRF tests. | No production-like load or multi-worker integration proof yet. | Caps reliability score. |
+| SDK-AUDIT-035 | Medium / CI/Packaging | Fixed | `.github/workflows/ci.yml` | CI matrix included unsupported Python 3.10 for SDK/product packages. | Matrix excludes product-platform and SDK from Python 3.10. | Workflow diff review and package test suites. | GitHub CI must run after commit. | Raises CI/package confidence. |
+| SDK-AUDIT-036 | Medium / Supply Chain | Fixed | `.github/dependabot.yml` | Dependabot omitted package directories. | Added pip update entries for product-platform and standalone SDK. | Config review, `git diff --check`. | Dependabot behavior must be observed in GitHub. | Raises supply-chain posture. |
+| SDK-AUDIT-037 | Low / Packaging/Compliance | Fixed | `packages/product-platform/LICENSE`, product `pyproject.toml` | Product wheel lacked an included license file. | Added MIT license file and package metadata inclusion. | Product wheel build and wheel-content check show license included. | None known. | Packaging/compliance lift. |
+| SDK-AUDIT-038 | Low / Repo Hygiene/Packaging | Accepted remaining risk | product package root checked | Local DB artifacts still exist in the package directory. | Accepted because deleting local DB/backups could destroy user/developer state; packaging excludes DB artifacts and wheel-content validation confirms package contents are clean. | Wheel-content check; git status still shows local DB files are not newly tracked. | Repo working directory remains visually noisy until owner removes or relocates artifacts. | Low packaging/repo hygiene cap. |
+| SDK-AUDIT-039 | Low / Release | Fixed | `scripts/validate_release.py`, SDK README | Release validator did not enforce clean worktree/tag match. | Added `--strict-git` and expected tag/version checks; non-strict release validation still builds and checks artifacts. | `validate_release.py` passed; strict mode fails on dirty worktree as expected. | Strict validation cannot pass until changes are committed and tagged. | Release confidence lift. |
+| SDK-AUDIT-040 | Low / Documentation/DX | Fixed | product README | Product README test instructions were stale. | Updated pytest/unittest-oriented validation commands. | Doc review, full product suite. | None known. | DX lift. |
+| SDK-AUDIT-041 | Medium / Documentation/Security | Fixed | product README, SDK README | Docs understated upstream URL/SSRF risk. | Documented HTTPS-only upstream URLs, blocked host classes, DNS behavior, and egress firewall requirement. | Doc review and SSRF tests. | Docs still depend on operators enforcing egress policy. | Security/DX lift. |
+| SDK-AUDIT-042 | Low / Documentation/Security Process | Fixed | SDK `SECURITY.md` | Security policy was minimal. | Expanded supported versions, reporting process, SLA targets, disclosure guidance, and security expectations. | Doc review. | No external security contact workflow has been exercised. | Security process lift. |
+| SDK-AUDIT-043 | Low / Security/DX | Fixed | direct HTTP example README | Deterministic fixture tokens could be mistaken for real credentials. | Strengthened local-only fixture token warnings and rotation guidance. | Doc/example review. | Fixture tokens remain present for deterministic local demos. | Security/DX lift. |
+| SDK-AUDIT-044 | Low / Release/DX | Fixed | SDK `validate_release.py`, SDK README | Release validation failed opaquely when release deps were missing. | Validator now emits actionable release-extra guidance; after installing release tools, artifact validation passes. | `validate_release.py` passed. | Developers still must install release extras locally. | DX lift. |
+| SDK-AUDIT-045 | Medium / Release/Adoption | Fixed | SDK README | Publishing path/provenance was unclear. | Documented local validation, strict git mode, release artifacts, and publishing expectations. | Doc review and release validator pass. | Actual publish workflow still must be executed in CI/release environment. | Release/DX lift. |
+| SDK-AUDIT-046 | Medium / Maintainability/Release | Fixed | product SDK copy, standalone SDK, `test_tool_gateway_sdk_package.py` | SDK source was duplicated with drift risk. | Kept copies synchronized and added a parity test proving vendored copy matches standalone source. | Parity test and SDK suites passed. | Duplication remains; parity test catches drift but does not remove it. | Raises maintainability confidence. |
+| SDK-AUDIT-047 | Low / Security/Deployment | Fixed | `settings.py`, `api/app.py`, auth tests, README | API docs/OpenAPI were enabled unconditionally. | Docs/OpenAPI are enabled by default only in local/test, configurable via settings/env. | Production docs disabled test and full product suite. | Operators can still explicitly enable docs. | Security deployment lift. |
+| SDK-AUDIT-048 | Medium / Security/Deployment | Fixed | `settings.py`, `api/app.py`, auth/cloud tests, README | Development defaults were not fail-closed in non-local environments. | Production validation rejects default session secret, dev login, and default DB URL outside local/test. | Production guard tests, cloud readiness tests, full product suite. | More production config checks could be added for token pepper and CORS policy. | Raises security/reliability. |
+| SDK-AUDIT-049 | Low / Security/Auth | Fixed | `auth.py`, auth tests | Bearer token parser allowed whitespace/control ambiguity. | Parser rejects empty, leading/trailing/internal whitespace, and unsupported characters. | Malformed bearer tests and full gateway suite. | Allowed character set may need adjustment for future token formats. | Security lift. |
+| SDK-AUDIT-050 | Low / API Stability/DX | Accepted remaining risk | SDK `pyproject.toml`, README | SDK remains `0.1.0` beta. | Accepted as a product/release decision; docs describe behavior and validation, but version was not bumped to 1.0 in this remediation pass. | SDK package build/release validation passed. | External adopters may treat beta status as a production adoption blocker. | Caps ease of use/adoption confidence. |
+
+### Changed Files Summary
+
+Primary runtime and SDK changes:
+
+- Hardened Tool Gateway auth, request context, production startup guards, rate limiting, async upstream execution, schema-validation audit behavior, failed-upstream response exposure, and shutdown cleanup.
+- Hardened upstream target validation, payload validation, redaction, decision summaries, credential token hashing, credential scope validation, and bearer parsing.
+- Added migrations `0056` and `0057`, adjusted migration expectations, and aligned latency storage type.
+- Updated standalone SDK and product-platform vendored SDK together, including response caps, cache isolation/bounds, retry metadata, safer 403 typing, top-level error code handling, cyclic payload detection, and hook-error logging.
+- Updated CI/security/dependabot config, package metadata, license inclusion, release validation, README/SECURITY docs, and example warnings.
+- Added or updated product-platform, standalone SDK, DB, cloud readiness, and packaging tests.
+
+Additional lint cleanup:
+
+- Removed pre-existing unused imports/variables surfaced by ruff in `api/app.py`,
+  `discovery/findings.py`, `tool_gateway/repository.py`, `trust/pipeline.py`, and
+  `test_policy_bindings_phase2.py`.
+
+### Validation Evidence
+
+Commands run and final results:
+
+- `env PYTHONPATH=src python3 -m pytest tests/test_tool_gateway_auth_phase1.py ... tests/test_tool_gateway_sdk_package.py -q --tb=short` from `packages/product-platform`: 139 passed.
+- `env PYTHONPATH=src python3 -m pytest tests/test_tool_gateway_*.py -q --tb=short` from `packages/product-platform`: 257 passed.
+- `env PYTHONPATH=src python3 -m pytest tests -q --tb=short` from `packages/product-platform`: 754 passed, 47 warnings.
+- `env PYTHONPATH=src python3 -m pytest tests/test_tool_gateway_*.py tests/test_db_phase1.py tests/test_mvp_cloud_deployment_phase2.py -q --tb=short` from `packages/product-platform`: 268 passed.
+- `env PYTHONPATH=src python3 -m pytest tests/test_tool_gateway_sdk_phase1.py tests/test_tool_gateway_sdk_phase2.py tests/test_tool_gateway_sdk_phase3.py tests/test_tool_gateway_sdk_package.py -q --tb=short` from `packages/product-platform`: 95 passed.
+- `env PYTHONPATH=src python3 -m pytest tests -q --tb=short` from `packages/ophanix-tool-gateway-sdk`: 5 passed.
+- `python3 -m ruff check .` from `packages/product-platform`: passed.
+- `python3 -m ruff check .` from `packages/ophanix-tool-gateway-sdk`: passed.
+- `python3 -m mypy src tests` from `packages/ophanix-tool-gateway-sdk`: passed.
+- `python3 -m compileall -q packages/product-platform/src/product_platform packages/product-platform/src/ophanix_tool_gateway packages/ophanix-tool-gateway-sdk/src/ophanix_tool_gateway packages/ophanix-tool-gateway-sdk/scripts`: passed.
+- `python3 -m pip wheel . --no-deps --wheel-dir /tmp/ophanix-sdk-wheel-remediation` from `packages/ophanix-tool-gateway-sdk`: built `ophanix_tool_gateway_sdk-0.1.0-py3-none-any.whl`.
+- `python3 -m pip wheel . --no-deps --wheel-dir /tmp/ophanix-product-wheel-remediation` from `packages/product-platform`: built `ophanix_product_platform-0.1.0-py3-none-any.whl`.
+- Wheel-content check: SDK wheel includes `LICENSE` and `ophanix_tool_gateway/sdk.py`; product wheel includes `LICENSE`, `ophanix_tool_gateway/sdk.py`, and migrations `0056`/`0057`.
+- `python3 scripts/validate_release.py` from `packages/ophanix-tool-gateway-sdk`: built sdist/wheel and twine check passed.
+- `python3 scripts/validate_release.py --strict-git` from `packages/ophanix-tool-gateway-sdk`: failed as expected because the SDK package worktree is dirty during this remediation pass.
+- `python3 -m pip check`: passed.
+- `git diff --check`: passed.
+
+Validation caveats:
+
+- GitHub Actions workflows were edited and statically checked, but not executed in
+  GitHub from this environment.
+- Strict release validation cannot pass until the SDK changes are committed and
+  the release tag/version state is clean.
+- No production-like load or multi-worker integration harness was added.
+
+### Remaining Unresolved Issues
+
+| Issue ID | Status | Rationale | Required future work |
+| --- | --- | --- | --- |
+| SDK-AUDIT-006 | Deferred with rationale | Secret-backed upstream auth needs product design for storage, rotation, audit, and per-tool binding. | Implement upstream bearer/API-key/OAuth auth modes backed by a secret provider and migration path. |
+| SDK-AUDIT-007 | Deferred with rationale | Safe automatic invocation retries require idempotency semantics to avoid duplicate side effects. | Add server-side idempotency keys, persistence, replay behavior, SDK support, and tests. |
+| SDK-AUDIT-034 | Deferred with rationale | Focused tests were added, but no production-like load/multi-worker harness exists. | Add live gateway integration/load tests covering async forwarding, SSRF controls, rate limits, and failure modes. |
+| SDK-AUDIT-038 | Accepted remaining risk | Local DB artifacts were not deleted to avoid destroying developer state; package excludes them. | Move/remove local DB artifacts through an explicit repo-owner cleanup step. |
+| SDK-AUDIT-050 | Accepted remaining risk | SDK remains pre-1.0 beta as a release/product decision. | Define stability policy and versioning criteria for a 1.0 production SDK release. |
+
+### Updated Scoring Matrix
+
+| Category | Previous V2 audit score | Updated score | Direction | Exact reason | Remaining score cap |
+| --- | --- | --- | --- | --- | --- |
+| Implementation quality | 6 / 10 | 7 / 10 | Raised | The critical runtime, SDK, migration, packaging, and test gaps are substantially remediated and the full product suite passes. Score is capped by deferred invocation idempotency, duplicated SDK source ownership, and lack of production-like load/multi-worker validation. | 7 until SDK-AUDIT-007 and SDK-AUDIT-034 are closed. |
+| Ease of use | 6 / 10 | 7 / 10 | Raised | Error typing, retry metadata, docs, release validation, setup guidance, security policy, SDK behavior, and packaging are materially clearer. Score is capped by unsupported upstream auth, beta SDK status, and remaining release-environment proof. | 7 until SDK-AUDIT-006 and SDK-AUDIT-050 are closed. |
+| Security and reliability | 5 / 10 | 6 / 10 | Raised | Critical SSRF, demo DB fallback, token parsing, failed-response leakage, redaction, response caps, production defaults, scanner blocking, and authz/resource validation were improved with tests. Score remains capped by high unresolved upstream auth/idempotency gaps, process-local rate limiting, and missing production-like validation. | 6 until SDK-AUDIT-006, SDK-AUDIT-007, and SDK-AUDIT-034 are closed. |
+
+### Score Cap Explanation
+
+- Any claim above 7 for implementation would be too lenient while invocation
+  idempotency and production-like load/multi-worker testing remain open.
+- Any claim above 7 for ease of use would be too lenient while upstream auth is
+  unsupported and the SDK is still beta.
+- Any claim above 6 for security/reliability would be too lenient while two high
+  reliability/security adoption gaps remain deferred and rate limiting is still
+  process-local.
+
+### Required Fixes To Reach Production Readiness
+
+1. Implement secret-backed upstream authentication for at least bearer/API-key
+   modes with rotation, audit, docs, and tests.
+2. Implement invocation idempotency semantics across API, persistence, SDK, docs,
+   and replay/duplicate tests.
+3. Add live gateway integration/load tests that prove async forwarding, SSRF
+   blocking, rate limiting, malformed responses, timeouts, and partial failures
+   under realistic concurrency.
+4. Move/remove local DB artifacts through an explicit cleanup step and keep
+   package-content checks in CI.
+5. Run GitHub Actions CI/security/release workflows from a clean branch.
+
+### Required Fixes To Reach 8 Out Of 10
+
+1. Close SDK-AUDIT-006 and SDK-AUDIT-007 with validated production behavior.
+2. Close SDK-AUDIT-034 with a repeatable integration/load harness.
+3. Add distributed or edge-enforced rate limiting guidance/implementation for
+   multi-worker production deployments.
+4. Commit/tag cleanly and prove strict SDK release validation passes.
+5. Decide SDK stability/version policy and document support commitments.
+
+### Required Fixes To Reach 9 Out Of 10
+
+1. Remove SDK source duplication or replace it with generated/vendor sync tooling
+   beyond parity tests.
+2. Add SBOM/provenance/signing and a stronger supply-chain release policy.
+3. Add formal threat model coverage for Tool Gateway invocation and upstream
+   forwarding.
+4. Add generated API reference and broader consumer onboarding examples.
+5. Add Python/httpx version matrix coverage and clean install/live gateway CI.
+
+### Recommended Remediation Order
+
+1. Design upstream auth and idempotency together so auth material, retries, and
+   audit semantics do not conflict.
+2. Implement and migrate upstream auth modes.
+3. Implement server and SDK idempotency keys.
+4. Build the live gateway integration/load harness and wire it into CI.
+5. Clean local DB artifacts and prove strict release validation on a clean tag.
+6. Decide the SDK 1.0 support policy.
+
+### Final Strict Assessment
+
+This pass materially improves the SDK and Tool Gateway production posture and
+closes most actionable V2 findings with tests, docs, package validation, and
+runtime hardening. Controlled production adoption is now more defensible for
+teams that only need `auth_mode="none"` upstream targets and can accept manual
+idempotency discipline. Broad external production adoption is still not
+defensible until upstream auth, invocation idempotency, and production-like
+multi-worker/load validation are complete.

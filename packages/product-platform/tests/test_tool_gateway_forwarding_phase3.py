@@ -33,6 +33,7 @@ class FakeHTTPResponse:
         self._body = body
         self.headers = headers or {"content-type": "application/json"}
         self.text = str(body)
+        self.content = self.text.encode("utf-8")
 
     def json(self):
         return self._body
@@ -124,6 +125,9 @@ class ToolGatewayForwardingPhase3Tests(unittest.TestCase):
             database=self.database,
         )
         self.client = TestClient(self.app, raise_server_exceptions=False)
+
+    def test_app_default_gateway_http_client_is_async(self) -> None:
+        self.assertIsInstance(self.app.state.tool_gateway_http_client, httpx.AsyncClient)
 
     def _insert_agent(self, connection) -> None:
         now = "2026-05-01T00:00:00+00:00"
@@ -231,7 +235,44 @@ class ToolGatewayForwardingPhase3Tests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "upstream_error")
         self.assertEqual(payload["result"]["status"], "failed")
         self.assertEqual(payload["result"]["upstream_status_code"], 500)
-        self.assertEqual(payload["result"]["body"], {"error": "boom"})
+        self.assertIsNone(payload["result"]["body"])
+        self.assertFalse(payload["result"]["exposed_to_agent"])
+
+    def test_integration_upstream_redirect_is_not_treated_as_success(self) -> None:
+        self.app.state.tool_gateway_http_client = FakeHTTPClient(
+            FakeHTTPResponse(status_code=302, body={"location": "https://elsewhere.example"})
+        )
+
+        response = self.client.post(
+            "/api/v1/tools/claims.lookup/invoke",
+            headers=self._headers(request_id="req-upstream-redirect"),
+            json={"payload": {"claim_id": "claim_123"}},
+        )
+
+        self.assertEqual(response.status_code, 502, response.text)
+        payload = response.json()
+        self.assertEqual(payload["error"]["code"], "upstream_error")
+        self.assertEqual(payload["result"]["status"], "failed")
+        self.assertEqual(payload["result"]["upstream_status_code"], 302)
+        self.assertIsNone(payload["result"]["body"])
+
+    def test_integration_oversized_upstream_response_is_blocked_before_json_parse(self) -> None:
+        self.app.state.tool_gateway_http_client = FakeHTTPClient(
+            FakeHTTPResponse(
+                status_code=200,
+                body={"ok": True},
+                headers={"content-type": "application/json", "content-length": "1000001"},
+            )
+        )
+
+        response = self.client.post(
+            "/api/v1/tools/claims.lookup/invoke",
+            headers=self._headers(request_id="req-upstream-large"),
+            json={"payload": {"claim_id": "claim_123"}},
+        )
+
+        self.assertEqual(response.status_code, 502, response.text)
+        self.assertEqual(response.json()["error"]["code"], "upstream_response_too_large")
 
 
 if __name__ == "__main__":

@@ -7,7 +7,6 @@ from product_platform.db.testing import create_migrated_test_database
 from product_platform.policies.bindings import PolicyBindingRepository
 from product_platform.policies.models import (
     PolicyBindingCreateRequest,
-    PolicyBindingPatchRequest,
     PolicyBindingResolutionContext,
     PolicyExceptionCreateRequest,
     PolicyCreateRequest,

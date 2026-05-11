@@ -85,33 +85,30 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
             headers["Authorization"] = f"Bearer {token}"
         return headers
 
-    def test_api_verified_request_exposes_gateway_principal_to_route_handler(self) -> None:
+    def test_api_verified_request_can_access_gateway_discovery_without_probe_leak(self) -> None:
         response = self.client.get(
-            "/api/v1/gateway/principal-probe",
+            "/api/v1/gateway/tools",
             headers=self._headers(self.raw_token),
         )
 
         self.assertEqual(response.status_code, 200, response.text)
-        payload = response.json()
-        self.assertEqual(payload["organization_id"], DEMO_ORG_ID)
-        self.assertEqual(payload["environment_id"], DEMO_ENV_ID)
-        self.assertEqual(payload["agent_id"], "agent_gateway_probe")
-        self.assertEqual(payload["credential_id"], self.credential["id"])
-        self.assertEqual(payload["scopes"], ["claims.lookup:read"])
-        self.assertEqual(payload["request_id"], "req-gateway-probe")
-        self.assertTrue(self.app.state.gateway_principal_probe_executed)
+        self.assertEqual(response.json(), [])
 
-    def test_api_failed_verification_does_not_execute_route_handler(self) -> None:
-        self.app.state.gateway_principal_probe_executed = False
-
-        response = self.client.get(
+        probe_response = self.client.get(
             "/api/v1/gateway/principal-probe",
+            headers=self._headers(self.raw_token),
+        )
+        self.assertEqual(probe_response.status_code, 401)
+        self.assertEqual(probe_response.json()["code"], "UNAUTHENTICATED")
+
+    def test_api_failed_verification_rejects_gateway_discovery(self) -> None:
+        response = self.client.get(
+            "/api/v1/gateway/tools",
             headers=self._headers("not-a-real-token"),
         )
 
         self.assertEqual(response.status_code, 401)
         self.assertIn("Gateway authentication failed", response.json()["message"])
-        self.assertFalse(self.app.state.gateway_principal_probe_executed)
 
     def test_api_gateway_prefix_routes_not_on_runtime_allowlist_require_product_auth(self) -> None:
         response = self.client.get(
@@ -121,6 +118,15 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json()["code"], "UNAUTHENTICATED")
+
+    def test_api_invalid_request_id_header_is_replaced_for_gateway_requests(self) -> None:
+        headers = self._headers(self.raw_token)
+        headers["X-Request-ID"] = "bad request id"
+
+        response = self.client.get("/api/v1/gateway/tools", headers=headers)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertNotEqual(response.headers["X-Request-ID"], "bad request id")
 
     def test_api_gateway_body_limit_blocks_large_invocations_before_auth(self) -> None:
         app = create_app(
@@ -161,17 +167,45 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
         client = TestClient(app, raise_server_exceptions=False)
 
         first = client.get(
-            "/api/v1/gateway/principal-probe",
+            "/api/v1/gateway/tools",
             headers=self._headers(self.raw_token),
         )
         second = client.get(
-            "/api/v1/gateway/principal-probe",
+            "/api/v1/gateway/tools",
             headers=self._headers(self.raw_token),
         )
 
         self.assertEqual(first.status_code, 200, first.text)
         self.assertEqual(second.status_code, 429)
         self.assertEqual(second.json()["code"], "TOOL_GATEWAY_RATE_LIMITED")
+
+    def test_api_gateway_rate_limit_bounds_distinct_key_growth(self) -> None:
+        app = create_app(
+            Settings(
+                app_name="Ophanix Test Platform",
+                environment="test",
+                build_sha="test-sha",
+                build_time="2026-05-01T00:00:00Z",
+                session_secret="test-secret",
+                tool_gateway_rate_limit_window_seconds=60,
+                tool_gateway_rate_limit_max_requests=100,
+                tool_gateway_rate_limit_max_keys=1,
+            ),
+            database=self.database,
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+
+        first = client.get(
+            "/api/v1/gateway/tools",
+            headers=self._headers("not-a-real-token-1"),
+        )
+        second = client.get(
+            "/api/v1/gateway/tools",
+            headers=self._headers("not-a-real-token-2"),
+        )
+
+        self.assertEqual(first.status_code, 401)
+        self.assertEqual(second.status_code, 429)
 
     def test_api_rejects_wildcard_cors_with_credentials_in_production(self) -> None:
         with self.assertRaisesRegex(ValueError, "CORS wildcard origins"):
@@ -187,11 +221,55 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
                 database=self.database,
             )
 
+    def test_api_disables_openapi_docs_by_default_in_production(self) -> None:
+        app = create_app(
+            Settings(
+                app_name="Ophanix Test Platform",
+                environment="production",
+                build_sha="test-sha",
+                build_time="2026-05-01T00:00:00Z",
+                session_secret="test-secret",
+                cors_origins=["https://app.example.com"],
+            ),
+            database=self.database,
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+
+        self.assertEqual(client.get("/docs").status_code, 404)
+        self.assertEqual(client.get("/openapi.json").status_code, 404)
+
+    def test_api_rejects_default_session_secret_in_production(self) -> None:
+        with self.assertRaisesRegex(ValueError, "OPHANIX_SESSION_SECRET"):
+            create_app(
+                Settings(
+                    app_name="Ophanix Test Platform",
+                    environment="production",
+                    build_sha="test-sha",
+                    build_time="2026-05-01T00:00:00Z",
+                    session_secret="dev-secret-change-me",
+                    cors_origins=["https://app.example.com"],
+                ),
+                database=self.database,
+            )
+
+    def test_api_requires_configured_database_outside_local_environments(self) -> None:
+        with self.assertRaisesRegex(ValueError, "configured database"):
+            create_app(
+                Settings(
+                    app_name="Ophanix Test Platform",
+                    environment="production",
+                    build_sha="test-sha",
+                    build_time="2026-05-01T00:00:00Z",
+                    session_secret="test-secret",
+                    cors_origins=["https://app.example.com"],
+                )
+            )
+
     def test_integration_failed_verification_creates_safe_audit_event(self) -> None:
         secret = "missing-secret-token"
 
         response = self.client.get(
-            "/api/v1/gateway/principal-probe",
+            "/api/v1/gateway/tools",
             headers=self._headers(secret),
         )
         self.assertEqual(response.status_code, 401)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from sqlite3 import Connection, Row
 from typing import Any
 
@@ -38,6 +39,10 @@ SECRET_LIKE_KEY_TOKENS = (
     "secret",
     "token",
     "key",
+)
+SECRET_LIKE_VALUE_PATTERNS = (
+    re.compile(r"\b(?:sk|pk|tok|key|secret|ghp|glpat|xox[baprs])-[A-Za-z0-9_\-]{8,}\b"),
+    re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{12,}\b", re.IGNORECASE),
 )
 TOOL_POLICY_REASON_MESSAGES = {
     "agent_missing": "Authenticated agent identity was not found.",
@@ -543,11 +548,18 @@ def _summarize_value(key: str, value: Any, *, depth: int) -> Any:
         }
     if isinstance(value, list):
         return [_summarize_value(key, item, depth=depth + 1) for item in value[:10]]
-    if isinstance(value, str) and len(value) > MAX_PAYLOAD_SUMMARY_STRING_LENGTH:
-        return f"{value[:MAX_PAYLOAD_SUMMARY_STRING_LENGTH - 3]}..."
+    if isinstance(value, str):
+        if _looks_secret_like(value):
+            return REDACTED_PAYLOAD_VALUE
+        if len(value) > MAX_PAYLOAD_SUMMARY_STRING_LENGTH:
+            return f"{value[:MAX_PAYLOAD_SUMMARY_STRING_LENGTH - 3]}..."
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
+
+
+def _looks_secret_like(value: str) -> bool:
+    return any(pattern.search(value) for pattern in SECRET_LIKE_VALUE_PATTERNS)
 
 
 def _sorted_limited_items(value: dict[Any, Any]) -> list[tuple[Any, Any]]:

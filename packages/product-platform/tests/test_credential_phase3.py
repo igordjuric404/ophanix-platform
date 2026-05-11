@@ -5,6 +5,8 @@ import unittest
 from fastapi.testclient import TestClient
 
 from product_platform import create_app
+from product_platform.agents.credentials import AgentCredentialRepository
+from product_platform.agents.models import CredentialScopeRequest
 from product_platform.api.settings import Settings
 from product_platform.audit.store import AuditEventQuery, AuditEventRepository
 from product_platform.db.seed import seed_demo_data
@@ -128,6 +130,40 @@ class CredentialPhase3Tests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 201)
         return response.json()
+
+    def test_unit_tool_resource_scope_requires_active_tool(self) -> None:
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO agent_capabilities (
+                    id, agent_id, capability_name, resource_type, status,
+                    requested_by, approved_by, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "cap_rotation_claims_lookup",
+                    "agent_rotation_demo",
+                    "claims.lookup:read",
+                    "tool",
+                    "approved",
+                    "user_admin",
+                    "user_admin",
+                    "2026-04-30T00:00:00+00:00",
+                ),
+            )
+            repository = AgentCredentialRepository(connection, "org_default", "env_default")
+            with self.assertRaisesRegex(ValueError, "active tool"):
+                repository.validate_scopes(
+                    "agent_rotation_demo",
+                    [
+                        CredentialScopeRequest(
+                            scope="claims.lookup:read",
+                            resource_type="tool",
+                            resource_id="claims.lookup",
+                        )
+                    ],
+                )
 
     def test_api_rotate_creates_new_active_credential(self) -> None:
         original = self._issue()["credential"]

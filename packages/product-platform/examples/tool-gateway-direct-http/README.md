@@ -2,7 +2,11 @@
 
 These examples show the public HTTP contract without using the Python SDK.
 The tokens below are deterministic local-only placeholders created by
-`seed_tool_gateway_direct_http_fixtures`; do not use them outside a local demo.
+`seed_tool_gateway_direct_http_fixtures`; do not use them outside a local demo,
+do not paste them into production configuration, and do not treat them as real
+credential material. Production agents should use the Python SDK unless they
+have their own equivalent payload validation, timeout, retry, and redaction
+controls.
 
 ```bash
 export OPHANIX_BASE_URL="http://127.0.0.1:8000"

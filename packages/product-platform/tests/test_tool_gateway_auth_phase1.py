@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from product_platform.tool_gateway.auth import (
     GatewayAuthenticationError,
@@ -37,6 +38,12 @@ class ToolGatewayAuthPhase1Tests(unittest.TestCase):
         self.assertEqual(context.exception.reason_code, "token_too_large")
         self.assertNotIn(token, str(context.exception))
 
+    def test_unit_token_with_internal_whitespace_is_rejected(self) -> None:
+        with self.assertRaises(GatewayAuthenticationError) as context:
+            parse_bearer_authorization("Bearer token with spaces")
+
+        self.assertEqual(context.exception.reason_code, "invalid_bearer_token")
+
     def test_unit_presented_token_is_hashed_for_lookup(self) -> None:
         token = "gateway-token"
 
@@ -45,6 +52,13 @@ class ToolGatewayAuthPhase1Tests(unittest.TestCase):
         self.assertNotEqual(token_hash, token)
         self.assertEqual(len(token_hash), 64)
         self.assertEqual(parse_bearer_authorization(f"Bearer {token}"), token)
+
+    def test_unit_token_hash_uses_pepper_when_configured(self) -> None:
+        with patch.dict("os.environ", {"OPHANIX_GATEWAY_TOKEN_HASH_PEPPER": "pepper"}, clear=False):
+            token_hash = hash_gateway_token("gateway-token")
+
+        self.assertTrue(token_hash.startswith("hmac-sha256:"))
+        self.assertNotEqual(len(token_hash), 64)
 
 
 if __name__ == "__main__":

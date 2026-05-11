@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from pydantic import ValidationError
 
@@ -108,6 +109,45 @@ class ToolGatewayUpstreamPhase1Tests(unittest.TestCase):
             )
 
         self.assertIn("must not target private", str(context.exception))
+
+    def test_unit_loopback_upstream_url_is_rejected(self) -> None:
+        with self.assertRaises(ValidationError) as context:
+            ToolUpstreamTargetCreateRequest(
+                base_url="https://127.0.0.1:9000",
+                path_template="/claims",
+            )
+
+        self.assertIn("loopback", str(context.exception))
+
+    def test_unit_dns_resolved_private_upstream_url_is_rejected(self) -> None:
+        with patch(
+            "product_platform.tool_gateway.models.socket.getaddrinfo",
+            return_value=[
+                (
+                    0,
+                    0,
+                    0,
+                    "",
+                    ("10.0.0.25", 443),
+                )
+            ],
+        ):
+            with self.assertRaises(ValidationError) as context:
+                ToolUpstreamTargetCreateRequest(
+                    base_url="https://claims.example.com",
+                    path_template="/claims",
+                )
+
+        self.assertIn("private", str(context.exception))
+
+    def test_unit_plain_http_upstream_url_is_rejected_even_for_localhost(self) -> None:
+        with self.assertRaises(ValidationError) as context:
+            ToolUpstreamTargetCreateRequest(
+                base_url="http://localhost:9000",
+                path_template="/claims",
+            )
+
+        self.assertIn("must use https", str(context.exception))
 
     def test_repository_resolves_target_by_active_tool_name(self) -> None:
         with self.database.transaction():

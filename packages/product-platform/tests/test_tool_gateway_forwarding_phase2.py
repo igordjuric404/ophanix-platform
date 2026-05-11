@@ -226,6 +226,54 @@ class ToolGatewayForwardingPhase2Tests(unittest.TestCase):
         self.assertNotIn("json", http_client.calls[0])
         self.assertEqual(http_client.calls[0]["params"], {"claim_id": "claim_123"})
 
+    def test_unit_get_target_does_not_duplicate_path_params_in_query(self) -> None:
+        with self.database.transaction():
+            tool = self._create_active_tool(self.repository)
+            self.repository.create_upstream_target(
+                tool["id"],
+                ToolUpstreamTargetCreateRequest(
+                    base_url="https://claims.internal.example",
+                    path_template="/v1/claims/{claim_id}",
+                    method="GET",
+                    auth_mode="none",
+                    timeout_ms=1200,
+                    health_url="https://claims.internal.example/health",
+                ),
+            )
+            http_client = RecordingHTTPClient()
+            HttpToolInvocationExecutor(self.repository, http_client=http_client).execute(
+                tool=tool,
+                payload={"claim_id": "claim_123", "include_notes": True},
+                decision=self._decision(tool_id=tool["id"]),
+                principal=self._principal(),
+            )
+
+        self.assertEqual(http_client.calls[0]["params"], {"include_notes": True})
+
+    def test_unit_get_target_rejects_credential_like_query_payload(self) -> None:
+        with self.database.transaction():
+            tool = self._create_active_tool(self.repository)
+            self.repository.create_upstream_target(
+                tool["id"],
+                ToolUpstreamTargetCreateRequest(
+                    base_url="https://claims.internal.example",
+                    path_template="/v1/claims",
+                    method="GET",
+                    auth_mode="none",
+                    timeout_ms=1200,
+                    health_url="https://claims.internal.example/health",
+                ),
+            )
+            with self.assertRaises(ToolExecutionError) as context:
+                HttpToolInvocationExecutor(self.repository, http_client=RecordingHTTPClient()).execute(
+                    tool=tool,
+                    payload={"api_key": "secret"},
+                    decision=self._decision(tool_id=tool["id"]),
+                    principal=self._principal(),
+                )
+
+        self.assertEqual(context.exception.code, "unsafe_query_payload")
+
 
 if __name__ == "__main__":
     unittest.main()

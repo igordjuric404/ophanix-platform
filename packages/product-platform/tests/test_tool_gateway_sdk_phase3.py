@@ -280,6 +280,38 @@ class ToolGatewaySdkPhase3Tests(unittest.TestCase):
         self.assertEqual(first[0].id, "tool_1")
         self.assertEqual(second[0].id, "tool_1")
 
+    def test_cached_tool_definitions_do_not_share_mutable_schema_state(self) -> None:
+        calls = 0
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(200, json=[TOOL_FIXTURE])
+
+        client = _client(handler, cache_tools=True)
+
+        first = client.list_tools()[0]
+        first.input_schema_json["mutated"] = True
+        second = client.list_tools()[0]
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(second.input_schema_json, {"type": "object"})
+
+    def test_cache_entries_are_bounded(self) -> None:
+        seen_queries: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_queries.append(request.url.query.decode())
+            return httpx.Response(200, json=[TOOL_FIXTURE])
+
+        client = _client(handler, cache_tools=True, max_cache_entries=1)
+
+        client.list_tools(owner_team="Claims")
+        client.list_tools(owner_team="Fraud")
+        client.list_tools(owner_team="Claims")
+
+        self.assertEqual(len(seen_queries), 3)
+
     def test_cache_entries_expire_after_configured_ttl(self) -> None:
         calls = 0
 
@@ -536,6 +568,7 @@ def _client(
     *,
     cache_tools: bool = False,
     cache_ttl_seconds: float = 300,
+    max_cache_entries: int = 256,
     discovery_max_retries: int = 0,
     discovery_retry_max_sleep_seconds: float = 5,
     token_provider: Any | None = None,
@@ -547,6 +580,7 @@ def _client(
         http_client=httpx.Client(transport=transport),
         cache_tools=cache_tools,
         cache_ttl_seconds=cache_ttl_seconds,
+        max_cache_entries=max_cache_entries,
         discovery_max_retries=discovery_max_retries,
         discovery_retry_backoff_seconds=0,
         discovery_retry_max_sleep_seconds=discovery_retry_max_sleep_seconds,

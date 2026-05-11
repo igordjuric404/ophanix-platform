@@ -67,6 +67,23 @@ class ToolGatewayResponsePhase3Tests(unittest.TestCase):
         self.assertEqual(result.body, {"token": "[redacted]", "safe": "ok"})
         self.assertTrue(result.redaction_applied)
 
+    def test_unit_disabled_response_policy_is_not_applied(self) -> None:
+        result = process_tool_execution_response(
+            {"output_schema_json": None},
+            {
+                "max_response_bytes": 1,
+                "redaction_rules_json": {"redact_keys": ["token"], "redact_patterns": []},
+                "expose_to_agent": 0,
+                "strict_output_validation": 1,
+                "status": "disabled",
+            },
+            ToolExecutionResult(status="succeeded", body={"token": "secret"}),
+        )
+
+        self.assertEqual(result.body, {"token": "secret"})
+        self.assertTrue(result.exposed_to_agent)
+        self.assertFalse(result.redaction_applied)
+
     def test_unit_failed_response_is_redacted_and_can_be_hidden(self) -> None:
         result = process_tool_execution_response(
             {"output_schema_json": OUTPUT_SCHEMA},
@@ -111,6 +128,12 @@ class ToolGatewayResponsePhase3Tests(unittest.TestCase):
     def test_unit_invalid_redaction_regex_is_rejected_at_policy_write_time(self) -> None:
         with self.assertRaises(ValueError):
             ToolResponsePolicyPatchRequest(redaction_rules_json={"redact_patterns": ["("]})
+
+        with self.assertRaises(ValueError):
+            ToolResponsePolicyPatchRequest(redaction_rules_json={"redact_patterns": ["(a+)+$"]})
+
+        with self.assertRaises(ValueError):
+            ToolResponsePolicyPatchRequest(redaction_rules_json={"redact_patterns": [".*token.*secret"]})
 
     def test_unit_oversized_response_is_blocked(self) -> None:
         with self.assertRaises(ToolExecutionError) as context:
@@ -173,7 +196,8 @@ class ToolGatewayResponsePhase3Tests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 502, response.text)
         result = response.json()["result"]
-        self.assertEqual(result["body"]["token"], "[redacted]")
+        self.assertIsNone(result["body"])
+        self.assertFalse(result["exposed_to_agent"])
         self.assertNotIn("secret-token", response.text)
 
     def test_api_store_full_response_false_omits_body_from_runtime_summary(self) -> None:

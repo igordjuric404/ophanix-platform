@@ -11,6 +11,8 @@ from product_platform.tool_gateway.schemas import ToolSchemaValidationError, val
 
 REDACTED_VALUE = "[redacted]"
 MAX_REDACTION_DEPTH = 20
+MAX_REDACTION_PATTERN_LENGTH = 300
+MAX_REDACTION_STRING_CHARS = 16_384
 
 
 def process_tool_execution_response(
@@ -19,6 +21,13 @@ def process_tool_execution_response(
     execution: ToolExecutionResult,
 ) -> ToolExecutionResult:
     """Return a safe agent-facing execution result."""
+
+    try:
+        policy_status = str(policy["status"]).strip().lower()
+    except Exception:
+        policy_status = "active"
+    if policy_status != "active":
+        return execution
 
     body = execution.body
     schema_valid: bool | None = None
@@ -119,11 +128,15 @@ def _redact_value_at_depth(
             changed = changed or child_changed
         return output_list, changed
     if isinstance(value, str):
-        redacted = value
+        redacted = value[:MAX_REDACTION_STRING_CHARS]
+        truncated = len(value) > MAX_REDACTION_STRING_CHARS
         changed = False
         for pattern in redact_patterns:
             redacted, count = pattern.subn(REDACTED_VALUE, redacted)
             changed = changed or count > 0
+        if truncated:
+            redacted = f"{redacted}..."
+            changed = True
         return redacted, changed
     return value, False
 
@@ -158,11 +171,17 @@ def _validate_redaction_pattern(pattern: str) -> str:
         re.compile(pattern)
     except re.error as exc:
         raise ValueError(f"invalid redaction regex pattern: {exc}") from exc
-    if len(pattern) > 500:
-        raise ValueError("redact_patterns entries must be 500 characters or fewer.")
+    if len(pattern) > MAX_REDACTION_PATTERN_LENGTH:
+        raise ValueError(
+            f"redact_patterns entries must be {MAX_REDACTION_PATTERN_LENGTH} characters or fewer."
+        )
     # Keep policy regexes simple enough to avoid obvious catastrophic backtracking.
     if re.search(r"\([^)]*[+*][^)]*\)[+*?]", pattern):
         raise ValueError("redact_patterns entries must not contain nested unbounded quantifiers.")
+    if re.search(r"(?:\.\*|\.\+).*(?:\.\*|\.\+)", pattern):
+        raise ValueError("redact_patterns entries must not contain multiple unbounded wildcards.")
+    if re.search(r"(\[[^\]]+\]|\w)[+*].*(\[[^\]]+\]|\w)[+*]", pattern):
+        raise ValueError("redact_patterns entries must not contain repeated unbounded atoms.")
     return pattern
 
 

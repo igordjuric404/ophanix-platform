@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from sqlite3 import Connection, Row
 
 from pydantic import BaseModel, Field
 
-from product_platform.agents.credentials import hash_credential_token
+from product_platform.agents.credentials import credential_token_hash_candidates, hash_credential_token
 from product_platform.db.time import utc_now_iso
 
 MAX_GATEWAY_TOKEN_LENGTH = 4096
+BEARER_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9._~+/=-]+$")
 
 
 class GatewayAuthenticationError(ValueError):
@@ -91,6 +93,16 @@ def parse_bearer_authorization(authorization: str | None) -> str:
             "Bearer token must not be empty.",
         )
     stripped = token.strip()
+    if stripped != token or any(character.isspace() for character in stripped):
+        raise GatewayAuthenticationError(
+            "invalid_bearer_token",
+            "Bearer token contains unsupported whitespace.",
+        )
+    if not BEARER_TOKEN_PATTERN.fullmatch(stripped):
+        raise GatewayAuthenticationError(
+            "invalid_bearer_token",
+            "Bearer token contains unsupported characters.",
+        )
     if len(stripped) > MAX_GATEWAY_TOKEN_LENGTH:
         raise GatewayAuthenticationError(
             "token_too_large",
@@ -132,8 +144,7 @@ class GatewayTokenVerifier:
     ) -> GatewayPrincipal:
         """Verify a raw token without logging or storing it."""
 
-        token_hash = hash_gateway_token(raw_token)
-        row = self._get_credential_by_token_hash(token_hash)
+        row = self._get_credential_by_token_hashes(credential_token_hash_candidates(raw_token))
         if row is None:
             raise GatewayAuthenticationError(
                 "credential_not_found",
@@ -171,9 +182,10 @@ class GatewayTokenVerifier:
             request_id=request_id,
         )
 
-    def _get_credential_by_token_hash(self, token_hash: str) -> Row | None:
+    def _get_credential_by_token_hashes(self, token_hashes: list[str]) -> Row | None:
+        placeholders = ", ".join("?" for _ in token_hashes)
         return self.connection.execute(
-            """
+            f"""
             SELECT
                 c.id AS credential_id,
                 c.agent_id,
@@ -184,10 +196,10 @@ class GatewayTokenVerifier:
                 a.status AS agent_status
             FROM agent_credentials c
             JOIN agents a ON a.id = c.agent_id
-            WHERE c.token_hash = ?
+            WHERE c.token_hash IN ({placeholders})
               AND a.deleted_at IS NULL
             """,
-            (token_hash,),
+            tuple(token_hashes),
         ).fetchone()
 
     def _credential_scopes(self, credential_id: str) -> list[str]:

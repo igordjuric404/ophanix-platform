@@ -41,6 +41,22 @@ updates:
     labels:
       - "dependencies"
 
+  - package-ecosystem: "pip"
+    directory: "/packages/product-platform"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+
+  - package-ecosystem: "pip"
+    directory: "/packages/ophanix-tool-gateway-sdk"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+
   # npm packages
   - package-ecosystem: "npm"
     directory: "/packages/agent-os/extensions/mcp-server"

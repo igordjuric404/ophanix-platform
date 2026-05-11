@@ -25,6 +25,15 @@ def _bool_env(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _environment_is_local() -> bool:
+    return os.environ.get("OPHANIX_ENVIRONMENT", "development").strip().lower() in {
+        "development",
+        "dev",
+        "local",
+        "test",
+    }
+
+
 def _int_env(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None:
@@ -64,6 +73,20 @@ class Settings:
             "http://localhost:3000,http://localhost:5173,http://localhost:8080",
         )
     )
+    enable_api_docs: bool | None = field(
+        default_factory=lambda: (
+            _bool_env("OPHANIX_ENABLE_API_DOCS")
+            if os.environ.get("OPHANIX_ENABLE_API_DOCS") is not None
+            else None
+        )
+    )
+    enable_dev_login: bool | None = field(
+        default_factory=lambda: (
+            _bool_env("OPHANIX_ENABLE_DEV_LOGIN")
+            if os.environ.get("OPHANIX_ENABLE_DEV_LOGIN") is not None
+            else None
+        )
+    )
     enable_production_chaos: bool = field(
         default_factory=lambda: _bool_env("OPHANIX_ENABLE_PRODUCTION_CHAOS", False)
     )
@@ -98,6 +121,12 @@ class Settings:
     )
     tool_gateway_rate_limit_max_requests: int = field(
         default_factory=lambda: _int_env("OPHANIX_TOOL_GATEWAY_RATE_LIMIT_MAX_REQUESTS", 600)
+    )
+    tool_gateway_rate_limit_max_keys: int = field(
+        default_factory=lambda: _int_env("OPHANIX_TOOL_GATEWAY_RATE_LIMIT_MAX_KEYS", 10_000)
+    )
+    tool_gateway_max_upstream_response_bytes: int = field(
+        default_factory=lambda: _int_env("OPHANIX_TOOL_GATEWAY_MAX_UPSTREAM_RESPONSE_BYTES", 1_000_000)
     )
 
 

@@ -328,7 +328,71 @@ class ToolGatewaySdkPhase2Tests(unittest.TestCase):
         self.assertEqual(raised.exception.reason_code, "permission_missing")
         self.assertEqual(raised.exception.request_id, "req-denied")
         self.assertEqual(raised.exception.correlation_id, "corr-denied")
-        self.assertEqual(raised.exception.message, "Tool call denied by gateway policy.")
+
+    def test_generic_403_response_is_not_reported_as_policy_denial(self) -> None:
+        client = _client(
+            lambda _request: httpx.Response(
+                403,
+                json={"code": "FORBIDDEN", "message": "Forbidden by proxy."},
+            )
+        )
+
+        with self.assertRaises(ToolGatewayError) as raised:
+            client.call_tool("claims.lookup", {"claim_id": "claim_123"})
+
+        self.assertNotIsInstance(raised.exception, ToolDeniedError)
+        self.assertEqual(raised.exception.code, "FORBIDDEN")
+
+    def test_gateway_error_extracts_top_level_error_code(self) -> None:
+        client = _client(
+            lambda _request: httpx.Response(
+                500,
+                json={"code": "GATEWAY_UNAVAILABLE", "message": "Gateway down."},
+            )
+        )
+
+        with self.assertRaises(ToolGatewayError) as raised:
+            client.call_tool("claims.lookup", {"claim_id": "claim_123"})
+
+        self.assertEqual(raised.exception.code, "GATEWAY_UNAVAILABLE")
+
+    def test_gateway_error_exposes_retry_after_seconds(self) -> None:
+        client = _client(
+            lambda _request: httpx.Response(
+                429,
+                json={"code": "RATE_LIMITED", "message": "Retry later."},
+                headers={"Retry-After": "7"},
+            )
+        )
+
+        with self.assertRaises(ToolGatewayError) as raised:
+            client.call_tool("claims.lookup", {"claim_id": "claim_123"})
+
+        self.assertEqual(raised.exception.code, "RATE_LIMITED")
+        self.assertEqual(raised.exception.retry_after_seconds, 7.0)
+
+    def test_gateway_response_above_configured_size_cap_is_rejected_before_json_parse(self) -> None:
+        client = _client(
+            lambda _request: httpx.Response(
+                200,
+                content=b'{"too_large": true}',
+                headers={"content-type": "application/json", "content-length": "19"},
+            ),
+            max_response_bytes=10,
+        )
+
+        with self.assertRaises(ToolGatewayError) as raised:
+            client.call_tool("claims.lookup", {"claim_id": "claim_123"})
+
+        self.assertEqual(raised.exception.code, "response_too_large")
+
+    def test_call_tool_rejects_cyclic_payload(self) -> None:
+        client = _client(lambda _request: httpx.Response(200, json={}))
+        payload: dict[str, Any] = {}
+        payload["self"] = payload
+
+        with self.assertRaisesRegex(ValueError, "cycles"):
+            client.call_tool("claims.lookup", payload)
 
     def test_authentication_failure_raises_typed_error(self) -> None:
         def handler(_request: httpx.Request) -> httpx.Response:
@@ -585,12 +649,14 @@ def _client(
     handler: httpx.MockTransport,
     *,
     token_provider: Any | None = None,
+    max_response_bytes: int = 1_000_000,
 ) -> OphanixToolGatewayClient:
     transport = httpx.MockTransport(handler)
     return OphanixToolGatewayClient(
         base_url="https://gateway.example.test",
         token_provider=token_provider or StaticTokenProvider("sdk-token"),
         http_client=httpx.Client(transport=transport),
+        max_response_bytes=max_response_bytes,
     )
 
 

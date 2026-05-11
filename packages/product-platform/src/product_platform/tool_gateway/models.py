@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 import ipaddress
+import socket
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -336,12 +338,17 @@ class AgentToolPermissionGrantRequest(BaseModel):
             raise ValueError("field must not be blank.")
         return stripped
 
-    @field_validator("granted_reason", "expires_at")
+    @field_validator("granted_reason")
     @classmethod
     def _strip_optional_text(cls, value: str | None) -> str | None:
         if value is None:
             return None
         return value.strip()
+
+    @field_validator("expires_at")
+    @classmethod
+    def _validate_expires_at(cls, value: str | None) -> str | None:
+        return _normalize_optional_utc_datetime(value, field="expires_at")
 
 
 class AgentToolPermissionPatchRequest(BaseModel):
@@ -350,7 +357,7 @@ class AgentToolPermissionPatchRequest(BaseModel):
     scope: str | None = None
     expires_at: str | None = None
 
-    @field_validator("scope", "expires_at")
+    @field_validator("scope")
     @classmethod
     def _strip_optional_text(cls, value: str | None) -> str | None:
         if value is None:
@@ -359,6 +366,11 @@ class AgentToolPermissionPatchRequest(BaseModel):
         if not stripped:
             raise ValueError("field must not be blank.")
         return stripped
+
+    @field_validator("expires_at")
+    @classmethod
+    def _validate_expires_at(cls, value: str | None) -> str | None:
+        return _normalize_optional_utc_datetime(value, field="expires_at")
 
 
 class AgentToolPermissionActionRequest(BaseModel):
@@ -469,11 +481,10 @@ def validate_http_url(value: str, *, field: str) -> str:
         raise ValueError(f"{field} must not include credentials.")
     if parsed.query or parsed.fragment:
         raise ValueError(f"{field} must not include a query string or fragment.")
-    local_http = parsed.scheme == "http" and _is_loopback_host(hostname)
-    if parsed.scheme == "http" and not local_http:
-        raise ValueError(f"{field} must use https outside localhost development.")
+    if parsed.scheme == "http":
+        raise ValueError(f"{field} must use https for upstream targets.")
     if _is_forbidden_upstream_host(hostname):
-        raise ValueError(f"{field} must not target private, link-local, or metadata hosts.")
+        raise ValueError(f"{field} must not target private, loopback, link-local, or metadata hosts.")
     return stripped.rstrip("/")
 
 
@@ -503,36 +514,68 @@ def _validate_redaction_pattern(pattern: str) -> None:
         re.compile(pattern)
     except re.error as exc:
         raise ValueError(f"invalid redaction regex pattern: {exc}") from exc
-    if len(pattern) > 500:
-        raise ValueError("redact_patterns entries must be 500 characters or fewer.")
+    if len(pattern) > 300:
+        raise ValueError("redact_patterns entries must be 300 characters or fewer.")
     if re.search(r"\([^)]*[+*][^)]*\)[+*?]", pattern):
         raise ValueError("redact_patterns entries must not contain nested unbounded quantifiers.")
-
-
-def _is_loopback_host(hostname: str) -> bool:
-    lowered = hostname.strip().lower().rstrip(".")
-    if lowered in {"localhost", "127.0.0.1", "::1"}:
-        return True
-    try:
-        return ipaddress.ip_address(lowered).is_loopback
-    except ValueError:
-        return False
+    if re.search(r"(?:\.\*|\.\+).*(?:\.\*|\.\+)", pattern):
+        raise ValueError("redact_patterns entries must not contain multiple unbounded wildcards.")
+    if re.search(r"(\[[^\]]+\]|\w)[+*].*(\[[^\]]+\]|\w)[+*]", pattern):
+        raise ValueError("redact_patterns entries must not contain repeated unbounded atoms.")
 
 
 def _is_forbidden_upstream_host(hostname: str) -> bool:
     lowered = hostname.strip().lower().rstrip(".")
-    if lowered in {"169.254.169.254", "metadata.google.internal"}:
+    if lowered in {"localhost", "169.254.169.254", "metadata.google.internal"}:
         return True
     try:
         address = ipaddress.ip_address(lowered)
     except ValueError:
+        return _hostname_resolves_to_forbidden_address(lowered)
+    return _is_forbidden_upstream_address(address)
+
+
+def _hostname_resolves_to_forbidden_address(hostname: str) -> bool:
+    try:
+        resolved = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        # Test and private DNS names are often not resolvable in local
+        # development. Runtime network policy must still deny private egress.
         return False
-    if address.is_loopback:
-        return False
+    for item in resolved:
+        sockaddr = item[4]
+        if not sockaddr:
+            continue
+        try:
+            address = ipaddress.ip_address(str(sockaddr[0]))
+        except ValueError:
+            continue
+        if _is_forbidden_upstream_address(address):
+            return True
+    return False
+
+
+def _is_forbidden_upstream_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return (
-        address.is_private
+        address.is_loopback
+        or address.is_private
         or address.is_link_local
         or address.is_multicast
         or address.is_reserved
         or address.is_unspecified
     )
+
+
+def _normalize_optional_utc_datetime(value: str | None, *, field: str) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    try:
+        parsed = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{field} must be an ISO 8601 timestamp with timezone.") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field} must include a timezone.")
+    return parsed.astimezone(timezone.utc).isoformat()

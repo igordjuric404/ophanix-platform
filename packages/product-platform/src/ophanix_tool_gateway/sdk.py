@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import ipaddress
 import inspect
 import json
+import logging
 import math
 import os
 import random
@@ -28,6 +30,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+LOGGER = logging.getLogger(__name__)
 SDK_PACKAGE_NAME = "ophanix-tool-gateway-sdk"
 COMPAT_PACKAGE_NAME = "ophanix-product-platform"
 
@@ -73,6 +76,8 @@ MAX_ERROR_BODY_ITEMS = 20
 MAX_ERROR_BODY_DEPTH = 20
 MAX_NON_JSON_ERROR_EXCERPT_BYTES = 2048
 DEFAULT_MAX_PAYLOAD_BYTES = 1_000_000
+DEFAULT_MAX_RESPONSE_BYTES = 1_000_000
+DEFAULT_MAX_CACHE_ENTRIES = 256
 _ToolCacheKey = tuple[str, str]
 _ListCacheKey = tuple[tuple[str, str], ...]
 _ToolCacheValue = tuple[float, "ToolDefinition"]
@@ -197,6 +202,7 @@ class ToolGatewayError(RuntimeError):
         code: str | None = None,
         request_id: str | None = None,
         correlation_id: str | None = None,
+        retry_after_seconds: float | None = None,
         response_body: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
@@ -205,6 +211,7 @@ class ToolGatewayError(RuntimeError):
         self.code = code
         self.request_id = request_id
         self.correlation_id = correlation_id
+        self.retry_after_seconds = retry_after_seconds
         self.response_body = _sanitize_error_body(response_body or {})
 
 
@@ -247,6 +254,8 @@ class _ClientConfig:
     base_url: str
     timeout_seconds: float
     max_payload_bytes: int
+    max_response_bytes: int
+    max_cache_entries: int
     cache_tools: bool
     cache_ttl_seconds: float
     allow_insecure_http: bool
@@ -267,6 +276,8 @@ class OphanixToolGatewayClient:
         token_provider: TokenProvider,
         timeout_seconds: float = 5.0,
         max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+        max_cache_entries: int = DEFAULT_MAX_CACHE_ENTRIES,
         http_client: httpx.Client | None = None,
         cache_tools: bool = False,
         cache_ttl_seconds: float = DEFAULT_CACHE_TTL_SECONDS,
@@ -286,6 +297,8 @@ class OphanixToolGatewayClient:
             base_url=base_url,
             timeout_seconds=timeout_seconds,
             max_payload_bytes=max_payload_bytes,
+            max_response_bytes=max_response_bytes,
+            max_cache_entries=max_cache_entries,
             cache_tools=cache_tools,
             cache_ttl_seconds=cache_ttl_seconds,
             allow_insecure_http=allow_insecure_http,
@@ -299,6 +312,8 @@ class OphanixToolGatewayClient:
         self.base_url = config.base_url
         self.timeout_seconds: float = config.timeout_seconds
         self.max_payload_bytes: int = config.max_payload_bytes
+        self.max_response_bytes: int = config.max_response_bytes
+        self.max_cache_entries: int = config.max_cache_entries
         self.cache_tools: bool = config.cache_tools
         self.cache_ttl_seconds: float = config.cache_ttl_seconds
         self.allow_insecure_http: bool = config.allow_insecure_http
@@ -370,7 +385,7 @@ class OphanixToolGatewayClient:
                 }
             )
             raise ToolGatewayError("Tool Gateway transport error.", code="transport_error") from exc
-        response_body = _response_json(response)
+        response_body = _response_json(response, max_response_bytes=self.max_response_bytes)
         if response.status_code == 403:
             self._emit_event(
                 {
@@ -388,7 +403,11 @@ class OphanixToolGatewayClient:
                     "status_code": response.status_code,
                 }
             )
-            _raise_gateway_error(response_body, response.status_code)
+            _raise_gateway_error(
+                response_body,
+                response.status_code,
+                retry_after_seconds=_retry_after_seconds(response),
+            )
         result = _tool_call_result(response_body)
         self._emit_event(
             {
@@ -508,9 +527,13 @@ class OphanixToolGatewayClient:
         if cached is not None:
             return cached
         response = self._get_discovery_response(params, headers=auth_context.headers)
-        response_data = _response_data(response)
+        response_data = _response_data(response, max_response_bytes=self.max_response_bytes)
         if response.status_code >= 400:
-            _raise_gateway_error(_mapping_response(response_data), response.status_code)
+            _raise_gateway_error(
+                _mapping_response(response_data),
+                response.status_code,
+                retry_after_seconds=_retry_after_seconds(response),
+            )
         if not isinstance(response_data, list):
             raise ToolGatewayError(
                 "Tool Gateway returned an invalid tools response.",
@@ -523,7 +546,11 @@ class OphanixToolGatewayClient:
         self._remember_tools(tools, credential_cache_key=auth_context.cache_key)
         if self._list_cache is not None:
             with self._cache_lock:
-                self._list_cache[cache_key] = (self._cache_deadline(), list(tools))
+                self._list_cache[cache_key] = (
+                    self._cache_deadline(),
+                    [_clone_tool_definition(tool) for tool in tools],
+                )
+                _trim_cache(self._list_cache, self.max_cache_entries)
         return tools
 
     def _get_discovery_response(
@@ -603,12 +630,13 @@ class OphanixToolGatewayClient:
             for tool in tools:
                 self._tool_cache[_tool_cache_key(credential_cache_key, tool.name)] = (
                     deadline,
-                    tool,
+                    _clone_tool_definition(tool),
                 )
                 self._tool_cache[_tool_cache_key(credential_cache_key, tool.id)] = (
                     deadline,
-                    tool,
+                    _clone_tool_definition(tool),
                 )
+            _trim_cache(self._tool_cache, self.max_cache_entries)
 
     def _cached_tool(self, cache_key: _ToolCacheKey) -> ToolDefinition | None:
         if self._tool_cache is None:
@@ -621,7 +649,7 @@ class OphanixToolGatewayClient:
             if expires_at <= time.monotonic():
                 self._tool_cache.pop(cache_key, None)
                 return None
-            return tool
+            return _clone_tool_definition(tool)
 
     def _cached_list(self, cache_key: _ListCacheKey) -> list[ToolDefinition] | None:
         if self._list_cache is None:
@@ -634,7 +662,7 @@ class OphanixToolGatewayClient:
             if expires_at <= time.monotonic():
                 self._list_cache.pop(cache_key, None)
                 return None
-            return list(tools)
+            return [_clone_tool_definition(tool) for tool in tools]
 
     def _cache_deadline(self) -> float:
         return time.monotonic() + self.cache_ttl_seconds
@@ -645,7 +673,7 @@ class OphanixToolGatewayClient:
         try:
             self.event_hook(MappingProxyType(dict(event)))
         except Exception:
-            return
+            LOGGER.debug("Tool Gateway SDK event hook failed.", exc_info=True)
 
 
 class AsyncOphanixToolGatewayClient:
@@ -658,6 +686,8 @@ class AsyncOphanixToolGatewayClient:
         token_provider: TokenProvider | AsyncTokenProvider,
         timeout_seconds: float = 5.0,
         max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+        max_cache_entries: int = DEFAULT_MAX_CACHE_ENTRIES,
         http_client: httpx.AsyncClient | None = None,
         cache_tools: bool = False,
         cache_ttl_seconds: float = DEFAULT_CACHE_TTL_SECONDS,
@@ -677,6 +707,8 @@ class AsyncOphanixToolGatewayClient:
             base_url=base_url,
             timeout_seconds=timeout_seconds,
             max_payload_bytes=max_payload_bytes,
+            max_response_bytes=max_response_bytes,
+            max_cache_entries=max_cache_entries,
             cache_tools=cache_tools,
             cache_ttl_seconds=cache_ttl_seconds,
             allow_insecure_http=allow_insecure_http,
@@ -690,6 +722,8 @@ class AsyncOphanixToolGatewayClient:
         self.base_url = config.base_url
         self.timeout_seconds: float = config.timeout_seconds
         self.max_payload_bytes: int = config.max_payload_bytes
+        self.max_response_bytes: int = config.max_response_bytes
+        self.max_cache_entries: int = config.max_cache_entries
         self.cache_tools: bool = config.cache_tools
         self.cache_ttl_seconds: float = config.cache_ttl_seconds
         self.allow_insecure_http: bool = config.allow_insecure_http
@@ -761,7 +795,7 @@ class AsyncOphanixToolGatewayClient:
                 }
             )
             raise ToolGatewayError("Tool Gateway transport error.", code="transport_error") from exc
-        response_body = _response_json(response)
+        response_body = _response_json(response, max_response_bytes=self.max_response_bytes)
         if response.status_code == 403:
             self._emit_event(
                 {
@@ -779,7 +813,11 @@ class AsyncOphanixToolGatewayClient:
                     "status_code": response.status_code,
                 }
             )
-            _raise_gateway_error(response_body, response.status_code)
+            _raise_gateway_error(
+                response_body,
+                response.status_code,
+                retry_after_seconds=_retry_after_seconds(response),
+            )
         result = _tool_call_result(response_body)
         self._emit_event(
             {
@@ -895,9 +933,13 @@ class AsyncOphanixToolGatewayClient:
         if cached is not None:
             return cached
         response = await self._get_discovery_response(params, headers=auth_context.headers)
-        response_data = _response_data(response)
+        response_data = _response_data(response, max_response_bytes=self.max_response_bytes)
         if response.status_code >= 400:
-            _raise_gateway_error(_mapping_response(response_data), response.status_code)
+            _raise_gateway_error(
+                _mapping_response(response_data),
+                response.status_code,
+                retry_after_seconds=_retry_after_seconds(response),
+            )
         if not isinstance(response_data, list):
             raise ToolGatewayError(
                 "Tool Gateway returned an invalid tools response.",
@@ -910,7 +952,11 @@ class AsyncOphanixToolGatewayClient:
         self._remember_tools(tools, credential_cache_key=auth_context.cache_key)
         if self._list_cache is not None:
             with self._cache_lock:
-                self._list_cache[cache_key] = (self._cache_deadline(), list(tools))
+                self._list_cache[cache_key] = (
+                    self._cache_deadline(),
+                    [_clone_tool_definition(tool) for tool in tools],
+                )
+                _trim_cache(self._list_cache, self.max_cache_entries)
         return tools
 
     async def _get_discovery_response(
@@ -990,12 +1036,13 @@ class AsyncOphanixToolGatewayClient:
             for tool in tools:
                 self._tool_cache[_tool_cache_key(credential_cache_key, tool.name)] = (
                     deadline,
-                    tool,
+                    _clone_tool_definition(tool),
                 )
                 self._tool_cache[_tool_cache_key(credential_cache_key, tool.id)] = (
                     deadline,
-                    tool,
+                    _clone_tool_definition(tool),
                 )
+            _trim_cache(self._tool_cache, self.max_cache_entries)
 
     def _cached_tool(self, cache_key: _ToolCacheKey) -> ToolDefinition | None:
         if self._tool_cache is None:
@@ -1008,7 +1055,7 @@ class AsyncOphanixToolGatewayClient:
             if expires_at <= time.monotonic():
                 self._tool_cache.pop(cache_key, None)
                 return None
-            return tool
+            return _clone_tool_definition(tool)
 
     def _cached_list(self, cache_key: _ListCacheKey) -> list[ToolDefinition] | None:
         if self._list_cache is None:
@@ -1021,7 +1068,7 @@ class AsyncOphanixToolGatewayClient:
             if expires_at <= time.monotonic():
                 self._list_cache.pop(cache_key, None)
                 return None
-            return list(tools)
+            return [_clone_tool_definition(tool) for tool in tools]
 
     def _cache_deadline(self) -> float:
         return time.monotonic() + self.cache_ttl_seconds
@@ -1032,7 +1079,7 @@ class AsyncOphanixToolGatewayClient:
         try:
             self.event_hook(MappingProxyType(dict(event)))
         except Exception:
-            return
+            LOGGER.debug("Tool Gateway SDK event hook failed.", exc_info=True)
 
 
 def _client_config(
@@ -1040,6 +1087,8 @@ def _client_config(
     base_url: object,
     timeout_seconds: object,
     max_payload_bytes: object,
+    max_response_bytes: object,
+    max_cache_entries: object,
     cache_tools: object,
     cache_ttl_seconds: object,
     allow_insecure_http: object,
@@ -1063,6 +1112,12 @@ def _client_config(
     max_payload_bytes = _require_integer(max_payload_bytes, "max_payload_bytes")
     if max_payload_bytes <= 0:
         raise ValueError("max_payload_bytes must be greater than zero")
+    max_response_bytes = _require_integer(max_response_bytes, "max_response_bytes")
+    if max_response_bytes <= 0:
+        raise ValueError("max_response_bytes must be greater than zero")
+    max_cache_entries = _require_integer(max_cache_entries, "max_cache_entries")
+    if max_cache_entries <= 0:
+        raise ValueError("max_cache_entries must be greater than zero")
     cache_ttl_seconds = _require_finite_number(
         cache_ttl_seconds,
         "cache_ttl_seconds",
@@ -1096,6 +1151,8 @@ def _client_config(
         base_url=normalized_base_url,
         timeout_seconds=timeout_seconds,
         max_payload_bytes=max_payload_bytes,
+        max_response_bytes=max_response_bytes,
+        max_cache_entries=max_cache_entries,
         cache_tools=_require_bool(cache_tools, "cache_tools"),
         cache_ttl_seconds=cache_ttl_seconds,
         allow_insecure_http=allow_insecure_http,
@@ -1243,9 +1300,31 @@ def _tool_definition(body: dict[str, Any]) -> ToolDefinition:
     )
 
 
+def _clone_tool_definition(tool: ToolDefinition) -> ToolDefinition:
+    return ToolDefinition(
+        id=tool.id,
+        name=tool.name,
+        display_name=tool.display_name,
+        description=tool.description,
+        owner_team=tool.owner_team,
+        status=tool.status,
+        required_scope=tool.required_scope,
+        input_schema_json=copy.deepcopy(tool.input_schema_json),
+        output_schema_json=copy.deepcopy(tool.output_schema_json),
+        raw=_immutable_mapping(copy.deepcopy(dict(tool.raw))),
+    )
+
+
+def _trim_cache(cache: dict[Any, Any], max_entries: int) -> None:
+    while len(cache) > max_entries:
+        cache.pop(next(iter(cache)))
+
+
 def _raise_denied(body: dict[str, Any], status_code: int) -> None:
     error = _optional_mapping(body.get("error")) or {}
     reason_code = body.get("reason_code") or error.get("code")
+    if reason_code is None:
+        _raise_gateway_error(body, status_code)
     raise ToolDeniedError(
         "Tool call denied by gateway policy.",
         reason_code=str(reason_code) if reason_code is not None else None,
@@ -1256,9 +1335,14 @@ def _raise_denied(body: dict[str, Any], status_code: int) -> None:
     )
 
 
-def _raise_gateway_error(body: dict[str, Any], status_code: int) -> None:
+def _raise_gateway_error(
+    body: dict[str, Any],
+    status_code: int,
+    *,
+    retry_after_seconds: float | None = None,
+) -> None:
     error = _optional_mapping(body.get("error")) or {}
-    code = error.get("code") or body.get("reason_code")
+    code = error.get("code") or body.get("code") or body.get("reason_code")
     if status_code == 401:
         raise ToolAuthenticationError(
             "Tool Gateway authentication failed.",
@@ -1266,6 +1350,7 @@ def _raise_gateway_error(body: dict[str, Any], status_code: int) -> None:
             code=str(code) if code is not None else None,
             request_id=_optional_string(body.get("request_id")),
             correlation_id=_optional_string(body.get("correlation_id")),
+            retry_after_seconds=retry_after_seconds,
             response_body=body,
         )
     raise ToolGatewayError(
@@ -1274,15 +1359,25 @@ def _raise_gateway_error(body: dict[str, Any], status_code: int) -> None:
         code=str(code) if code is not None else None,
         request_id=_optional_string(body.get("request_id")),
         correlation_id=_optional_string(body.get("correlation_id")),
+        retry_after_seconds=retry_after_seconds,
         response_body=body,
     )
 
 
-def _response_json(response: httpx.Response) -> dict[str, Any]:
-    return _mapping_response(_response_data(response))
+def _response_json(
+    response: httpx.Response,
+    *,
+    max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+) -> dict[str, Any]:
+    return _mapping_response(_response_data(response, max_response_bytes=max_response_bytes))
 
 
-def _response_data(response: httpx.Response) -> Any:
+def _response_data(
+    response: httpx.Response,
+    *,
+    max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+) -> Any:
+    _ensure_response_within_limit(response, max_response_bytes=max_response_bytes)
     try:
         return response.json()
     except ValueError:
@@ -1293,6 +1388,33 @@ def _response_data(response: httpx.Response) -> Any:
                 "body_excerpt": _sanitize_text(_response_text_excerpt(response)),
             }
         }
+
+
+def _ensure_response_within_limit(
+    response: httpx.Response,
+    *,
+    max_response_bytes: int,
+) -> None:
+    content_length = response.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > max_response_bytes:
+                raise ToolGatewayError(
+                    "Tool Gateway response exceeds max_response_bytes.",
+                    code="response_too_large",
+                    status_code=response.status_code,
+                    response_body={"error": {"code": "response_too_large"}},
+                )
+        except ValueError:
+            pass
+    content = getattr(response, "content", b"")
+    if isinstance(content, bytes) and len(content) > max_response_bytes:
+        raise ToolGatewayError(
+            "Tool Gateway response exceeds max_response_bytes.",
+            code="response_too_large",
+            status_code=response.status_code,
+            response_body={"error": {"code": "response_too_large"}},
+        )
 
 
 def _mapping_response(value: Any) -> dict[str, Any]:
@@ -1428,7 +1550,7 @@ def _require_json_object(
 ) -> None:
     if not isinstance(value, dict):
         raise ValueError(f"{field_name} must be a dictionary")
-    _validate_json_value(value, field_name)
+    _validate_json_value(value, field_name, seen=set())
     try:
         serialized = json.dumps(value, allow_nan=False)
     except (TypeError, ValueError) as exc:
@@ -1437,16 +1559,26 @@ def _require_json_object(
         raise ValueError(f"{field_name} exceeds max_payload_bytes")
 
 
-def _validate_json_value(value: object, field_name: str) -> None:
+def _validate_json_value(value: object, field_name: str, *, seen: set[int]) -> None:
     if isinstance(value, dict):
+        object_id = id(value)
+        if object_id in seen:
+            raise ValueError(f"{field_name} must not contain cycles")
+        seen.add(object_id)
         for key, child_value in value.items():
             if not isinstance(key, str):
                 raise ValueError(f"{field_name} keys must be strings")
-            _validate_json_value(child_value, field_name)
+            _validate_json_value(child_value, field_name, seen=seen)
+        seen.remove(object_id)
         return
     if isinstance(value, list):
+        object_id = id(value)
+        if object_id in seen:
+            raise ValueError(f"{field_name} must not contain cycles")
+        seen.add(object_id)
         for child_value in value:
-            _validate_json_value(child_value, field_name)
+            _validate_json_value(child_value, field_name, seen=seen)
+        seen.remove(object_id)
         return
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError(f"{field_name} must contain only finite numbers")

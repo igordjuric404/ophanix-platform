@@ -75,8 +75,12 @@ Common constructor options:
   short-lived scripts.
 - `timeout_seconds`: per-request timeout, default `5.0`.
 - `max_payload_bytes`: client-side serialized payload cap, default `1_000_000`.
+- `max_response_bytes`: client-side gateway response cap checked before JSON
+  parsing, default `1_000_000`.
 - `cache_tools`: opt-in discovery cache, default `False`.
 - `cache_ttl_seconds`: cache TTL when `cache_tools=True`, default `300.0`.
+- `max_cache_entries`: maximum process-local discovery cache entries when
+  caching is enabled, default `256`.
 - `event_hook`: optional callable that receives immutable, token-free telemetry
   events for tool-call start/success/denial/error.
 - `discovery_max_retries`: retry count for discovery only, default `2`.
@@ -90,7 +94,9 @@ Main methods:
 - `call_tool(tool_name, payload, correlation_id=None)`: invokes one tool. Payload
   must be a JSON object with string keys and finite numeric values.
 - `list_tools(owner_team=None, limit=50, offset=0)`: lists one page of callable
-  active tools for the configured credential.
+  active tools for the configured credential. The gateway discovery API is
+  active-only; the legacy `status="active"` argument remains accepted only for
+  compatibility.
 - `list_all_tools(owner_team=None, page_size=200)`: follows discovery pagination.
 - `get_tool(tool_name_or_id)`: finds one callable tool by name or id.
 - `clear_tool_cache()`: clears cached discovery results when `cache_tools=True`.
@@ -116,7 +122,7 @@ The SDK raises `ToolAuthenticationError` for rejected gateway credentials,
 transport, gateway, upstream, and response-contract failures. Exception messages
 are intentionally generic so application logs do not inherit arbitrary upstream
 text. Use `status_code`, `code`, `reason_code`, `request_id`, `correlation_id`,
-and the sanitized `response_body` for debugging.
+`retry_after_seconds`, and the sanitized `response_body` for debugging.
 
 ```python
 try:
@@ -128,6 +134,7 @@ except ToolDeniedError as exc:
 except ToolGatewayError as exc:
     request_id = exc.request_id
     diagnostic_code = exc.code or exc.status_code
+    retry_after = exc.retry_after_seconds
 ```
 
 ## Reliability And Safety
@@ -141,15 +148,19 @@ bounded exponential backoff, `Retry-After` support, and jitter. Tool invocation 
 are not retried automatically because mutating tools need an idempotency contract before
 automatic retries are safe.
 
-The SDK validates payloads as strict JSON objects, rejects non-finite numbers and
-non-string object keys, rejects header control characters, redacts sensitive fields from
-exception diagnostic bodies, and keeps static tokens out of generated `repr()` output.
+The SDK validates payloads as strict JSON objects, rejects non-finite numbers,
+non-string object keys, and cyclic Python payloads, rejects header control
+characters, redacts sensitive fields from exception diagnostic bodies, caps
+gateway responses before JSON parsing, and keeps static tokens out of generated
+`repr()` output.
 
 When `cache_tools=True`, discovery cache entries are partitioned by a SHA-256
 fingerprint of the current bearer token and expire after `cache_ttl_seconds`.
 Cached results do not cross credential rotations, and `list_all_tools()` /
-`get_tool()` use one credential context across their paginated requests. The
-cache is process-local; call `clear_tool_cache()` after urgent permission or
+`get_tool()` use one credential context across their paginated requests. Cached
+tool definitions are copied before they are returned so caller mutation cannot
+poison later cache reads. The cache is process-local and bounded by
+`max_cache_entries`; call `clear_tool_cache()` after urgent permission or
 tool-contract changes instead of waiting for TTL expiry.
 
 Client cache mutation is internally guarded, but applications should still prefer
@@ -175,6 +186,8 @@ tools in application code only after the tool contract explicitly permits it.
   and sanitized `response_body` when reporting the issue.
 - `ToolGatewayError(code="transport_error")`: the SDK could not reach the
   gateway. Check DNS, TLS, connectivity, proxy settings, and `timeout_seconds`.
+- `ToolGatewayError(code="response_too_large")`: the gateway response exceeded
+  `max_response_bytes` before SDK JSON parsing.
 
 ## Production Adoption Checklist
 
@@ -211,7 +224,17 @@ enforced in CI with:
 ```bash
 python3 -m pip install '.[security]'
 python3 scripts/validate_release.py --require-dependency-audit
+python3 scripts/validate_release.py --strict-git
 ```
 
 The SDK depends only on `httpx`. It is also re-exported from `product_platform.tool_gateway`
 for compatibility with earlier internal imports.
+
+`--strict-git` additionally requires a clean SDK package worktree and an exact
+release tag matching `v<project.version>` unless `--expected-tag` is supplied.
+
+Publishing is intentionally separate from local artifact validation. A release
+owner must publish only artifacts produced by the validated workflow, preserve
+the build logs and artifact checksums, and document whether the final upload is
+performed through GitHub trusted publishing, Azure DevOps, or another approved
+internal release pipeline.

@@ -22,6 +22,17 @@ class ToolGatewaySdkPackageTests(unittest.TestCase):
         self.assertTrue((package_root / "sdk.py").exists())
         self.assertTrue((package_root / "py.typed").exists())
 
+    def test_product_platform_sdk_copy_matches_standalone_source(self) -> None:
+        standalone_package = self.standalone_src / "ophanix_tool_gateway"
+        product_package = self.product_platform_root / "src" / "ophanix_tool_gateway"
+
+        for relative_path in ["__init__.py", "sdk.py", "py.typed"]:
+            self.assertEqual(
+                (product_package / relative_path).read_bytes(),
+                (standalone_package / relative_path).read_bytes(),
+                relative_path,
+            )
+
     def test_standalone_package_imports_from_its_src_layout(self) -> None:
         env = {**os.environ, "PYTHONPATH": str(self.standalone_src)}
         result = subprocess.run(

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 import zipfile
 from pathlib import Path
 
@@ -44,9 +45,20 @@ def main() -> int:
         action="store_true",
         help="Run pip-audit after artifact validation. Install .[security] first.",
     )
+    parser.add_argument(
+        "--strict-git",
+        action="store_true",
+        help="Require a clean SDK git state and a tag matching the package version.",
+    )
+    parser.add_argument(
+        "--expected-tag",
+        help="Expected release tag. Defaults to v<project.version> when --strict-git is used.",
+    )
     args = parser.parse_args()
 
     package_root = Path(__file__).resolve().parents[1]
+    if args.strict_git:
+        _validate_git_state(package_root, expected_tag=args.expected_tag)
     with _artifact_directory(args.out_dir) as artifact_dir:
         _run_build(package_root, artifact_dir)
         wheel = _single_artifact(artifact_dir, "*.whl")
@@ -96,6 +108,39 @@ def _run_build(package_root: Path, artifact_dir: Path) -> None:
         package_root,
         missing_hint="Install release extras first: python3 -m pip install '.[release]'",
     )
+
+
+def _validate_git_state(package_root: Path, *, expected_tag: str | None) -> None:
+    repo_root = package_root.parents[1]
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--", str(package_root.relative_to(repo_root))],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+    )
+    if status.returncode != 0:
+        raise SystemExit((status.stdout + status.stderr).strip() or "git status failed")
+    if status.stdout.strip():
+        raise SystemExit("SDK release validation requires a clean SDK package worktree.")
+    version_value = _project_version(package_root)
+    expected = expected_tag or f"v{version_value}"
+    tag = subprocess.run(
+        ["git", "describe", "--tags", "--exact-match"],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+    )
+    if tag.returncode != 0 or tag.stdout.strip() != expected:
+        raise SystemExit(f"SDK release must be built from tag {expected}.")
+
+
+def _project_version(package_root: Path) -> str:
+    with (package_root / "pyproject.toml").open("rb") as handle:
+        metadata = tomllib.load(handle)
+    version_value = metadata.get("project", {}).get("version")
+    if not isinstance(version_value, str) or not version_value:
+        raise SystemExit("pyproject.toml is missing project.version")
+    return version_value
 
 
 def _run_module(module: str, args: list[str], cwd: Path, *, missing_hint: str) -> None:

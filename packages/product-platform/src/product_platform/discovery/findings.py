@@ -404,7 +404,6 @@ class DiscoveryFindingRepository:
             (self.organization_id, self.environment_id, fingerprint),
         ).fetchone()
         now = utc_now_iso()
-        evidence = payload.get("evidence") or []
         source = _source_from_payload(payload)
         first_seen_at = str(payload.get("first_seen_at") or now)
         last_seen_at = str(payload.get("last_seen_at") or now)

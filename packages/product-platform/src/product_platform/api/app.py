@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import inspect
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -104,7 +106,6 @@ from product_platform.agents.credentials import (
     AgentCredentialIssuer,
     AgentCredentialRepository,
     CredentialNotFoundError,
-    CredentialExpiryMonitor,
     agent_credential_response,
 )
 from product_platform.agents.repository import (
@@ -222,7 +223,6 @@ from product_platform.integrations.repository import (
     FrameworkInstanceNotFoundError,
     FrameworkIntegrationNotFoundError,
     IntegrationRegistryRepository,
-    ProviderCredentialNotFoundError,
     framework_agent_response,
     framework_instance_response,
     framework_integration_response,
@@ -570,8 +570,7 @@ from product_platform.tool_gateway.auth import (
 from product_platform.tool_gateway.decision import ToolPolicyDecisionService
 from product_platform.tool_gateway.health import ToolUpstreamHealthChecker
 from product_platform.tool_gateway.invocation import (
-    HttpToolInvocationExecutor,
-    InMemoryToolInvocationExecutor,
+    AsyncHttpToolInvocationExecutor,
     ToolExecutionError,
     ToolExecutionResult,
     ToolInvocationRequest,
@@ -615,20 +614,34 @@ from product_platform.workflows.repository import (
 from product_platform.workflows.runner import WorkflowRunnerError, build_default_workflow_runner_registry
 from product_platform.workflows.worker import WORKFLOW_JOB_TYPE
 
+MAX_TRACE_ID_LENGTH = 128
+TRACE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:/@+-]+$")
+
 
 def _request_context_from_request(request: Request) -> RequestContext:
     existing = getattr(request.state, "request_context", None)
     if isinstance(existing, RequestContext):
         return existing
-    fallback_id = request.headers.get("X-Request-ID") or str(uuid4())
+    fallback_id = _trusted_trace_id(request.headers.get("X-Request-ID")) or str(uuid4())
     return RequestContext(
         request_id=fallback_id,
-        correlation_id=request.headers.get("X-Correlation-ID") or fallback_id,
+        correlation_id=_trusted_trace_id(request.headers.get("X-Correlation-ID")) or fallback_id,
         organization_id=request.headers.get("X-Organization-ID"),
         environment_id=request.headers.get("X-Environment-ID"),
         user_id=request.headers.get("X-User-ID"),
         actor_type=request.headers.get("X-Actor-Type"),
     )
+
+
+def _trusted_trace_id(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped or len(stripped) > MAX_TRACE_ID_LENGTH:
+        return None
+    if not TRACE_ID_PATTERN.fullmatch(stripped):
+        return None
+    return stripped
 
 
 def _error_response(
@@ -655,8 +668,26 @@ def _error_response(
     )
 
 
+def _is_local_environment(environment: str) -> bool:
+    return environment.strip().lower() in {"development", "dev", "local", "test"}
+
+
+def _validate_production_settings(settings: Settings) -> None:
+    if _is_local_environment(settings.environment):
+        return
+    if settings.session_secret == "dev-secret-change-me":
+        raise ValueError("OPHANIX_SESSION_SECRET must be set to a non-default value in production.")
+    enable_dev_login = (
+        settings.enable_dev_login
+        if settings.enable_dev_login is not None
+        else _is_local_environment(settings.environment)
+    )
+    if enable_dev_login:
+        raise ValueError("Development login must be disabled in production.")
+
+
 def _is_tool_gateway_runtime_path(path: str) -> bool:
-    return path in {"/api/v1/gateway/tools", "/api/v1/gateway/principal-probe"} or (
+    return path == "/api/v1/gateway/tools" or (
         len(path.split("/")) == 6
         and path.startswith("/api/v1/tools/")
         and path.endswith("/invoke")
@@ -681,10 +712,21 @@ def _tool_gateway_rate_limit_exceeded(app: FastAPI, request: Request) -> bool:
     now = time.monotonic()
     key = _gateway_rate_limit_key(request)
     limits: dict[str, tuple[float, int]] = app.state.tool_gateway_rate_limits
+    max_keys = int(getattr(settings, "tool_gateway_rate_limit_max_keys", 10_000))
     window_started_at, count = limits.get(key, (now, 0))
     if now - window_started_at >= window_seconds:
         limits[key] = (now, 1)
         return False
+    if key not in limits and max_keys > 0 and len(limits) >= max_keys:
+        expired_keys = [
+            existing_key
+            for existing_key, (started_at, _) in limits.items()
+            if now - started_at >= window_seconds
+        ]
+        for expired_key in expired_keys:
+            limits.pop(expired_key, None)
+        if len(limits) >= max_keys:
+            return True
     count += 1
     limits[key] = (window_started_at, count)
     return count > max_requests
@@ -724,18 +766,36 @@ def create_app(
     """Create and configure the FastAPI product API."""
 
     resolved_settings = settings or load_settings()
+    _validate_production_settings(resolved_settings)
+    if (
+        database is None
+        and not _is_local_environment(resolved_settings.environment)
+        and resolved_settings.database_url == "sqlite:///ophanix_product.db"
+    ):
+        raise ValueError("A configured database is required outside local/test environments.")
     registry = dependency_registry or create_default_dependency_registry(resolved_settings)
     auth_service = AuthService(resolved_settings)
     tenants = tenant_store or TenantStore()
     api_keys = api_key_store or ApiKeyStore(resolved_settings.session_secret)
     started_at = time.monotonic()
 
+    enable_api_docs = (
+        resolved_settings.enable_api_docs
+        if resolved_settings.enable_api_docs is not None
+        else _is_local_environment(resolved_settings.environment)
+    )
+    enable_dev_login = (
+        resolved_settings.enable_dev_login
+        if resolved_settings.enable_dev_login is not None
+        else _is_local_environment(resolved_settings.environment)
+    )
+
     app = FastAPI(
         title=resolved_settings.app_name,
         version=__version__,
         description="Control plane API for the Ophanix product platform.",
-        docs_url="/docs",
-        openapi_url="/openapi.json",
+        docs_url="/docs" if enable_api_docs else None,
+        openapi_url="/openapi.json" if enable_api_docs else None,
     )
     app.state.settings = resolved_settings
     app.state.dependency_registry = registry
@@ -745,11 +805,16 @@ def create_app(
     app.state.database = database
     app.state.denied_audit_events = []
     app.state.started_at = started_at
-    app.state.tool_gateway_http_client = httpx.Client()
+    app.state.tool_gateway_http_client = httpx.AsyncClient()
     app.state.tool_gateway_rate_limits = {}
 
-    def _close_tool_gateway_http_client() -> None:
-        close = getattr(app.state.tool_gateway_http_client, "close", None)
+    async def _close_tool_gateway_http_client() -> None:
+        client = app.state.tool_gateway_http_client
+        aclose = getattr(client, "aclose", None)
+        if callable(aclose):
+            await aclose()
+            return
+        close = getattr(client, "close", None)
         if callable(close):
             close()
 
@@ -781,8 +846,8 @@ def create_app(
 
     @app.middleware("http")
     async def request_context_middleware(request: Request, call_next: Any) -> Any:
-        request_id = request.headers.get("X-Request-ID") or str(uuid4())
-        correlation_id = request.headers.get("X-Correlation-ID") or request_id
+        request_id = _trusted_trace_id(request.headers.get("X-Request-ID")) or str(uuid4())
+        correlation_id = _trusted_trace_id(request.headers.get("X-Correlation-ID")) or request_id
         principal = getattr(request.state, "principal", None)
         request.state.request_context = RequestContext(
             request_id=request_id,
@@ -807,7 +872,7 @@ def create_app(
         response.headers["X-Correlation-ID"] = correlation_id
         return response
 
-    public_api_paths = {"/api/v1/auth/dev-login"}
+    public_api_paths = {"/api/v1/auth/dev-login"} if enable_dev_login else set()
 
     def _uses_gateway_auth_path(path: str) -> bool:
         return _is_tool_gateway_runtime_path(path)
@@ -946,10 +1011,21 @@ def create_app(
         existing = getattr(app.state, "database", None)
         if isinstance(existing, Database):
             return existing
-        created = Database("sqlite:///:memory:")
+        if (
+            not _is_local_environment(resolved_settings.environment)
+            and resolved_settings.database_url == "sqlite:///ophanix_product.db"
+        ):
+            raise RuntimeError("A configured database is required outside local/test environments.")
+        database_url = (
+            "sqlite:///:memory:"
+            if resolved_settings.environment.strip().lower() == "test"
+            else resolved_settings.database_url
+        )
+        created = Database(database_url)
         created.migrate()
-        with created.transaction() as connection:
-            seed_demo_data(connection)
+        if _is_local_environment(resolved_settings.environment):
+            with created.transaction() as connection:
+                seed_demo_data(connection)
         app.state.database = created
         return created
 
@@ -3025,19 +3101,6 @@ def create_app(
         return current_user
 
     @app.get(
-        "/api/v1/gateway/principal-probe",
-        response_model=GatewayPrincipal,
-        include_in_schema=False,
-    )
-    async def gateway_principal_probe(
-        principal: GatewayPrincipal = Depends(_get_gateway_principal),
-    ) -> GatewayPrincipal:
-        """Hidden test probe for the reusable gateway auth dependency."""
-
-        app.state.gateway_principal_probe_executed = True
-        return principal
-
-    @app.get(
         "/api/v1/gateway/tools",
         response_model=list[GatewayToolDefinitionResponse],
         tags=["tool-gateway"],
@@ -3155,7 +3218,34 @@ def create_app(
                     else None
                 )
                 if input_schema is not None:
-                    validate_payload(body.payload, input_schema)
+                    try:
+                        validate_payload(body.payload, input_schema)
+                    except ToolSchemaValidationError as exc:
+                        runtime_action = runtime_repository.create_action(
+                            ToolRuntimeActionCreate(
+                                request_id=context.request_id,
+                                correlation_id=correlation_id,
+                                agent_id=principal.agent_id,
+                                credential_id=principal.credential_id,
+                                tool_id=tool["id"],
+                                permission_id=decision.permission_id,
+                                decision_id=decision.id,
+                                action_status="validation_failed",
+                                reason_code=decision.reason_code,
+                                payload_summary=body.payload,
+                                error_code="schema_validation_failed",
+                            )
+                        )
+                        _append_tool_runtime_event(
+                            runtime_repository,
+                            runtime_action["id"],
+                            "tool.runtime.validation_failed",
+                            {
+                                "decision_id": decision.id,
+                                "error_code": "schema_validation_failed",
+                            },
+                        )
+                        return _schema_validation_error_response(request, exc)
                 runtime_action = runtime_repository.create_action(
                     ToolRuntimeActionCreate(
                         request_id=context.request_id,
@@ -3181,16 +3271,24 @@ def create_app(
                 )
                 executor = getattr(app.state, "tool_gateway_executor", None)
                 if executor is None:
-                    executor = HttpToolInvocationExecutor(
+                    executor = AsyncHttpToolInvocationExecutor(
                         repository,
                         http_client=getattr(app.state, "tool_gateway_http_client", None),
+                        max_response_bytes=int(
+                            resolved_settings.tool_gateway_max_upstream_response_bytes
+                        ),
                     )
                 try:
-                    execution = executor.execute(
+                    maybe_execution = executor.execute(
                         tool=tool,
                         payload=body.payload,
                         decision=decision,
                         principal=principal,
+                    )
+                    execution = (
+                        await maybe_execution
+                        if inspect.isawaitable(maybe_execution)
+                        else maybe_execution
                     )
                 except ToolExecutionError as exc:
                     runtime_repository.update_action(
@@ -3320,6 +3418,12 @@ def create_app(
                         )
                 result = execution.model_dump() if isinstance(execution, ToolExecutionResult) else execution
                 if isinstance(execution, ToolExecutionResult) and execution.status == "failed":
+                    if isinstance(result, dict):
+                        result = {
+                            **result,
+                            "body": None,
+                            "exposed_to_agent": False,
+                        }
                     error_code = _runtime_execution_error_code(execution)
                     runtime_repository.update_action(
                         runtime_action["id"],

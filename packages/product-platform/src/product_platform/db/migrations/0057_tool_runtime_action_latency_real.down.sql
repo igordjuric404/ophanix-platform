@@ -1,4 +1,6 @@
-CREATE TABLE IF NOT EXISTS tool_runtime_actions (
+PRAGMA foreign_keys = OFF;
+
+CREATE TABLE IF NOT EXISTS tool_runtime_actions_old_latency (
     id TEXT PRIMARY KEY,
     organization_id TEXT NOT NULL,
     environment_id TEXT NOT NULL,
@@ -12,7 +14,7 @@ CREATE TABLE IF NOT EXISTS tool_runtime_actions (
     action_status TEXT NOT NULL,
     reason_code TEXT,
     upstream_status_code INTEGER,
-    latency_ms REAL,
+    latency_ms INTEGER,
     payload_summary_json TEXT NOT NULL,
     response_summary_json TEXT,
     redaction_applied INTEGER NOT NULL DEFAULT 0,
@@ -28,14 +30,23 @@ CREATE TABLE IF NOT EXISTS tool_runtime_actions (
     FOREIGN KEY (decision_id) REFERENCES tool_policy_decisions(id)
 );
 
-CREATE TABLE IF NOT EXISTS tool_runtime_action_events (
-    id TEXT PRIMARY KEY,
-    runtime_action_id TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    event_summary_json TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY (runtime_action_id) REFERENCES tool_runtime_actions(id) ON DELETE CASCADE
-);
+INSERT INTO tool_runtime_actions_old_latency (
+    id, organization_id, environment_id, request_id, correlation_id,
+    agent_id, credential_id, tool_id, permission_id, decision_id,
+    action_status, reason_code, upstream_status_code, latency_ms,
+    payload_summary_json, response_summary_json, redaction_applied,
+    error_code, created_at, updated_at
+)
+SELECT
+    id, organization_id, environment_id, request_id, correlation_id,
+    agent_id, credential_id, tool_id, permission_id, decision_id,
+    action_status, reason_code, upstream_status_code, CAST(latency_ms AS INTEGER),
+    payload_summary_json, response_summary_json, redaction_applied,
+    error_code, created_at, updated_at
+FROM tool_runtime_actions;
+
+DROP TABLE tool_runtime_actions;
+ALTER TABLE tool_runtime_actions_old_latency RENAME TO tool_runtime_actions;
 
 CREATE INDEX IF NOT EXISTS idx_tool_runtime_actions_org_env_created
     ON tool_runtime_actions (organization_id, environment_id, created_at DESC, id DESC);
@@ -52,5 +63,4 @@ CREATE INDEX IF NOT EXISTS idx_tool_runtime_actions_decision_created
 CREATE INDEX IF NOT EXISTS idx_tool_runtime_actions_status_created
     ON tool_runtime_actions (organization_id, environment_id, action_status, created_at DESC, id DESC);
 
-CREATE INDEX IF NOT EXISTS idx_tool_runtime_action_events_action_created
-    ON tool_runtime_action_events (runtime_action_id, created_at ASC, id ASC);
+PRAGMA foreign_keys = ON;

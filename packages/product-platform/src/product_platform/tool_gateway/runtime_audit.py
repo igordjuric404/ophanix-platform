@@ -15,6 +15,7 @@ from product_platform.tool_gateway.decision import summarize_tool_payload
 TOOL_RUNTIME_ACTION_STATUSES = {
     "authentication_failed",
     "denied",
+    "validation_failed",
     "allowed",
     "forwarded",
     "upstream_failed",

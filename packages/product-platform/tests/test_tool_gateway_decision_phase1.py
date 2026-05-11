@@ -58,6 +58,7 @@ class ToolGatewayDecisionPhase1Tests(unittest.TestCase):
                 "nested": {
                     "password": "hunter2",
                     "safe": "visible",
+                    "note": "Bearer abcdefghijklmnopqrstuvwxyz123456",
                     "tokens": [{"token": "abc"}, {"value": "ok"}],
                 },
                 "long_note": "x" * 140,
@@ -68,6 +69,7 @@ class ToolGatewayDecisionPhase1Tests(unittest.TestCase):
         self.assertEqual(summary["api_key"], "[redacted]")
         self.assertEqual(summary["nested"]["password"], "[redacted]")
         self.assertEqual(summary["nested"]["safe"], "visible")
+        self.assertEqual(summary["nested"]["note"], "[redacted]")
         self.assertEqual(summary["nested"]["tokens"], "[redacted]")
         self.assertTrue(summary["long_note"].endswith("..."))
         self.assertLessEqual(len(summary["long_note"]), 120)

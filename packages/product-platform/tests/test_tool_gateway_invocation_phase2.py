@@ -13,6 +13,11 @@ from product_platform.db.testing import create_migrated_test_database
 from product_platform.tool_gateway.models import ToolDefinitionCreateRequest
 from product_platform.tool_gateway.models import AgentToolPermissionGrantRequest
 from product_platform.tool_gateway.repository import ToolRegistryRepository
+from product_platform.tool_gateway.runtime_audit import (
+    ToolRuntimeActionQuery,
+    ToolRuntimeActionRepository,
+)
+from product_platform.tool_gateway.invocation import ToolInvocationRequest
 
 
 VALID_INPUT_SCHEMA = {
@@ -155,6 +160,13 @@ class ToolGatewayInvocationPhase2Tests(unittest.TestCase):
         self.assertEqual(payload["code"], "SCHEMA_VALIDATION_ERROR")
         self.assertEqual(payload["message"], "Payload failed schema validation.")
         self.assertEqual(payload["details"]["field"], "payload")
+        actions = ToolRuntimeActionRepository(
+            self.database.connect(),
+            DEMO_ORG_ID,
+            DEMO_ENV_ID,
+        ).list_actions(ToolRuntimeActionQuery(action_status="validation_failed"))
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["error_code"], "schema_validation_failed")
 
     def test_api_unknown_tool_returns_policy_denial_without_schema_oracle(self) -> None:
         response = self.client.post(
@@ -165,6 +177,14 @@ class ToolGatewayInvocationPhase2Tests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "tool_missing")
+
+    def test_unit_direct_http_payload_rejects_non_finite_numbers(self) -> None:
+        with self.assertRaises(ValueError):
+            ToolInvocationRequest(payload={"claim_id": float("nan")})
+
+    def test_unit_direct_http_correlation_id_rejects_unsupported_characters(self) -> None:
+        with self.assertRaises(ValueError):
+            ToolInvocationRequest(payload={}, correlation_id="bad id with spaces")
 
 
 if __name__ == "__main__":

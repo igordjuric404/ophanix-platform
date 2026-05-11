@@ -8,7 +8,7 @@ from sqlite3 import Row
 from product_platform.audit.events import AuditEventEnvelope
 from product_platform.audit.events import trust_change_event
 from product_platform.audit.store import AuditEventRepository
-from product_platform.trust.repository import TrustRepository, trust_recalculation_run_response
+from product_platform.trust.repository import TrustRepository
 
 SUPPORTED_AUDIT_EVENT_TYPES = {
     "policy.decision",

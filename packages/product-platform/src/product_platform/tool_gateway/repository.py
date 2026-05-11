@@ -27,10 +27,7 @@ from product_platform.tool_gateway.models import (
     ToolResponsePolicyPatchRequest,
     ToolResponsePolicyResponse,
 )
-from product_platform.tool_gateway.schemas import (
-    ToolSchemaValidationError,
-    validate_tool_contract_schema,
-)
+from product_platform.tool_gateway.schemas import validate_tool_contract_schema
 
 
 class ToolDefinitionNotFoundError(ValueError):

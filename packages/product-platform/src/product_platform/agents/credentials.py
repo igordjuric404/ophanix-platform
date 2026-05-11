@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from sqlite3 import Connection, Row
@@ -23,9 +25,31 @@ from product_platform.db.time import utc_now_iso
 
 
 def hash_credential_token(token: str) -> str:
-    """Return the stable SHA-256 token hash stored by the product database."""
+    """Return the stable token hash stored by the product database."""
+
+    pepper = os.environ.get("OPHANIX_GATEWAY_TOKEN_HASH_PEPPER")
+    if pepper:
+        digest = hmac.new(
+            pepper.encode("utf-8"),
+            token.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        return f"hmac-sha256:{digest}"
+    return legacy_credential_token_hash(token)
+
+
+def legacy_credential_token_hash(token: str) -> str:
+    """Return the legacy unpeppered SHA-256 token hash."""
 
     return hashlib.sha256(token.encode()).hexdigest()
+
+
+def credential_token_hash_candidates(token: str) -> list[str]:
+    """Return accepted hashes for lookup during pepper migration."""
+
+    current = hash_credential_token(token)
+    legacy = legacy_credential_token_hash(token)
+    return [current] if current == legacy else [current, legacy]
 
 
 def credential_expires_within_threshold(
@@ -546,7 +570,7 @@ class AgentCredentialRepository:
                 "reason": "Credential is expired.",
                 "verified_at": verified_at,
             }
-        if hash_credential_token(raw_token) != row["token_hash"]:
+        if row["token_hash"] not in credential_token_hash_candidates(raw_token):
             return {
                 "credential_id": credential_id,
                 "agent_id": row["agent_id"],
@@ -615,6 +639,36 @@ class AgentCredentialRepository:
         if invalid:
             raise ValueError(
                 "Credential scope is not approved for agent: " + ", ".join(invalid)
+            )
+        invalid_tool_resources: list[str] = []
+        for scope in scopes:
+            if scope.resource_type != "tool":
+                continue
+            if not scope.resource_id:
+                invalid_tool_resources.append("<missing>")
+                continue
+            row = self.connection.execute(
+                """
+                SELECT id
+                FROM tool_definitions
+                WHERE organization_id = ?
+                  AND environment_id = ?
+                  AND status = 'active'
+                  AND (id = ? OR name = ?)
+                """,
+                (
+                    self.organization_id,
+                    self.environment_id,
+                    scope.resource_id,
+                    scope.resource_id,
+                ),
+            ).fetchone()
+            if row is None:
+                invalid_tool_resources.append(scope.resource_id)
+        if invalid_tool_resources:
+            raise ValueError(
+                "Credential tool resource is not an active tool: "
+                + ", ".join(sorted(set(invalid_tool_resources)))
             )
 
     def list_scopes(self, credential_id: str) -> list[Row]:

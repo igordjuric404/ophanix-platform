@@ -81,6 +81,23 @@ class ToolGatewayPermissionsPhase1Tests(unittest.TestCase):
             granted_reason="Support workflow needs claim lookup.",
         )
 
+    def test_unit_permission_expiration_requires_timezone(self) -> None:
+        with self.assertRaises(ValueError):
+            AgentToolPermissionGrantRequest(
+                tool_id="tool_1",
+                scope="claims.lookup:read",
+                expires_at="2030-01-01T00:00:00",
+            )
+
+    def test_unit_permission_expiration_is_normalized_to_utc(self) -> None:
+        body = AgentToolPermissionGrantRequest(
+            tool_id="tool_1",
+            scope="claims.lookup:read",
+            expires_at="2030-01-01T01:00:00+01:00",
+        )
+
+        self.assertEqual(body.expires_at, "2030-01-01T00:00:00+00:00")
+
     def test_integration_grants_permission_for_active_agent_and_tool(self) -> None:
         with self.database.transaction():
             tool_id = self._create_active_tool()

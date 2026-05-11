@@ -9,6 +9,7 @@ description = "Ophanix product control plane and application shell."
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
+license-files = ["LICENSE"]
 dependencies = [
     "agent-discovery>=0.1.0,<1.0",
     "agentmesh-platform>=3.1.0,<4.0",
@@ -31,6 +32,7 @@ include = [
     "/tests",
     "/examples",
     "/README.md",
+    "/LICENSE",
     "/pyproject.toml",
 ]
 exclude = [
