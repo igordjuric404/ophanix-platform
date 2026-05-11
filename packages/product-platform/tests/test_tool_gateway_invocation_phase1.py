@@ -98,7 +98,9 @@ class ToolGatewayInvocationPhase1Tests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.json()["error"]["code"], "tool_missing")
+        payload = response.json()
+        self.assertEqual(payload["error"]["code"], "tool_call_denied")
+        self.assertIsNone(payload["decision"])
 
     def test_api_correlation_and_request_id_are_preserved(self) -> None:
         response = self.client.post(

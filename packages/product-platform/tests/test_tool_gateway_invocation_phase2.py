@@ -119,8 +119,8 @@ class ToolGatewayInvocationPhase2Tests(unittest.TestCase):
         self.assertEqual(response.status_code, 403, response.text)
         payload = response.json()
         self.assertEqual(payload["tool_name"], "claims.lookup")
-        self.assertEqual(payload["reason_code"], "permission_missing")
-        self.assertEqual(payload["decision"]["reason_code"], "permission_missing")
+        self.assertEqual(payload["reason_code"], "tool_call_denied")
+        self.assertIsNone(payload["decision"])
 
     def test_api_missing_required_payload_field_is_denied_before_schema_for_unauthorized_agent(self) -> None:
         response = self.client.post(
@@ -131,7 +131,7 @@ class ToolGatewayInvocationPhase2Tests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403)
         payload = response.json()
-        self.assertEqual(payload["error"]["code"], "permission_missing")
+        self.assertEqual(payload["error"]["code"], "tool_call_denied")
 
     def test_api_missing_required_payload_field_returns_422_after_authorization(self) -> None:
         with self.database.transaction() as connection:
@@ -176,7 +176,9 @@ class ToolGatewayInvocationPhase2Tests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.json()["error"]["code"], "tool_missing")
+        payload = response.json()
+        self.assertEqual(payload["error"]["code"], "tool_call_denied")
+        self.assertIsNone(payload["decision"])
 
     def test_unit_direct_http_payload_rejects_non_finite_numbers(self) -> None:
         with self.assertRaises(ValueError):

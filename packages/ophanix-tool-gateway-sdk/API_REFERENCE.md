@@ -38,6 +38,7 @@ OphanixToolGatewayClient(
 Methods:
 
 - `call_tool(tool_name: str, payload: dict[str, Any], correlation_id: str | None = None) -> ToolCallResult`
+- `check_compatibility() -> GatewayCompatibility`
 - `list_tools(status: Literal["active"] | None = None, owner_team: str | None = None, limit: int = 50, offset: int = 0) -> list[ToolDefinition]`
 - `list_all_tools(owner_team: str | None = None, page_size: int = 200, max_total: int | None = None) -> list[ToolDefinition]`
 - `get_tool(tool_name: str) -> ToolDefinition`
@@ -47,7 +48,16 @@ Methods:
 ### `AsyncOphanixToolGatewayClient`
 
 Async client with the same constructor options and method names. `call_tool`,
-`list_tools`, `list_all_tools`, `get_tool`, and `close` are awaitable.
+`check_compatibility`, `list_tools`, `list_all_tools`, `get_tool`, and `close`
+are awaitable.
+
+### `ToolGatewayClientConfig`
+
+Reusable configuration accepted by `OphanixToolGatewayClient.from_config(...)`
+and `AsyncOphanixToolGatewayClient.from_config(...)`. It includes timeout,
+payload/response caps, cache settings, discovery retry settings, custom client
+streaming policy, user agent, and event-hook failure mode. `base_url`,
+`token_provider`, `http_client`, and `event_hook` remain constructor inputs.
 
 ## Token Providers
 
@@ -58,7 +68,8 @@ Custom providers must expose `get_token()` and return the raw bearer token
 without the `Bearer` prefix.
 
 Token strings with the `Bearer ` prefix, whitespace, or unsupported characters
-raise `ToolGatewayValidationError` before a network request is sent.
+raise `ToolGatewayValidationError` before a network request is sent. Tokens must
+be 4096 characters or fewer.
 
 ## Data Classes
 
@@ -67,6 +78,9 @@ raise `ToolGatewayValidationError` before a network request is sent.
   response metadata.
 - `ToolCallResult`: `request_id`, `correlation_id`, `tool_name`, `result`,
   `reason_code`, optional `decision`, and immutable raw response metadata.
+- `GatewayCompatibility`: `compatible`, `sdk_version`,
+  `expected_gateway_contract_version`, `gateway_contract_version`,
+  `min_sdk_version`, and immutable raw response metadata.
 
 ## Errors
 
@@ -82,9 +96,24 @@ All SDK errors expose `message`, `status_code`, `code`, `request_id`,
 `correlation_id`, `retry_after_seconds`, and sanitized `response_body` where
 available.
 
+Sanitized `response_body` values redact common credential and PII-like keys:
+`authorization`, `api_key`, `credential`, `password`, `secret`, `token`, `key`,
+`email`, `phone`, `address`, and `ssn`.
+
+## Event Hook Schema
+
+| Event | Fields |
+| --- | --- |
+| `tool_call.start` | `tool_name`, `correlation_id` |
+| `tool_call.success` | `tool_name`, `request_id`, `correlation_id`, `reason_code`, `elapsed_ms` |
+| `tool_call.denied` | `tool_name`, `status_code`, `elapsed_ms` |
+| `tool_call.error` | `tool_name`, `status_code` or `code`, `elapsed_ms` |
+| `tool_discovery.retry` | `attempt`, `delay_seconds`, `status_code` |
+
 ## Compatibility And Deprecations
 
 - `list_tools(status="active")` is accepted for compatibility and emits a
   `DeprecationWarning`. Gateway discovery is always active-only.
 - `product_platform.tool_gateway` imports are compatibility shims for earlier
-  internal callers. Prefer `ophanix_tool_gateway` for new code.
+  internal callers through the `0.1.x` line. Prefer `ophanix_tool_gateway` for
+  new code.

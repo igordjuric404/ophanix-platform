@@ -19,6 +19,7 @@ SUPPORTED_UPSTREAM_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 SUPPORTED_UPSTREAM_AUTH_MODES = {"none", "api_key", "bearer"}
 SUPPORTED_UPSTREAM_STATUSES = {"configured", "healthy", "degraded", "unhealthy", "disabled"}
 SUPPORTED_AGENT_TOOL_PERMISSION_STATUSES = {"active", "paused", "revoked", "expired"}
+GATEWAY_CONTRACT_VERSION = "tool-gateway.v1"
 UPSTREAM_AUTH_HEADER_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,127}$")
 UPSTREAM_AUTH_HEADER_PREFIX_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]{0,63}$")
 UPSTREAM_QUERY_PARAMETER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
@@ -158,6 +159,14 @@ class GatewayToolDefinitionResponse(BaseModel):
     required_scope: str
     input_schema_json: dict[str, Any] | None = None
     output_schema_json: dict[str, Any] | None = None
+
+
+class GatewayCapabilitiesResponse(BaseModel):
+    """Authenticated SDK compatibility probe response."""
+
+    gateway_contract_version: str = GATEWAY_CONTRACT_VERSION
+    min_sdk_version: str = "0.1.0"
+    sdk_package: str = "ophanix-tool-gateway-sdk"
 
 
 class ToolUpstreamTargetCreateRequest(BaseModel):

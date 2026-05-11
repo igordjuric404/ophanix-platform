@@ -62,6 +62,8 @@ def main() -> int:
     _validate_vendored_sdk_parity(package_root)
     if args.strict_git:
         _validate_git_state(package_root, expected_tag=args.expected_tag)
+    if args.skip_twine_check:
+        print("WARNING: twine metadata validation skipped; release-manifest.json records this.")
     with _artifact_directory(args.out_dir) as artifact_dir:
         _run_build(package_root, artifact_dir)
         wheel = _single_artifact(artifact_dir, "*.whl")
@@ -84,6 +86,7 @@ def main() -> int:
             artifacts=[wheel, sdist],
             dependency_audit_required=args.require_dependency_audit,
             strict_git=args.strict_git,
+            twine_check_skipped=args.skip_twine_check,
         )
         print(f"Release artifacts validated in {artifact_dir}")
     return 0
@@ -286,12 +289,18 @@ def _write_release_manifest(
     artifacts: list[Path],
     dependency_audit_required: bool,
     strict_git: bool,
+    twine_check_skipped: bool,
 ) -> None:
     manifest = {
         "package": "ophanix-tool-gateway-sdk",
         "version": _project_version(package_root),
         "dependency_audit_required": dependency_audit_required,
+        "sbom_provenance": {
+            "included": False,
+            "requirement": "Generate SBOM and signed provenance in the publish workflow before external release.",
+        },
         "strict_git": strict_git,
+        "twine_check_skipped": twine_check_skipped,
         "artifacts": [
             {
                 "filename": artifact.name,

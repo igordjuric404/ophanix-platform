@@ -46,6 +46,8 @@ class ToolGatewayResponsePhase1Tests(unittest.TestCase):
         self.assertEqual(policy["max_response_bytes"], 32768)
         self.assertEqual(policy["expose_to_agent"], 1)
         self.assertEqual(policy["strict_output_validation"], 1)
+        self.assertIn("email", policy["redaction_rules_json"])
+        self.assertIn("ssn", policy["redaction_rules_json"])
 
     def test_unit_invalid_max_response_size_is_rejected(self) -> None:
         with self.assertRaises(ValidationError):

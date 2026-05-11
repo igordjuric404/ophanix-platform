@@ -64,6 +64,9 @@ with OphanixToolGatewayClient(
     token_provider=EnvironmentTokenProvider("OPHANIX_GATEWAY_TOKEN"),
 ) as client:
     try:
+        compatibility = client.check_compatibility()
+        if not compatibility.compatible:
+            raise RuntimeError("SDK and gateway contract versions do not match")
         tools = client.list_all_tools()
         result = client.call_tool("claims.lookup", {"claim_id": "claim_123"})
     except ToolDeniedError as exc:
@@ -80,12 +83,22 @@ with OphanixToolGatewayClient(
 Gateway tokens are issued for a specific agent, organization, environment, scope, and tool resource. Keep them in environment variables or a runtime secret store rather than application source. Production tokens must come from the Product Platform credential issuance flow or an equivalent cryptographically random issuer; local fixture tokens are not suitable for production. Use HTTPS for non-local SDK gateway URLs. Plain HTTP SDK gateway URLs are accepted for localhost development only; non-local HTTP requires the explicit `allow_insecure_http=True` opt-in.
 
 `list_tools()`, `list_all_tools()`, and `get_tool()` use the gateway-authenticated discovery route and only return active tools callable by the configured agent credential. Discovery requests retry transient gateway failures by default; tool invocations are not retried automatically because the server contract does not yet provide idempotency keys for mutating calls.
+`check_compatibility()` probes `/api/v1/gateway/capabilities`; SDK `0.1.x`
+expects gateway contract `tool-gateway.v1`. `get_tool()` reports
+`tool_not_visible` when a definition is not returned by discovery because the
+SDK cannot distinguish missing tools from authorization-hidden tools.
 
 Use `AsyncOphanixToolGatewayClient` in async agent runtimes; it mirrors the synchronous API with `await client.call_tool(...)`, `await client.list_tools(...)`, `await client.list_all_tools(...)`, and `await client.get_tool(...)`.
 
 The SDK validates payloads as strict JSON objects, rejects non-finite numbers and non-string object keys, rejects `Bearer `-prefixed raw token values before sending requests, applies a configurable `max_payload_bytes` cap, adds an SDK `User-Agent`, redacts sensitive fields from exception diagnostic bodies, partitions opt-in discovery caches by process-local HMAC credential fingerprint, expires cached discovery with `cache_ttl_seconds`, and keeps static tokens out of generated `repr()` output. Optional SDK telemetry hooks receive immutable token-free metadata only and can be configured to fail closed with `raise_event_hook_errors=True`.
 
-Server-side Tool Gateway runtime paths enforce bearer authentication, an explicit runtime-route allowlist, a configurable ASGI request body cap (`OPHANIX_TOOL_GATEWAY_MAX_BODY_BYTES`, default `1000000`), a configurable upstream response cap (`OPHANIX_TOOL_GATEWAY_MAX_UPSTREAM_RESPONSE_BYTES`, default `1000000`), and a bounded in-process rate limit (`OPHANIX_TOOL_GATEWAY_RATE_LIMIT_MAX_REQUESTS` per `OPHANIX_TOOL_GATEWAY_RATE_LIMIT_WINDOW_SECONDS`, capped by `OPHANIX_TOOL_GATEWAY_RATE_LIMIT_MAX_KEYS`). Gateway `429` responses include `Retry-After`. The default HTTPX executor enforces the upstream response cap while streaming bytes and before JSON parsing. Custom executors or injected HTTP clients must provide equivalent streaming limits. Production deployments should still enforce global edge rate limits and request-size limits at the ingress layer because the built-in limiter is process-local.
+Server-side Tool Gateway runtime paths enforce bearer authentication, an explicit runtime-route allowlist, a configurable ASGI request body cap (`OPHANIX_TOOL_GATEWAY_MAX_BODY_BYTES`, default `1000000`), a configurable upstream response cap (`OPHANIX_TOOL_GATEWAY_MAX_UPSTREAM_RESPONSE_BYTES`, default `1000000`), and a bounded in-process rate limit (`OPHANIX_TOOL_GATEWAY_RATE_LIMIT_MAX_REQUESTS` per `OPHANIX_TOOL_GATEWAY_RATE_LIMIT_WINDOW_SECONDS`, capped by `OPHANIX_TOOL_GATEWAY_RATE_LIMIT_MAX_KEYS`). Previously unseen authorization values that exceed the key budget fall into a per-client overflow bucket so attackers cannot evade limits by rotating token strings. Gateway `429` responses include `Retry-After`. The default HTTPX executor enforces the upstream response cap while streaming bytes and before JSON parsing. Custom executors or injected HTTP clients must provide equivalent streaming limits. Production deployments should still enforce global edge rate limits and request-size limits at the ingress layer because the built-in limiter is process-local.
+
+Denied Tool Gateway invocations return a coarse agent-facing
+`tool_call_denied` reason while decision records and runtime audit records
+retain the detailed internal reason code for operators. Failed upstream
+responses do not expose failed execution envelopes back to agents; inspect
+runtime actions for upstream status and safe summaries.
 
 Upstream targets support `auth_mode="none"`, `auth_mode="bearer"`, and `auth_mode="api_key"`. Bearer and API-key targets must use `auth_config_json.secret_ref` to point at an operator-managed secret-provider entry; raw upstream secrets are not accepted in target configuration and are not returned by target read APIs. Local/test environments default to the in-memory demo provider. Production must set `OPHANIX_SECRET_MANAGER_REF=env` or `OPHANIX_SECRET_MANAGER_REF=env:<ENV_VAR_PREFIX>` and inject upstream secrets as environment variables. For example, `secret_ref="secref_partner_claims"` with the default provider reads `OPHANIX_SECRET_SECREF_PARTNER_CLAIMS`; `secret_ref="env:PARTNER_TOKEN"` reads `PARTNER_TOKEN` exactly. API-key targets may set `auth_config_json.header_name` and a single-token `auth_config_json.header_prefix`; the default header is `X-API-Key`. OAuth and dynamic per-tenant upstream auth remain future product work.
 
@@ -97,9 +110,16 @@ Production app startup fails when `OPHANIX_SESSION_SECRET` is left at the develo
 
 Gateway credential token hashes use `OPHANIX_GATEWAY_TOKEN_HASH_PEPPER` when set. Operators can label the current pepper with `OPHANIX_GATEWAY_TOKEN_HASH_PEPPER_ID`, accept old peppers during rotation with `OPHANIX_GATEWAY_TOKEN_HASH_PREVIOUS_PEPPERS` entries like `old-key:old-pepper`, and temporarily allow legacy unpeppered hashes with `OPHANIX_GATEWAY_TOKEN_HASH_ACCEPT_LEGACY=true` only outside production. Production startup rejects legacy hash acceptance.
 
-The product runtime remains SQLite-backed in this worktree. That is acceptable for local demos and focused SDK tests, but broad production adoption still requires an externally managed production database layer, backup/restore procedure, and multi-worker/load validation.
+The product runtime remains SQLite-backed in this worktree. That is acceptable for local demos, internal SDK evaluation, and focused MVP tests with one process and controlled traffic, but broad production adoption still requires an externally managed production database layer, backup/restore procedure, distributed rate limiting or edge enforcement, and multi-worker/load validation.
 
 Direct HTTP examples and deterministic fixture tokens are local-only demonstrations. Production agents should use the SDK so token handling, payload validation, timeouts, error redaction, discovery pagination, and typed errors stay consistent.
+
+MVP support boundary: this package can support controlled internal or design
+partner SDK pilots where operators own tokens, upstream allowlists, ingress
+limits, and incident response. It is not an enterprise production certification.
+Durable idempotency, cursor pagination, distributed rate limiting, upstream
+circuit breakers, signed provenance, and SBOM publication remain required before
+serious production pilots.
 
 The standalone package README in `../ophanix-tool-gateway-sdk/README.md` contains the fuller API reference, troubleshooting guide, retry options, and concurrency notes.
 

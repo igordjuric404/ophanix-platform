@@ -2,15 +2,11 @@
   "request_id": "req-demo-direct-http-denied",
   "correlation_id": "demo-direct-http-denied",
   "tool_name": "claims.lookup",
-  "decision": {
-    "id": "decision-demo-direct-http-denied",
-    "decision": "deny",
-    "reason_code": "permission_missing"
-  },
-  "reason_code": "permission_missing",
+  "decision": null,
+  "reason_code": "tool_call_denied",
   "result": null,
   "error": {
-    "code": "permission_missing",
-    "message": "Agent is not permitted to call this tool."
+    "code": "tool_call_denied",
+    "message": "Tool call denied by gateway policy."
   }
 }

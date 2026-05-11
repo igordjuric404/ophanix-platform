@@ -180,8 +180,10 @@ class ToolGatewayInvocationPhase3Tests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403)
         payload = response.json()
-        self.assertEqual(payload["reason_code"], "permission_missing")
-        self.assertEqual(payload["error"]["code"], "permission_missing")
+        self.assertEqual(payload["reason_code"], "tool_call_denied")
+        self.assertEqual(payload["error"]["code"], "tool_call_denied")
+        self.assertEqual(payload["error"]["message"], "Tool call denied by gateway policy.")
+        self.assertIsNone(payload["decision"])
 
     def test_integration_decision_record_created_for_allowed_and_denied_calls(self) -> None:
         self._grant_permission()

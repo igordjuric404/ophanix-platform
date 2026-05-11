@@ -14,3 +14,7 @@
   response-size caps apply before body materialization.
 - Documents the beta compatibility matrix, `list_tools(status=...)`
   deprecation, and standalone `ophanix_tool_gateway` import path.
+- Adds `ToolGatewayClientConfig`, `check_compatibility()`, token length
+  validation, denial-safe `tool_not_visible` lookup errors, elapsed telemetry,
+  discovery retry telemetry, PII-aware diagnostic redaction, and an async worker
+  example for MVP pilots.

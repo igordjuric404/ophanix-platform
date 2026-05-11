@@ -8,6 +8,10 @@ credential material. Production agents should use the Python SDK unless they
 have their own equivalent payload validation, timeout, retry, and redaction
 controls.
 
+Direct HTTP callers must implement their own token refresh, payload validation,
+timeouts, response-size caps, retry policy, redaction, compatibility probing,
+and typed error handling before using this pattern outside a local demo.
+
 ```bash
 export OPHANIX_BASE_URL="http://127.0.0.1:8000"
 export OPHANIX_TOOL_GATEWAY_ALLOWED_TOKEN="ophanix-local-only-tool-gateway-allowed-token"
@@ -39,6 +43,17 @@ curl -sS -X POST "$OPHANIX_BASE_URL/api/v1/tools/claims.lookup/invoke" \
 ```
 
 Expected shape: see `expected-denied-response.json`.
+
+Denied responses intentionally expose only the coarse `tool_call_denied` code to
+the agent. Operators can inspect policy decision and runtime action records for
+the detailed internal reason.
+
+Compatibility probe:
+
+```bash
+curl -sS "$OPHANIX_BASE_URL/api/v1/gateway/capabilities" \
+  -H "Authorization: Bearer $OPHANIX_TOOL_GATEWAY_ALLOWED_TOKEN"
+```
 
 Minimal Python `requests` usage:
 

@@ -20,6 +20,11 @@ that channel first and reference the GitHub advisory once it is created. Do not
 open a public issue for unpatched credential, authentication, SSRF, release, or
 data-exposure bugs.
 
+MVP escalation owner: route SDK and Tool Gateway security reports to the
+Product Platform security maintainer/on-call for this repository. If an internal
+owner alias is unavailable, use GitHub private vulnerability reporting and tag
+the issue `tool-gateway-sdk` after triage.
+
 The expected response target is:
 
 - Initial acknowledgement: 2 business days.

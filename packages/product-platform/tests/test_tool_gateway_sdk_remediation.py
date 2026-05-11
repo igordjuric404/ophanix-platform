@@ -222,7 +222,20 @@ class ToolGatewaySdkRemediationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403, response.text)
         payload = response.json()
-        self.assertEqual(payload["reason_code"], "scope_insufficient")
+        self.assertEqual(payload["reason_code"], "tool_call_denied")
+        self.assertEqual(payload["error"]["code"], "tool_call_denied")
+        self.assertIsNone(payload["decision"])
+
+    def test_gateway_capabilities_requires_gateway_authentication_and_returns_contract(self) -> None:
+        unauthenticated = self.client.get("/api/v1/gateway/capabilities")
+        authenticated = self.client.get(
+            "/api/v1/gateway/capabilities",
+            headers=self._headers(),
+        )
+
+        self.assertEqual(unauthenticated.status_code, 401)
+        self.assertEqual(authenticated.status_code, 200, authenticated.text)
+        self.assertEqual(authenticated.json()["gateway_contract_version"], "tool-gateway.v1")
 
 
 if __name__ == "__main__":

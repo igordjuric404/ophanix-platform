@@ -218,6 +218,31 @@ class ToolGatewayDecisionPhase3Tests(unittest.TestCase):
         self.assertEqual(persisted.matched_policy_id, "policy_persisted")
         self.assertEqual(persisted.decision, "allow")
 
+    def test_integration_payload_summary_redacts_common_pii_keys(self) -> None:
+        hook = AllowHook()
+        with self.database.transaction():
+            self._seed_allowed_fixture()
+            decision = ToolPolicyDecisionService(
+                self.connection,
+                DEMO_ORG_ID,
+                DEMO_ENV_ID,
+                policy_hook=hook,
+            ).evaluate_tool_call(
+                self._principal(),
+                "claims.lookup",
+                {
+                    "claim_id": "claim_123",
+                    "customer_email": "patient@example.test",
+                    "ssn": "123-45-6789",
+                },
+                request_id="req-policy-pii",
+                correlation_id="corr-policy-pii",
+            )
+
+        self.assertEqual(decision.payload_summary["customer_email"], "[redacted]")
+        self.assertEqual(decision.payload_summary["ssn"], "[redacted]")
+        self.assertEqual(hook.contexts[0].payload_summary["customer_email"], "[redacted]")
+
 
 if __name__ == "__main__":
     unittest.main()

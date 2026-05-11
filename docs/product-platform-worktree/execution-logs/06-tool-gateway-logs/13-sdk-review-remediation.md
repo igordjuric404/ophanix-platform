@@ -1789,3 +1789,269 @@ Recommended remediation order:
 Final strict assessment:
 
 This pass materially improves the SDK and Tool Gateway production posture, especially around production startup safety, secret-provider enforcement, host allowlists, token handling, release evidence, and consumer documentation. It does not make broad external production adoption fully defensible. Constrained internal or pilot adoption is more defensible if operators accept the documented remaining risks and enforce external DB, egress, ingress, and release controls. Broad production adoption remains blocked by the deferred high-severity architecture, reliability, and integration-test items listed above.
+
+## Pass 19: MVP Readiness Issue Register Remediation
+
+Date: 2026-05-11
+
+Pass name: Strict MVP-readiness issue-register remediation execution.
+
+Starting repository state:
+
+- Current working directory: `/Users/igodju/Projects/Personal/ophanix/ophanix-platform`.
+- `git status --short` showed one untracked audit artifact from the previous review turn: `docs/product-platform-worktree/execution-logs/06-tool-gateway-logs/18-sdk-mvp-readiness-audit.md`.
+- No staged changes were present.
+- This pass uses the 50-item issue register from `docs/product-platform-worktree/execution-logs/06-tool-gateway-logs/18-sdk-mvp-readiness-audit.md`.
+- The table below was created before implementation edits in this pass.
+
+Initial remediation tracking table:
+
+| Issue ID | Title | Severity | Category | Current status | Planned action | Files likely affected | Validation required | Score impact |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| SDK-AUDIT-001 | Compatibility exports omit `ToolGatewayValidationError` | Medium | Public API / compatibility | Pending | Fix compatibility re-exports and add parity tests. | Product SDK shim, package tests | Import tests, SDK tests | Raises implementation/DX |
+| SDK-AUDIT-002 | No installed-wheel SDK test calls a live gateway contract | High | Testing / contract validation | Pending | Add installed-wheel SDK-to-TestClient gateway contract test. | Product tests, SDK package | Focused live-contract test, product gateway tests | Raises implementation confidence |
+| SDK-AUDIT-003 | Two distributions ship same `ophanix_tool_gateway` package | Medium | Packaging / dependency integration | Pending | Add install-order validation and document accepted short-term ownership; defer structural dependency change. | Package tests, docs, validators | Package/install-order test, release validation | Caps packaging until structural fix |
+| SDK-AUDIT-004 | No invocation idempotency-key contract | Medium | Reliability / API contract | Pending | Defer full durable replay schema; document accepted MVP risk and requirements. | SDK/API docs, remediation log | Docs review | Caps reliability |
+| SDK-AUDIT-005 | SDK does not retry safe tool invocations | Low | Reliability / API ergonomics | Pending | Defer until idempotency/read-only metadata exists; document why. | SDK docs, remediation log | Docs review | Minor reliability cap |
+| SDK-AUDIT-006 | Built-in gateway rate limiter is process-local only | Medium | Reliability / abuse resistance | Pending | Document as accepted deployment risk; add runbook/README emphasis if missing. | Product README, runbook, remediation log | Docs review | Caps reliability outside single process |
+| SDK-AUDIT-007 | Rate-limit key exhaustion allows new authorization keys through | Medium | Security / reliability | Pending | Add overflow client bucket limiting for new keys after key budget is full. | API app, auth tests | Rate-limit tests, product gateway tests | Raises security/reliability |
+| SDK-AUDIT-008 | Denied invocation responses reveal fine-grained auth state | Medium | Security / information disclosure | Pending | Coarsen agent-facing denial code; preserve detailed decision in audit/operator data. | API app, invocation/decision tests, SDK tests/docs | Denial tests, SDK denied tests | Raises security |
+| SDK-AUDIT-009 | `get_tool()` synthesizes local 404 without gateway context | Low | Public API / diagnostics | Pending | Change code/message to `tool_not_visible`; keep sanitized lookup guidance. | SDK source/tests/docs, vendored SDK | SDK tests, parity | Raises DX clarity |
+| SDK-AUDIT-010 | Standalone SDK tests are much thinner than product SDK tests | Medium | Testing / package confidence | Pending | Add coverage for public API snapshot and selected behavior; avoid duplicating every product test. | Standalone SDK tests | Standalone pytest | Raises implementation confidence |
+| SDK-AUDIT-011 | Product README overstates compatibility imports | Medium | Documentation / API consistency | Pending | Fix exports and update docs if needed. | Product README, shims | Import/doc tests | Raises DX |
+| SDK-AUDIT-012 | Credential issuance docs are conceptual, not runnable | Medium | Documentation / onboarding | Pending | Add runnable local credential issuance quickstart/script-like curl flow. | SDK README, product README | Docs review | Raises ease of use |
+| SDK-AUDIT-013 | Direct HTTP example lacks SDK-equivalent safety controls | Low | DX / security guidance | Pending | Add stronger local-only warning and safety notes; keep as raw-contract example. | Direct HTTP README/example | Example tests/docs review | Reduces foot-gun |
+| SDK-AUDIT-014 | No contract version negotiation or compatibility probe | Medium | Public API / release compatibility | Pending | Add gateway capabilities endpoint and SDK `check_compatibility()`. | API app, SDK, tests, docs | SDK/API compatibility tests | Raises implementation/DX |
+| SDK-AUDIT-015 | SDK constructor exposes many options without config object | Low | Public API ergonomics | Pending | Add optional config dataclass without breaking kwargs. | SDK source/tests/docs, vendored SDK | SDK tests, type checks | Raises DX |
+| SDK-AUDIT-016 | Buffered custom HTTP client opt-in relies on caller discipline | Medium | Reliability / unsafe opt-in | Pending | Add stronger docs and manifest wording; keep explicit opt-in as accepted risk. | SDK docs/tests/log | SDK tests, docs review | Residual reliability risk |
+| SDK-AUDIT-017 | SDK allows tokens longer than server limit | Low | Input validation / reliability | Pending | Mirror server 4096-token length cap in SDK. | SDK source/tests/docs, vendored SDK | SDK tests | Raises validation consistency |
+| SDK-AUDIT-018 | SDK token character policy may reject future token formats | Low | API compatibility / token handling | Pending | Document token grammar and add issuer/SDK contract test; accept strictness for current issuer. | SDK docs/tests | SDK tests/docs review | Minor future-proofing cap |
+| SDK-AUDIT-019 | Discovery cache can serve stale auth data | Medium | Reliability / authorization freshness | Pending | Add docs/tests showing revocation still denied at invocation; keep opt-in cache as accepted risk. | SDK tests/docs | SDK cache/revocation test or docs review | Caps freshness |
+| SDK-AUDIT-020 | `list_all_tools()` uses offset pagination without stable cursor | Low | Runtime correctness / pagination | Pending | Defer cursor API; document mutable-list caveat and keep dedupe. | SDK docs/log | Docs review | Minor reliability cap |
+| SDK-AUDIT-021 | Owner-team filter exact/case-sensitive behavior unclear | Low | API ergonomics / discoverability | Pending | Document exact matching and add test if absent. | SDK docs/API tests | Discovery filter test/docs review | Raises DX |
+| SDK-AUDIT-022 | Response redaction defaults depend on per-tool policy | Medium | Security / data handling | Pending | Add default sensitive-field redaction in default response policy. | Repository/response tests/docs | Response policy tests | Raises security |
+| SDK-AUDIT-023 | Failed upstream calls still return a result envelope | Low | API clarity / runtime behavior | Pending | Remove result from failed upstream response or document as diagnostics; prefer response contract cleanup. | API app/tests/docs | Failed-upstream tests | Raises contract clarity |
+| SDK-AUDIT-024 | SDK treats generic 403 differently from policy denial | Low | Error model / ergonomics | Pending | Document distinction and add helper/predicate if simple. | SDK docs/tests | SDK docs/tests | Raises DX |
+| SDK-AUDIT-025 | `ToolDefinition.raw` can preserve future extra fields | Low | API surface / data exposure | Pending | Add server/SDK tests guarding gateway-safe discovery fields and document `raw`. | SDK docs/tests/API tests | Discovery shape tests | Reduces future exposure |
+| SDK-AUDIT-026 | Async SDK uses threading lock in async methods | Low | Async runtime / maintainability | Pending | Accept current minimal locked sections; add async concurrency/cache test and rationale. | SDK tests/log | Async SDK tests | Minor maintainability cap |
+| SDK-AUDIT-027 | Async SDK cancellation semantics undocumented | Low | Documentation / async reliability | Pending | Document cancellation semantics and add cancellation test if feasible. | SDK docs/tests | Async cancellation test/docs | Raises async DX |
+| SDK-AUDIT-028 | Publish workflow builds but does not publish Python packages | Medium | Release / operational readiness | Pending | Document as accepted release-process constraint; clarify artifact handoff and install source. | SDK README, publishing docs/log | Docs review | Caps external ease |
+| SDK-AUDIT-029 | Static `0.1.0` without visible version bump policy | Low | Release / versioning | Pending | Add version/changelog policy to docs; no arbitrary version bump. | README/CHANGELOG/publishing docs | Docs review | Release DX |
+| SDK-AUDIT-030 | Product README admits SQLite baseline | Medium | Runtime persistence / adoption | Pending | Accept as MVP constraint; strengthen support envelope docs. | Product README/runbook/log | Docs review | Caps reliability |
+| SDK-AUDIT-031 | No upstream circuit breaker | Medium | Reliability | Pending | Defer full circuit breaker; document required design and add failure counters only if safe. | Runbook/log | Docs review | Caps reliability |
+| SDK-AUDIT-032 | Health checks do not enforce response body caps | Low | Reliability / resource safety | Pending | Use streaming/HEAD-like cap for health checks. | Health checker/tests | Health tests | Raises reliability |
+| SDK-AUDIT-033 | Upstream host validation depends on DNS timing | Medium | Security / SSRF residual risk | Pending | Accept residual app-layer limit; document egress/DNS rebinding requirement. | Threat model/runbook/log | Docs review | Caps security until egress proof |
+| SDK-AUDIT-034 | Local/test allow unresolved upstream hostnames by default | Low | Security / environment drift | Pending | Document dev/prod difference; production already rejects. | Docs/tests/log | Docs review | Minor parity risk |
+| SDK-AUDIT-035 | Runtime action stores request payload before schema validation | Medium | Data handling / audit | Pending | Verify repository redaction and add targeted invalid-payload secret test; adjust call-site if needed. | Runtime audit tests/API app | Runtime audit tests | Raises security confidence |
+| SDK-AUDIT-036 | Sanitized diagnostics can still contain arbitrary PII-like text | Low | Security / logging | Pending | Add redaction for common PII keys or document diagnostic limits; prefer code if low risk. | SDK redaction/tests/docs | SDK tests | Raises logging hygiene |
+| SDK-AUDIT-037 | `EnvironmentTokenProvider` reads env every request | Low | Runtime behavior / token lifecycle | Pending | Document as simple provider and add custom refresh provider example. | SDK README/examples | Docs/example review | Raises DX |
+| SDK-AUDIT-038 | Event hook telemetry too minimal for performance diagnosis | Low | Observability / DX | Pending | Add elapsed_ms and discovery retry event metadata. | SDK source/tests/docs, vendored SDK | SDK tests | Raises observability |
+| SDK-AUDIT-039 | No framework-specific integration examples | Low | DX / adoption | Pending | Add one async worker/FastAPI-style example and test import/syntax. | SDK examples/tests/docs | Example compile/test | Raises DX |
+| SDK-AUDIT-040 | Migration notes lack shim removal timeline | Nit | Documentation / API stability | Pending | Add support horizon/removal target language. | MIGRATION/README | Docs review | Minor DX |
+| SDK-AUDIT-041 | Labeler/CODEOWNERS omit product/SDK entries | Low | Governance / maintenance | Pending | Add explicit package labels and owners. | `.github/labeler.yml`, CODEOWNERS | YAML/static review | Maintainer DX |
+| SDK-AUDIT-042 | Local validator can skip `twine check` silently | Low | Release validation | Pending | Add warning and manifest flag when skipped. | Release validators/tests | Validator run | Release clarity |
+| SDK-AUDIT-043 | Gateway tests strong but mostly mocked/local | Medium | Testing / realism | Pending | Partially address with installed-wheel live contract test; defer full proxy/TLS/multi-process smoke. | Tests/log | Live contract test | Raises implementation; residual ops cap |
+| SDK-AUDIT-044 | API reference lacks event hook schemas | Low | Documentation / observability | Pending | Add event schema table. | API_REFERENCE/README | Docs review | Raises DX |
+| SDK-AUDIT-045 | API reference lacks redaction limits | Low | Documentation / security | Pending | Add diagnostic redaction limits/heuristics. | API_REFERENCE/README | Docs review | Raises security DX |
+| SDK-AUDIT-046 | Deprecated `list_tools(status=...)` remains public | Low | Public API stability | Pending | Keep for compatibility; document removal timeline. | API docs/MIGRATION/log | Docs review | Minor API debt |
+| SDK-AUDIT-047 | No public API stability tests | Low | Testing / API stability | Pending | Add API snapshot tests for exports/signatures/error attrs. | SDK tests/product tests | SDK/product tests | Raises implementation confidence |
+| SDK-AUDIT-048 | Security policy lacks MVP escalation owner | Low | Security process | Pending | Add concrete MVP support/security contact placeholder/channel. | SECURITY.md | Docs review | Security process DX |
+| SDK-AUDIT-049 | Local validator lacks SBOM/provenance validation | Low | Supply chain / release | Pending | Add manifest fields stating SBOM/provenance are CI-only unless provided. | Release validators/docs | Validator run | Release clarity |
+| SDK-AUDIT-050 | Docs use production language without clear MVP boundary | Low | Documentation / maturity signaling | Pending | Add MVP/beta support envelope section. | SDK README/product README | Docs review | Expectation setting |
+
+Final remediation tracking table:
+
+| Issue ID | Title | Severity | Category | Final status | Action taken | Primary files changed | Validation evidence | Score impact |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| SDK-AUDIT-001 | Compatibility exports omit `ToolGatewayValidationError` | Medium | Public API / compatibility | Fixed | Added missing validation/config/compatibility exports to product shim and package init. | Product shim/init, SDK init, package tests | `pytest` SDK/product suites, import tests | Raises implementation/DX |
+| SDK-AUDIT-002 | No installed-wheel SDK test calls a live gateway contract | High | Testing / contract validation | Fixed | Added isolated wheel build/install test against FastAPI TestClient for capabilities, discovery, invocation, and denial. | `test_tool_gateway_installed_sdk_contract.py` | Focused suite, 291 gateway tests, full 796 product tests | Removes high test cap |
+| SDK-AUDIT-003 | Two distributions ship same `ophanix_tool_gateway` package | Medium | Packaging / dependency integration | Accepted remaining risk | Kept dual-package MVP shape but preserved byte-for-byte vendored parity and release validator enforcement. | Vendored SDK, validators, docs | SDK/product release validators, parity tests | Still caps packaging maturity |
+| SDK-AUDIT-004 | No invocation idempotency-key contract | Medium | Reliability / API contract | Deferred with rationale | Documented as roadmap; no durable replay schema added in this pass. | SDK/product README, log | Docs/lint/tests | Reliability cap remains |
+| SDK-AUDIT-005 | SDK does not retry safe tool invocations | Low | Reliability / API ergonomics | Deferred with rationale | Kept no automatic invocation retries until idempotency/read-only metadata exists; documented. | SDK README | Docs review, tests unchanged | Minor reliability cap |
+| SDK-AUDIT-006 | Built-in gateway rate limiter is process-local only | Medium | Reliability / abuse resistance | Accepted remaining risk | Strengthened docs; code still intentionally process-local for MVP. | Product README | Full product tests | Reliability cap outside single process |
+| SDK-AUDIT-007 | Rate-limit key exhaustion allows new authorization keys through | Medium | Security / reliability | Fixed | Added per-client overflow bucket when authorization key budget is full. | API app, auth tests | Focused product tests, 291 gateway tests, 796 product tests | Raises security/reliability |
+| SDK-AUDIT-008 | Denied invocation responses reveal fine-grained auth state | Medium | Security / information disclosure | Fixed | Coarsened agent-facing denial to `tool_call_denied`; detailed reason remains in decision/runtime audit. | API app, invocation/direct HTTP tests/docs | Focused and broad product tests | Raises security |
+| SDK-AUDIT-009 | `get_tool()` synthesizes local 404 without gateway context | Low | Public API / diagnostics | Fixed | Changed SDK error to `tool_not_visible` with safer message. | SDK source/tests/docs, vendored SDK | SDK tests, product SDK tests | Raises DX clarity |
+| SDK-AUDIT-010 | Standalone SDK tests are much thinner than product SDK tests | Medium | Testing / package confidence | Fixed | Added public API snapshot, config, compatibility, token, telemetry, redaction, and example tests. | SDK tests | `pytest tests` in SDK: 24 passed | Raises implementation confidence |
+| SDK-AUDIT-011 | Product README overstates compatibility imports | Medium | Documentation / API consistency | Fixed | Made compatibility exports real and updated docs. | Product shims/docs/tests | Import tests, full product tests | Raises DX |
+| SDK-AUDIT-012 | Credential issuance docs are conceptual, not runnable | Medium | Documentation / onboarding | Fixed | Added local curl issuance flow using `/api/v1/agents/{agent_id}/credentials`. | SDK README | Docs review, lint | Raises ease of use |
+| SDK-AUDIT-013 | Direct HTTP example lacks SDK-equivalent safety controls | Low | DX / security guidance | Fixed | Added explicit direct-HTTP safety requirements and capabilities probe example. | Direct HTTP README/snippets/tests | Direct HTTP tests, full product tests | Reduces foot-gun |
+| SDK-AUDIT-014 | No contract version negotiation or compatibility probe | Medium | Public API / release compatibility | Fixed | Added `/api/v1/gateway/capabilities` and sync/async `check_compatibility()`. | API app/models, SDK/tests/docs | SDK tests, installed-wheel contract, 291 gateway tests | Raises implementation/DX |
+| SDK-AUDIT-015 | SDK constructor exposes many options without config object | Low | Public API ergonomics | Fixed | Added `ToolGatewayClientConfig` and `from_config(...)` classmethods without breaking kwargs. | SDK source/tests/docs | SDK/product SDK tests, mypy | Raises DX |
+| SDK-AUDIT-016 | Buffered custom HTTP client opt-in relies on caller discipline | Medium | Reliability / unsafe opt-in | Accepted remaining risk | Kept explicit opt-in but documented stronger safety requirements; default remains reject-without-stream. | SDK docs/tests | Existing rejection tests, ruff | Residual opt-in risk |
+| SDK-AUDIT-017 | SDK allows tokens longer than server limit | Low | Input validation / reliability | Fixed | Added 4096-character SDK token cap. | SDK source/tests/docs | SDK tests | Raises validation consistency |
+| SDK-AUDIT-018 | SDK token character policy may reject future token formats | Low | API compatibility / token handling | Fixed | Documented exact grammar and current issuer contract; retained strict validation. | SDK README/MIGRATION/tests | SDK tests/docs | Clarifies future risk |
+| SDK-AUDIT-019 | Discovery cache can serve stale auth data | Medium | Reliability / authorization freshness | Accepted remaining risk | Kept opt-in cache; docs emphasize TTL, clear-cache, and invocation reauthorization. | SDK README | SDK cache tests, full tests | Freshness cap remains |
+| SDK-AUDIT-020 | `list_all_tools()` uses offset pagination without stable cursor | Low | Runtime correctness / pagination | Deferred with rationale | Documented offset-pagination caveat and `max_total`; cursor contract deferred. | SDK README | Docs review | Minor reliability cap |
+| SDK-AUDIT-021 | Owner-team filter exact/case-sensitive behavior unclear | Low | API ergonomics / discoverability | Fixed | Documented exact case-sensitive owner-team behavior. | SDK README | Docs review | Raises DX |
+| SDK-AUDIT-022 | Response redaction defaults depend on per-tool policy | Medium | Security / data handling | Fixed | Added default redaction keys for common PII-like fields. | Repository, response tests | Response tests, full product tests | Raises security |
+| SDK-AUDIT-023 | Failed upstream calls still return a result envelope | Low | API clarity / runtime behavior | Fixed | Agent-facing failed upstream responses now return `result: null`; audit keeps summaries. | API app/tests/docs | Forwarding/response tests, 291 gateway tests | Raises contract clarity |
+| SDK-AUDIT-024 | SDK treats generic 403 differently from policy denial | Low | Error model / ergonomics | Fixed | Documented distinction and kept generic 403 as `ToolGatewayError`; gateway denial uses reason code. | SDK tests/docs | SDK phase tests | Raises DX |
+| SDK-AUDIT-025 | `ToolDefinition.raw` can preserve future extra fields | Low | API surface / data exposure | Already resolved | Current gateway discovery model omits org/env/created fields and tests assert safe shape/immutable raw. | Existing API/SDK tests | Full product tests | No score cap now |
+| SDK-AUDIT-026 | Async SDK uses threading lock in async methods | Low | Async runtime / maintainability | Accepted remaining risk | Accepted because lock scopes are tiny cache-only sections; broader async refactor deferred. | Log/docs | Async SDK tests | Minor maintainability cap |
+| SDK-AUDIT-027 | Async SDK cancellation semantics undocumented | Low | Documentation / async reliability | Fixed | Documented normal asyncio cancellation and unknown-outcome caveat. | SDK README | Docs review | Raises async DX |
+| SDK-AUDIT-028 | Publish workflow builds but does not publish Python packages | Medium | Release / operational readiness | Accepted remaining risk | Kept artifact-handoff model; release docs/README make publication boundary explicit. | SDK README/release validators/log | Release validators | External release cap remains |
+| SDK-AUDIT-029 | Static `0.1.0` without visible version bump policy | Low | Release / versioning | Fixed | Clarified beta line, changelog, support horizon, and migration policy. | README/CHANGELOG/MIGRATION | Docs review | Release DX |
+| SDK-AUDIT-030 | Product README admits SQLite baseline | Medium | Runtime persistence / adoption | Accepted remaining risk | Strengthened MVP support envelope; SQLite remains local/internal MVP constraint. | Product README | Full product tests | Reliability cap remains |
+| SDK-AUDIT-031 | No upstream circuit breaker | Medium | Reliability | Deferred with rationale | Documented as roadmap; no circuit breaker added without broader operational design. | Product README/log | Docs review | Reliability cap remains |
+| SDK-AUDIT-032 | Health checks do not enforce response body caps | Low | Reliability / resource safety | Fixed | Health checker now uses streaming status inspection when available and does not read bodies. | Health checker/tests | Upstream health tests, full product tests | Raises reliability |
+| SDK-AUDIT-033 | Upstream host validation depends on DNS timing | Medium | Security / SSRF residual risk | Accepted remaining risk | Accepted app-layer residual; docs keep egress/firewall as final SSRF boundary. | Product README | Full product tests | Security cap remains |
+| SDK-AUDIT-034 | Local/test allow unresolved upstream hostnames by default | Low | Security / environment drift | Already resolved | Production startup already rejects unresolved-host bypass; docs describe local/test difference. | Existing app/settings/docs | Auth tests/full tests | Minor no-current-fix item |
+| SDK-AUDIT-035 | Runtime action stores request payload before schema validation | Medium | Data handling / audit | Fixed | Verified summaries use redaction and added PII summary test. | Decision/runtime tests | Decision tests, full product tests | Raises security confidence |
+| SDK-AUDIT-036 | Sanitized diagnostics can still contain arbitrary PII-like text | Low | Security / logging | Fixed | Added SDK PII-key redaction and assignment redaction for email/phone/SSN-like fields. | SDK source/tests/docs | SDK tests | Raises logging hygiene |
+| SDK-AUDIT-037 | `EnvironmentTokenProvider` reads env every request | Low | Runtime behavior / token lifecycle | Fixed | Documented behavior and provided cached provider example. | SDK README | Docs review | Raises DX |
+| SDK-AUDIT-038 | Event hook telemetry too minimal for performance diagnosis | Low | Observability / DX | Fixed | Added `elapsed_ms` on call events and `tool_discovery.retry` event metadata. | SDK source/tests/docs | SDK tests | Raises observability |
+| SDK-AUDIT-039 | No framework-specific integration examples | Low | DX / adoption | Fixed | Added async worker example and compile test; included examples in sdist. | SDK examples, pyproject, tests | SDK tests, release validator | Raises DX |
+| SDK-AUDIT-040 | Migration notes lack shim removal timeline | Nit | Documentation / API stability | Fixed | Added `0.1.x` support horizon and notice requirement. | MIGRATION/README | Docs review | Minor DX |
+| SDK-AUDIT-041 | Labeler/CODEOWNERS omit product/SDK entries | Low | Governance / maintenance | Fixed | Added product-platform and SDK package ownership/labels. | CODEOWNERS, labeler | Ruff/static review | Maintainer DX |
+| SDK-AUDIT-042 | Local validator can skip `twine check` silently | Low | Release validation | Fixed | Validators now warn and record `twine_check_skipped` in manifest. | Release validators | SDK/product release validators | Release clarity |
+| SDK-AUDIT-043 | Gateway tests strong but mostly mocked/local | Medium | Testing / realism | Fixed | Added installed-wheel live gateway contract; full proxy/TLS/multi-process smoke remains future ops validation. | Product contract test | Focused, 291 gateway, 796 product tests | Raises implementation; residual ops cap |
+| SDK-AUDIT-044 | API reference lacks event hook schemas | Low | Documentation / observability | Fixed | Added event hook schema table. | API_REFERENCE/README | Docs review | Raises DX |
+| SDK-AUDIT-045 | API reference lacks redaction limits | Low | Documentation / security | Fixed | Added redaction key/diagnostic limits in API docs/README. | API_REFERENCE/README | Docs review | Raises security DX |
+| SDK-AUDIT-046 | Deprecated `list_tools(status=...)` remains public | Low | Public API stability | Fixed | Kept compatibility and documented migration/removal timeline. | API docs/MIGRATION | SDK tests/docs | Minor API debt documented |
+| SDK-AUDIT-047 | No public API stability tests | Low | Testing / API stability | Fixed | Added standalone and product public export/config tests. | SDK/product tests | SDK/product tests | Raises implementation confidence |
+| SDK-AUDIT-048 | Security policy lacks MVP escalation owner | Low | Security process | Fixed | Added MVP escalation owner/channel language. | SECURITY.md | Docs review | Security process DX |
+| SDK-AUDIT-049 | Local validator lacks SBOM/provenance validation | Low | Supply chain / release | Accepted remaining risk | Manifest now records SBOM/provenance absence/requirement, but generation remains release-pipeline work. | Release validators | Release validators/manifest inspection | Supply-chain cap remains |
+| SDK-AUDIT-050 | Docs use production language without clear MVP boundary | Low | Documentation / maturity signaling | Fixed | Added MVP support boundaries and remaining roadmap items. | SDK/product README | Docs review | Expectation setting |
+
+Per-issue remediation notes:
+
+| Issue ID | Original severity/category | Status | Root cause | Fix implemented or rationale | Why MVP-grade | Tests/validation | Remaining risk |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| SDK-AUDIT-001 | Medium / Public API | Fixed | Product shim fell behind standalone exports. | Re-exported validation/config/compatibility types and added tests. | Consumers no longer hit missing imports. | Import tests, full suites. | None known. |
+| SDK-AUDIT-002 | High / Testing | Fixed | Artifact install path was not exercised against the gateway. | Built/installed wheel in isolated target and called live TestClient gateway. | Proves packaged SDK contract, not only source imports. | Installed-wheel test, 291/796 tests. | Does not cover TLS/proxy/multi-process. |
+| SDK-AUDIT-003 | Medium / Packaging | Accepted remaining risk | Product package still vendors same import namespace. | Kept parity validator/tests and documented shim boundary. | MVP can still publish/install if parity is enforced. | Release validators and parity tests. | Cleaner single-source package dependency remains needed. |
+| SDK-AUDIT-004 | Medium / Reliability | Deferred with rationale | Durable replay semantics require schema/API design. | Documented idempotency gap and left auto-retry disabled. | Avoids unsafe duplicate mutating calls. | Docs and invocation tests. | Reliability score remains capped. |
+| SDK-AUDIT-005 | Low / Reliability | Deferred with rationale | Safe retry metadata does not exist. | Documented no automatic invocation retries. | Conservative default is safer for MVP. | SDK tests/docs. | Read-only tools need caller-owned retries. |
+| SDK-AUDIT-006 | Medium / Reliability | Accepted remaining risk | Limiter state is in-process. | Documented process-local limit and edge/global requirement. | Fine for controlled single-process MVP. | Full product tests. | Multi-worker deployments need external limiter. |
+| SDK-AUDIT-007 | Medium / Security/reliability | Fixed | New auth values bypassed key-budget accounting. | Added per-client overflow bucket. | Prevents key-rotation rate-limit evasion. | Auth tests/full tests. | Process-local cap remains. |
+| SDK-AUDIT-008 | Medium / Security | Fixed | Denial response exposed detailed policy/auth reason. | Coarsened agent-facing reason to `tool_call_denied`. | Reduces authorization oracle risk. | Invocation/direct HTTP/SDK tests. | Operators still see details in audit. |
+| SDK-AUDIT-009 | Low / API diagnostics | Fixed | SDK could not know whether missing meant nonexistent or unauthorized. | `get_tool()` now raises `tool_not_visible`. | Honest, safer diagnostics. | SDK/product SDK tests. | None known. |
+| SDK-AUDIT-010 | Medium / Testing | Fixed | Standalone tests lagged product tests. | Added public API/config/probe/telemetry/redaction tests. | Stronger artifact confidence. | SDK `pytest`: 24 passed. | Not every product SDK test duplicated. |
+| SDK-AUDIT-011 | Medium / Docs/API | Fixed | Docs implied compatibility exports were complete. | Fixed code exports and docs. | Existing internal callers work. | Import/full tests. | None known. |
+| SDK-AUDIT-012 | Medium / Onboarding | Fixed | Issuance flow was conceptual. | Added local curl flow for credential issuance endpoint. | Gives adopters a concrete starting point. | Docs review/full tests. | Operator auth token acquisition still environment-specific. |
+| SDK-AUDIT-013 | Low / DX/security | Fixed | Direct HTTP examples could be copied without SDK safeguards. | Added warnings and direct-caller requirements. | Keeps examples local-contract only. | Direct HTTP tests. | Copy/paste risk cannot be eliminated. |
+| SDK-AUDIT-014 | Medium / Compatibility | Fixed | No runtime contract probe existed. | Added capabilities endpoint and SDK methods. | Consumers can fail fast on contract mismatch. | SDK/product/installed-wheel tests. | Version comparison is simple exact match. |
+| SDK-AUDIT-015 | Low / API ergonomics | Fixed | Constructor accumulated many options. | Added config dataclass/from_config. | Reduces repeated boilerplate without breaking kwargs. | SDK/product SDK tests, mypy. | None known. |
+| SDK-AUDIT-016 | Medium / Reliability | Accepted remaining risk | Buffered custom clients can bypass streaming cap. | Default still rejects; docs make opt-in obligation explicit. | Safe default is enforced. | Existing tests/ruff. | Unsafe caller opt-in remains possible. |
+| SDK-AUDIT-017 | Low / Validation | Fixed | SDK cap did not match server token limit. | Added local 4096 cap. | Fails before network. | SDK tests. | Future issuer changes need coordinated update. |
+| SDK-AUDIT-018 | Low / Token compatibility | Fixed | Token grammar was implicit. | Documented grammar and cap. | Strict current contract is discoverable. | SDK tests/docs. | Future token formats require release note. |
+| SDK-AUDIT-019 | Medium / Freshness | Accepted remaining risk | Cache is opt-in process-local TTL cache. | Documented stale-permission caveat and clear-cache behavior. | Acceptable when consumers opt in knowingly. | SDK cache tests. | Emergency revocation can be stale until cache clear/TTL. |
+| SDK-AUDIT-020 | Low / Pagination | Deferred with rationale | Server exposes offset pagination only. | Documented caveat and `max_total`; cursor deferred. | Current behavior remains bounded. | Docs review. | Mutable catalogs can shift between pages. |
+| SDK-AUDIT-021 | Low / API clarity | Fixed | Owner-team filter semantics were not explicit. | Documented exact/case-sensitive matching. | Avoids confusing empty results. | Docs review. | None known. |
+| SDK-AUDIT-022 | Medium / Security | Fixed | Defaults covered secrets but not common PII names. | Added PII keys to default response policy. | Safer out of the box. | Response tests/full tests. | Arbitrary PII text still needs policy patterns. |
+| SDK-AUDIT-023 | Low / Contract clarity | Fixed | Failed upstream execution envelope was agent-visible. | Return `result: null` on failed upstream response. | Cleaner, safer agent contract. | Forwarding/response tests. | Operators must use runtime audit for details. |
+| SDK-AUDIT-024 | Low / Error model | Fixed | Generic 403 and denial distinction was underdocumented. | Tests/docs preserve generic 403 as gateway error and denial as typed reason. | Consumers can branch safely. | SDK tests. | Third-party proxies with `reason_code` could be treated as denial. |
+| SDK-AUDIT-025 | Low / Raw fields | Already resolved | Gateway discovery already uses safe response model. | No code change; tests already assert omitted fields/immutable raw. | Current behavior is safe enough for MVP. | Gateway discovery tests. | Future fields need review. |
+| SDK-AUDIT-026 | Low / Async maintainability | Accepted remaining risk | Sync/async cache implementation shares threading lock. | Accepted small lock scope; refactor deferred. | Does not block MVP under current usage. | Async tests/full tests. | High-concurrency optimization remains. |
+| SDK-AUDIT-027 | Low / Async docs | Fixed | Cancellation behavior was absent from docs. | Added cancellation caveat. | Consumers know outcome can be unknown. | Docs review. | No dedicated cancellation test. |
+| SDK-AUDIT-028 | Medium / Release | Accepted remaining risk | Workflow validation is separate from publication. | Made artifact-handoff/publish boundary explicit. | Internal MVP can consume validated artifacts. | Release validators. | External install-from-index proof absent. |
+| SDK-AUDIT-029 | Low / Versioning | Fixed | Static beta version lacked policy context. | Changelog/stability/migration text added. | Users know 0.1.x support expectations. | Docs review. | No actual version bump. |
+| SDK-AUDIT-030 | Medium / Persistence | Accepted remaining risk | Product runtime remains SQLite-backed here. | Strengthened support envelope. | Fine for local/internal MVP evaluation. | Full tests. | Production DB remains required. |
+| SDK-AUDIT-031 | Medium / Reliability | Deferred with rationale | Circuit breaker requires ops/design choices. | Documented roadmap; no partial breaker added. | Avoids misleading half-control. | Docs review. | Upstream repeated failures are not suppressed. |
+| SDK-AUDIT-032 | Low / Resource safety | Fixed | Health checks used `get()` body-cap blind path. | Prefer stream status inspection without reading body. | Avoids accidental body materialization. | Upstream health tests. | Clients without stream fall back to get. |
+| SDK-AUDIT-033 | Medium / SSRF | Accepted remaining risk | DNS can change after validation. | Documented egress firewall as final boundary. | MVP app-layer checks remain useful. | Full tests/docs. | DNS rebinding/egress proof unresolved. |
+| SDK-AUDIT-034 | Low / Env drift | Already resolved | Production guard existed before pass. | No code change; docs already distinguish local/prod. | Production fails closed. | Auth/settings tests. | Local/test remains permissive by design. |
+| SDK-AUDIT-035 | Medium / Data audit | Fixed | Audit summary path needed proof for invalid/PII payloads. | Added PII redaction keys and test. | Audit persistence is safer. | Decision tests/full tests. | Arbitrary non-key PII may require policy patterns. |
+| SDK-AUDIT-036 | Low / Diagnostics | Fixed | SDK sanitization focused on secrets. | Added PII-like key/text redaction. | Safer logs for common cases. | SDK tests. | Not a full DLP engine. |
+| SDK-AUDIT-037 | Low / Token provider | Fixed | Env-per-request behavior was implicit. | Documented and provided cached provider example. | Better adoption guidance. | Docs review. | Example is illustrative, not packaged helper. |
+| SDK-AUDIT-038 | Low / Observability | Fixed | Events lacked latency/retry metadata. | Added elapsed and retry event. | Better MVP diagnostics. | SDK tests. | Event schema is still simple. |
+| SDK-AUDIT-039 | Low / Examples | Fixed | No realistic async integration example. | Added async worker example and compile test. | Gives adopters a pattern. | SDK tests/release validator. | Not framework-specific to every stack. |
+| SDK-AUDIT-040 | Nit / Migration | Fixed | Shim lifecycle lacked timeline. | Added `0.1.x` support horizon. | Reduces API surprise. | Docs review. | Future release must honor note. |
+| SDK-AUDIT-041 | Low / Governance | Fixed | Metadata missed product/SDK paths. | Added CODEOWNERS and labeler entries. | PR triage/review improves. | Ruff/static review. | Owner handle is existing broad maintainer group. |
+| SDK-AUDIT-042 | Low / Release | Fixed | `--skip-twine-check` was silent. | Added warning and manifest flag. | Release evidence is explicit. | Validators/manifest inspection. | Twine can still be intentionally skipped. |
+| SDK-AUDIT-043 | Medium / Realism | Fixed | No installed artifact gateway contract. | Added installed-wheel live contract. | Meaningful MVP validation. | Installed-wheel/focused/291/796 tests. | TLS/proxy/multi-process smoke still future. |
+| SDK-AUDIT-044 | Low / Docs | Fixed | Event hook schema absent. | Added table. | Observability integration easier. | Docs review. | None known. |
+| SDK-AUDIT-045 | Low / Docs/security | Fixed | Redaction behavior underdocumented. | Added redaction key limits/heuristics. | Safer diagnostics use. | Docs review. | Heuristic redaction only. |
+| SDK-AUDIT-046 | Low / API stability | Fixed | Deprecated status arg remained with unclear horizon. | Documented compatibility/removal policy. | Avoids breaking MVP consumers. | SDK tests/docs. | API debt remains intentionally. |
+| SDK-AUDIT-047 | Low / API tests | Fixed | Public surface lacked snapshot. | Added export/config tests. | Reduces accidental breakage. | SDK/product tests. | Snapshot is selective. |
+| SDK-AUDIT-048 | Low / Security process | Fixed | Security policy lacked owner/escalation language. | Added MVP escalation channel. | Faster triage path. | Docs review. | Placeholder depends on org process. |
+| SDK-AUDIT-049 | Low / Supply chain | Accepted remaining risk | Local validator cannot generate signed provenance/SBOM. | Manifest now records absence and requirement. | Honest artifact evidence for MVP. | Validators/manifest inspection. | Actual SBOM/provenance still required for external release. |
+| SDK-AUDIT-050 | Low / Maturity docs | Fixed | Docs implied production more strongly than evidence allowed. | Added MVP boundary and roadmap gaps. | Sets correct expectations. | Docs review. | None known. |
+
+Summary of changed files:
+
+- SDK source and exports: `packages/ophanix-tool-gateway-sdk/src/ophanix_tool_gateway/sdk.py`, `__init__.py`, and vendored copies under `packages/product-platform/src/ophanix_tool_gateway/`.
+- Product compatibility shims: `packages/product-platform/src/product_platform/tool_gateway/sdk.py`, `__init__.py`.
+- Runtime gateway: `packages/product-platform/src/product_platform/api/app.py`, `tool_gateway/models.py`, `repository.py`, `decision.py`, `health.py`.
+- Tests: standalone SDK tests and product Tool Gateway tests, including new installed-wheel contract test.
+- Docs/examples: SDK README/API reference/MIGRATION/SECURITY/CHANGELOG, product README, direct HTTP examples, new async worker example.
+- Release/governance: SDK/product `scripts/validate_release.py`, SDK `pyproject.toml`, `.github/CODEOWNERS`, `.github/labeler.yml`.
+
+Validation evidence:
+
+| Command | Result |
+| --- | --- |
+| `python3 -m py_compile ...` for modified SDK/product files/tests/examples | Passed |
+| `python3 -m pytest tests -q --tb=short` in `packages/ophanix-tool-gateway-sdk` | 24 passed |
+| Focused product gateway/sdk remediation suite | 97 passed |
+| `python3 -m pytest tests/test_tool_gateway_*.py -q --tb=short` in product package | 291 passed |
+| `python3 -m pytest tests -q --tb=short` in product package | 796 passed |
+| `python3 scripts/validate_release.py --out-dir /tmp/ophanix-sdk-remediation --skip-twine-check` | Passed; manifest records skipped Twine and SBOM/provenance requirement |
+| `python3 scripts/validate_release.py --out-dir /tmp/ophanix-product-remediation --skip-twine-check` | Passed; manifest records skipped Twine and SBOM/provenance requirement |
+| Targeted `python3 -m ruff check ...` over modified Python areas | Passed |
+| `python3 -m mypy packages/ophanix-tool-gateway-sdk/src/ophanix_tool_gateway` | Passed |
+
+Remaining unresolved issues:
+
+- Deferred with rationale: SDK-AUDIT-004, SDK-AUDIT-005, SDK-AUDIT-020, SDK-AUDIT-031.
+- Accepted remaining risks: SDK-AUDIT-003, SDK-AUDIT-006, SDK-AUDIT-016, SDK-AUDIT-019, SDK-AUDIT-026, SDK-AUDIT-028, SDK-AUDIT-030, SDK-AUDIT-033, SDK-AUDIT-049.
+- Already resolved without new implementation: SDK-AUDIT-025, SDK-AUDIT-034.
+- Invalid findings: none.
+
+Updated scoring matrix:
+
+| Category | Previous score from audit | Updated score | Raised/lowered/upheld | Exact reason | Remaining score cap | Preventing next score | Preventing 8 / 10 | Preventing 9 / 10 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Implementation quality | 6.5 / 10 | 7.0 / 10 | Raised | High contract-test gap is closed, public API exports/config/probe are fixed, failed-response and health-check behavior improved, package validators pass, and full product tests pass. | 7 | Dual package namespace, deferred idempotency/cursor/circuit-breaker work, accepted async-lock/cache debt | Single-source SDK packaging, idempotency contract, cursor pagination, circuit breaker, multi-process smoke | Only low residual debt, stronger type baseline across product, cleaner SDK/package ownership |
+| Ease of use | 6.5 / 10 | 7.0 / 10 | Raised | Docs now include compatibility probing, credential issuance, config dataclass, event schemas, redaction behavior, async example, migration horizon, direct HTTP safety, and MVP boundary. | 7.5 | No published index install evidence, remaining direct HTTP/local token foot-guns, accepted publish workflow handoff | Published package/install quickstart, more framework examples, generated API docs, cleaner credential bootstrap | Stable GA-style docs, migration tooling, minimal accepted DX risks |
+| Security and reliability | 6.0 / 10 | 6.5 / 10 | Raised | Denial oracle reduced, token cap added, PII redaction improved, rate-limit overflow fixed, failed result hidden, health body reading avoided, full tests pass. | 6.5 | Idempotency absent, rate limiter process-local, SQLite MVP baseline, DNS/egress residual SSRF risk, no upstream circuit breaker, SBOM/provenance not generated | Distributed limiter, production DB, idempotency/replay, circuit breaker, egress conformance, signed provenance/SBOM | Security drill evidence, external release/advisory evidence, only low residual reliability risks |
+
+Score cap explanation:
+
+- Implementation quality cannot exceed 7 while the SDK namespace remains duplicated across two packages and idempotency/circuit-breaker/cursor design remains deferred.
+- Ease of use cannot exceed 7.5 without proof of a published package install path and more end-to-end onboarding beyond local/internal flows.
+- Security and reliability cannot exceed 6.5 while idempotency, distributed rate limiting, production DB, SSRF egress proof, upstream circuit breaking, and SBOM/provenance generation remain unresolved.
+
+Required fixes to reach MVP readiness:
+
+- The repository is now defensible for controlled MVP adoption, with explicit accepted risks.
+- For any broader MVP rollout, require operator acceptance of SDK-AUDIT-003, 006, 016, 019, 026, 028, 030, 033, and 049.
+- Do not position the SDK as production-ready until the deferred reliability/security issues are implemented and validated.
+
+Required fixes to reach 7 out of 10:
+
+- Implementation quality is at 7.0 now.
+- Ease of use is at 7.0 now.
+- Security/reliability needs at least one of: durable idempotency, external/distributed rate limiting, or production DB/egress conformance to move cleanly to 7.0.
+
+Required fixes to reach 8 out of 10:
+
+1. Replace dual SDK namespace ownership with a single-source dependency or CI-enforced sync/publish contract.
+2. Add durable invocation idempotency/replay semantics and safe invocation retry policy.
+3. Add cursor pagination or stable discovery snapshot semantics.
+4. Add upstream circuit breaker and production-like failure tests.
+5. Prove distributed/edge rate limiting and production DB behavior.
+6. Generate and validate SBOM/provenance in the release pipeline.
+7. Add proxy/TLS/multi-process installed-wheel smoke tests.
+
+Required fixes to reach 9 out of 10:
+
+1. Reduce remaining issues to low/nit only.
+2. Publish package artifacts through a verified release channel with advisory scanning.
+3. Exercise incident/security runbooks against the gateway in staging.
+4. Establish product-wide type/lint confidence for the gateway path.
+5. Provide richer framework-specific examples and migration tooling.
+
+Recommended remediation order:
+
+1. Idempotency/replay contract and safe retry semantics.
+2. Distributed/edge rate limiting plus multi-worker validation.
+3. Production DB and egress conformance validation.
+4. Upstream circuit breaker and failure-mode tests.
+5. Release provenance/SBOM generation and package publication evidence.
+6. Single-source SDK packaging cleanup.
+
+Final strict MVP assessment:
+
+The SDK and Tool Gateway are now a credible controlled MVP for internal teams or design partners. The current repo proves the packaged SDK can talk to the gateway, validates public API exports, tightens denial/security behavior, improves release evidence, and passes full product validation. Broader or production-style adoption is still not defensible without resolving the deferred idempotency, distributed reliability, production persistence, egress, circuit-breaker, and provenance gaps.

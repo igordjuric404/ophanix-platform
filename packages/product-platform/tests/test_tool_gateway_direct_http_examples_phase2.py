@@ -58,9 +58,9 @@ class ToolGatewayDirectHttpExamplesPhase2Tests(unittest.TestCase):
         self.assertEqual(denied["request_id"], "req-demo-direct-http-denied")
         self.assertEqual(denied["correlation_id"], "demo-direct-http-denied")
         self.assertEqual(denied["tool_name"], "claims.lookup")
-        self.assertEqual(denied["reason_code"], "permission_missing")
+        self.assertEqual(denied["reason_code"], "tool_call_denied")
         self.assertIsNone(denied["result"])
-        self.assertEqual(denied["error"]["code"], "permission_missing")
+        self.assertEqual(denied["error"]["code"], "tool_call_denied")
 
     def test_python_requests_example_handles_allowed_and_denied_responses(self) -> None:
         module = _load_python_example()
@@ -100,7 +100,7 @@ class ToolGatewayDirectHttpExamplesPhase2Tests(unittest.TestCase):
                 post=fake_post,
             )
 
-        self.assertEqual(raised.exception.reason_code, "permission_missing")
+        self.assertEqual(raised.exception.reason_code, "tool_call_denied")
         self.assertEqual(raised.exception.response["request_id"], "req-demo-direct-http-denied")
 
 

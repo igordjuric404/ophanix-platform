@@ -10,8 +10,10 @@ import httpx
 
 from product_platform.tool_gateway.sdk import (
     AsyncOphanixToolGatewayClient,
+    GatewayCompatibility,
     OphanixToolGatewayClient,
     StaticTokenProvider,
+    ToolGatewayClientConfig,
     ToolGatewayError,
 )
 
@@ -245,8 +247,45 @@ class ToolGatewaySdkPhase3Tests(unittest.TestCase):
             client.get_tool("claims.lookup")
 
         self.assertEqual(raised.exception.status_code, 404)
-        self.assertEqual(raised.exception.code, "tool_not_found")
+        self.assertEqual(raised.exception.code, "tool_not_visible")
         self.assertIn("claims.lookup", raised.exception.message)
+
+    def test_check_compatibility_reads_capabilities_endpoint(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["path"] = request.url.path
+            return httpx.Response(
+                200,
+                json={
+                    "gateway_contract_version": "tool-gateway.v1",
+                    "min_sdk_version": "0.1.0",
+                    "sdk_package": "ophanix-tool-gateway-sdk",
+                },
+            )
+
+        client = _client(handler)
+
+        compatibility = client.check_compatibility()
+
+        self.assertIsInstance(compatibility, GatewayCompatibility)
+        self.assertEqual(seen["path"], "/api/v1/gateway/capabilities")
+        self.assertTrue(compatibility.compatible)
+
+    def test_client_from_config_uses_reusable_sdk_configuration(self) -> None:
+        config = ToolGatewayClientConfig(timeout_seconds=3.0, cache_tools=True)
+
+        client = OphanixToolGatewayClient.from_config(
+            base_url="https://gateway.example.test",
+            token_provider=StaticTokenProvider("sdk-token"),
+            config=config,
+            http_client=httpx.Client(
+                transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=[]))
+            ),
+        )
+
+        self.assertEqual(client.timeout_seconds, 3.0)
+        self.assertTrue(client.cache_tools)
 
     def test_cache_is_disabled_by_default(self) -> None:
         calls = 0

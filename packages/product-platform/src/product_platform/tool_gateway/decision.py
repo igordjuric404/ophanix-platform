@@ -34,9 +34,14 @@ REDACTED_PAYLOAD_VALUE = "[redacted]"
 SECRET_LIKE_KEY_TOKENS = (
     "authorization",
     "api_key",
+    "address",
     "credential",
+    "email",
     "password",
+    "phone",
     "secret",
+    "social_security_number",
+    "ssn",
     "token",
     "key",
 )

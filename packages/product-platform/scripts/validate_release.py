@@ -48,6 +48,8 @@ def main() -> int:
     args = parser.parse_args()
 
     package_root = Path(__file__).resolve().parents[1]
+    if args.skip_twine_check:
+        print("WARNING: twine metadata validation skipped; release-manifest.json records this.")
     with _artifact_directory(args.out_dir) as artifact_dir:
         _run_module(
             "build",
@@ -67,7 +69,12 @@ def main() -> int:
                 package_root,
                 missing_hint="Install release extras first: python3 -m pip install '.[release]'",
             )
-        _write_release_manifest(artifact_dir, package_root=package_root, artifacts=[wheel, sdist])
+        _write_release_manifest(
+            artifact_dir,
+            package_root=package_root,
+            artifacts=[wheel, sdist],
+            twine_check_skipped=args.skip_twine_check,
+        )
         print(f"Product release artifacts validated in {artifact_dir}")
     return 0
 
@@ -193,10 +200,16 @@ def _write_release_manifest(
     *,
     package_root: Path,
     artifacts: list[Path],
+    twine_check_skipped: bool,
 ) -> None:
     manifest = {
         "package": "ophanix-product-platform",
         "version": _project_version(package_root),
+        "sbom_provenance": {
+            "included": False,
+            "requirement": "Generate SBOM and signed provenance in the publish workflow before external release.",
+        },
+        "twine_check_skipped": twine_check_skipped,
         "artifacts": [
             {
                 "filename": artifact.name,

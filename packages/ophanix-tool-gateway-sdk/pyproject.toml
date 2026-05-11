@@ -51,6 +51,7 @@ packages = ["src/ophanix_tool_gateway"]
 [tool.hatch.build.targets.sdist]
 include = [
     "/src",
+    "/examples",
     "/scripts",
     "/tests",
     "/README.md",

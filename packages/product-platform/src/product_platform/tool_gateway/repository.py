@@ -563,7 +563,19 @@ class ToolRegistryRepository:
                 32_768,
                 json.dumps(
                     {
-                        "redact_keys": ["authorization", "api_key", "credential", "password", "secret", "token", "key"],
+                        "redact_keys": [
+                            "address",
+                            "authorization",
+                            "api_key",
+                            "credential",
+                            "email",
+                            "password",
+                            "phone",
+                            "secret",
+                            "ssn",
+                            "token",
+                            "key",
+                        ],
                         "redact_patterns": [],
                     },
                     sort_keys=True,

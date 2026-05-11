@@ -195,9 +195,7 @@ class ToolGatewayResponsePhase3Tests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 502, response.text)
-        result = response.json()["result"]
-        self.assertIsNone(result["body"])
-        self.assertFalse(result["exposed_to_agent"])
+        self.assertIsNone(response.json()["result"])
         self.assertNotIn("secret-token", response.text)
 
     def test_api_store_full_response_false_omits_body_from_runtime_summary(self) -> None:

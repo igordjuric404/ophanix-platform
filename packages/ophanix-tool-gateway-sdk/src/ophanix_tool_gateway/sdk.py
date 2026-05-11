@@ -65,8 +65,10 @@ def _version_from_local_pyproject() -> str | None:
 
 
 GATEWAY_TOOL_DISCOVERY_PATH = "/api/v1/gateway/tools"
+GATEWAY_CAPABILITIES_PATH = "/api/v1/gateway/capabilities"
 GATEWAY_TOOL_INVOKE_PATH_PREFIX = "/api/v1/tools"
 GATEWAY_TOOL_INVOKE_PATH_SUFFIX = "/invoke"
+SDK_GATEWAY_CONTRACT_VERSION = "tool-gateway.v1"
 SDK_VERSION = _sdk_version()
 SDK_USER_AGENT = f"ophanix-tool-gateway-python/{SDK_VERSION}"
 DEFAULT_GATEWAY_TOKEN_ENV_VAR = "OPHANIX_GATEWAY_TOKEN"
@@ -81,6 +83,7 @@ MAX_NON_JSON_ERROR_EXCERPT_BYTES = 2048
 DEFAULT_MAX_PAYLOAD_BYTES = 1_000_000
 DEFAULT_MAX_RESPONSE_BYTES = 1_000_000
 DEFAULT_MAX_CACHE_ENTRIES = 256
+MAX_GATEWAY_TOKEN_LENGTH = 4096
 RAW_GATEWAY_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9._~+/=-]+$")
 _CACHE_FINGERPRINT_KEY = secrets.token_bytes(32)
 _ToolCacheKey = tuple[str, str]
@@ -96,14 +99,21 @@ SENSITIVE_KEY_NAMES = frozenset(
         "client_secret",
         "credential",
         "credentials",
+        "email",
+        "email_address",
         "id_token",
         "key",
         "password",
         "passwd",
+        "phone",
+        "phone_number",
+        "postal_address",
         "private_key",
         "pwd",
         "refresh_token",
         "secret",
+        "social_security_number",
+        "ssn",
         "token",
     }
 )
@@ -115,11 +125,14 @@ SENSITIVE_TEXT_ASSIGNMENT_RE = re.compile(
     r"api[-_\s]?key|apikey|"
     r"client[-_\s]?secret|"
     r"credential|"
+    r"email|"
     r"id[-_\s]?token|"
     r"password|passwd|pwd|"
+    r"phone|"
     r"private[-_\s]?key|"
     r"refresh[-_\s]?token|"
     r"access[-_\s]?token|"
+    r"social[-_\s]?security[-_\s]?number|ssn|"
     r"secret|"
     r"token"
     r")\b)"
@@ -194,6 +207,38 @@ class ToolDefinition:
     input_schema_json: dict[str, Any] | None = None
     output_schema_json: dict[str, Any] | None = None
     raw: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class GatewayCompatibility:
+    """Result returned by SDK-to-gateway contract probing."""
+
+    compatible: bool
+    sdk_version: str
+    expected_gateway_contract_version: str
+    gateway_contract_version: str | None
+    min_sdk_version: str | None = None
+    raw: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ToolGatewayClientConfig:
+    """Reusable client configuration for sync and async SDK clients."""
+
+    timeout_seconds: float = 5.0
+    max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES
+    max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
+    max_cache_entries: int = DEFAULT_MAX_CACHE_ENTRIES
+    cache_tools: bool = False
+    cache_ttl_seconds: float = DEFAULT_CACHE_TTL_SECONDS
+    allow_insecure_http: bool = False
+    user_agent: str | None = None
+    discovery_max_retries: int = 2
+    discovery_retry_backoff_seconds: float = 0.2
+    discovery_retry_max_sleep_seconds: float = DEFAULT_DISCOVERY_RETRY_MAX_SLEEP_SECONDS
+    discovery_retry_jitter_ratio: float = DEFAULT_DISCOVERY_RETRY_JITTER_RATIO
+    allow_buffered_custom_http_client: bool = False
+    raise_event_hook_errors: bool = False
 
 
 class ToolGatewayError(RuntimeError):
@@ -278,6 +323,40 @@ class _ClientConfig:
 
 class OphanixToolGatewayClient:
     """Small synchronous SDK client for external Python agents."""
+
+    @classmethod
+    def from_config(
+        cls,
+        *,
+        base_url: str,
+        token_provider: TokenProvider,
+        config: ToolGatewayClientConfig,
+        http_client: httpx.Client | None = None,
+        event_hook: TelemetryEventHook | None = None,
+    ) -> "OphanixToolGatewayClient":
+        """Construct a sync client from a reusable configuration object."""
+
+        config = _require_client_config(config)
+        return cls(
+            base_url=base_url,
+            token_provider=token_provider,
+            timeout_seconds=config.timeout_seconds,
+            max_payload_bytes=config.max_payload_bytes,
+            max_response_bytes=config.max_response_bytes,
+            max_cache_entries=config.max_cache_entries,
+            http_client=http_client,
+            cache_tools=config.cache_tools,
+            cache_ttl_seconds=config.cache_ttl_seconds,
+            event_hook=event_hook,
+            allow_insecure_http=config.allow_insecure_http,
+            user_agent=config.user_agent,
+            discovery_max_retries=config.discovery_max_retries,
+            discovery_retry_backoff_seconds=config.discovery_retry_backoff_seconds,
+            discovery_retry_max_sleep_seconds=config.discovery_retry_max_sleep_seconds,
+            discovery_retry_jitter_ratio=config.discovery_retry_jitter_ratio,
+            allow_buffered_custom_http_client=config.allow_buffered_custom_http_client,
+            raise_event_hook_errors=config.raise_event_hook_errors,
+        )
 
     def __init__(
         self,
@@ -371,6 +450,7 @@ class OphanixToolGatewayClient:
         """Invoke one registered gateway tool with bearer authentication."""
 
         self._ensure_open()
+        started_at = time.perf_counter()
         normalized_tool_name = _require_text(tool_name, "tool_name")
         _require_json_object(payload, "payload", max_bytes=self.max_payload_bytes)
         body: dict[str, Any] = {"payload": payload}
@@ -406,6 +486,7 @@ class OphanixToolGatewayClient:
                     "event": "tool_call.error",
                     "tool_name": normalized_tool_name,
                     "code": "transport_error",
+                    "elapsed_ms": _elapsed_ms(started_at),
                 }
             )
             raise ToolGatewayError("Tool Gateway transport error.", code="transport_error") from exc
@@ -416,6 +497,7 @@ class OphanixToolGatewayClient:
                     "event": "tool_call.denied",
                     "tool_name": normalized_tool_name,
                     "status_code": response.status_code,
+                    "elapsed_ms": _elapsed_ms(started_at),
                 }
             )
             _raise_denied(response_body, response.status_code)
@@ -425,6 +507,7 @@ class OphanixToolGatewayClient:
                     "event": "tool_call.error",
                     "tool_name": normalized_tool_name,
                     "status_code": response.status_code,
+                    "elapsed_ms": _elapsed_ms(started_at),
                 }
             )
             _raise_gateway_error(
@@ -440,6 +523,7 @@ class OphanixToolGatewayClient:
                 "request_id": result.request_id,
                 "correlation_id": result.correlation_id,
                 "reason_code": result.reason_code,
+                "elapsed_ms": _elapsed_ms(started_at),
             }
         )
         return result
@@ -514,6 +598,31 @@ class OphanixToolGatewayClient:
             if self._list_cache is not None:
                 self._list_cache.clear()
 
+    def check_compatibility(self) -> GatewayCompatibility:
+        """Probe the gateway contract version exposed by the authenticated endpoint."""
+
+        self._ensure_open()
+        auth_context = self._auth_context()
+        try:
+            response = _send_limited_sync_request(
+                self._http_client,
+                "GET",
+                f"{self.base_url}{GATEWAY_CAPABILITIES_PATH}",
+                max_response_bytes=self.max_response_bytes,
+                headers=auth_context.headers,
+                timeout=self.timeout_seconds,
+            )
+        except httpx.HTTPError as exc:
+            raise ToolGatewayError("Tool Gateway transport error.", code="transport_error") from exc
+        response_body = _response_json(response, max_response_bytes=self.max_response_bytes)
+        if response.status_code >= 400:
+            _raise_gateway_error(
+                response_body,
+                response.status_code,
+                retry_after_seconds=_retry_after_seconds(response),
+            )
+        return _gateway_compatibility(response_body)
+
     def get_tool(self, tool_name: str) -> ToolDefinition:
         """Return one tool definition by name or id from the list contract."""
 
@@ -536,9 +645,9 @@ class OphanixToolGatewayClient:
                 break
             offset += page_size
         raise ToolGatewayError(
-            f"Tool not found: {_safe_lookup_text(normalized_tool_name)}",
+            f"Tool is not visible through gateway discovery: {_safe_lookup_text(normalized_tool_name)}",
             status_code=404,
-            code="tool_not_found",
+            code="tool_not_visible",
         )
 
     def __enter__(self) -> OphanixToolGatewayClient:
@@ -653,6 +762,14 @@ class OphanixToolGatewayClient:
         response: httpx.Response | None,
     ) -> None:
         delay = self._discovery_retry_delay(attempt, response=response)
+        self._emit_event(
+            {
+                "event": "tool_discovery.retry",
+                "attempt": attempt + 1,
+                "delay_seconds": delay,
+                "status_code": response.status_code if response is not None else None,
+            }
+        )
         if delay <= 0:
             return
         self._sleep(delay)
@@ -735,6 +852,40 @@ class OphanixToolGatewayClient:
 
 class AsyncOphanixToolGatewayClient:
     """Async SDK client for external Python agents running on event loops."""
+
+    @classmethod
+    def from_config(
+        cls,
+        *,
+        base_url: str,
+        token_provider: TokenProvider | AsyncTokenProvider,
+        config: ToolGatewayClientConfig,
+        http_client: httpx.AsyncClient | None = None,
+        event_hook: TelemetryEventHook | None = None,
+    ) -> "AsyncOphanixToolGatewayClient":
+        """Construct an async client from a reusable configuration object."""
+
+        config = _require_client_config(config)
+        return cls(
+            base_url=base_url,
+            token_provider=token_provider,
+            timeout_seconds=config.timeout_seconds,
+            max_payload_bytes=config.max_payload_bytes,
+            max_response_bytes=config.max_response_bytes,
+            max_cache_entries=config.max_cache_entries,
+            http_client=http_client,
+            cache_tools=config.cache_tools,
+            cache_ttl_seconds=config.cache_ttl_seconds,
+            event_hook=event_hook,
+            allow_insecure_http=config.allow_insecure_http,
+            user_agent=config.user_agent,
+            discovery_max_retries=config.discovery_max_retries,
+            discovery_retry_backoff_seconds=config.discovery_retry_backoff_seconds,
+            discovery_retry_max_sleep_seconds=config.discovery_retry_max_sleep_seconds,
+            discovery_retry_jitter_ratio=config.discovery_retry_jitter_ratio,
+            allow_buffered_custom_http_client=config.allow_buffered_custom_http_client,
+            raise_event_hook_errors=config.raise_event_hook_errors,
+        )
 
     def __init__(
         self,
@@ -828,6 +979,7 @@ class AsyncOphanixToolGatewayClient:
         """Invoke one registered gateway tool with bearer authentication."""
 
         self._ensure_open()
+        started_at = time.perf_counter()
         normalized_tool_name = _require_text(tool_name, "tool_name")
         _require_json_object(payload, "payload", max_bytes=self.max_payload_bytes)
         body: dict[str, Any] = {"payload": payload}
@@ -863,6 +1015,7 @@ class AsyncOphanixToolGatewayClient:
                     "event": "tool_call.error",
                     "tool_name": normalized_tool_name,
                     "code": "transport_error",
+                    "elapsed_ms": _elapsed_ms(started_at),
                 }
             )
             raise ToolGatewayError("Tool Gateway transport error.", code="transport_error") from exc
@@ -873,6 +1026,7 @@ class AsyncOphanixToolGatewayClient:
                     "event": "tool_call.denied",
                     "tool_name": normalized_tool_name,
                     "status_code": response.status_code,
+                    "elapsed_ms": _elapsed_ms(started_at),
                 }
             )
             _raise_denied(response_body, response.status_code)
@@ -882,6 +1036,7 @@ class AsyncOphanixToolGatewayClient:
                     "event": "tool_call.error",
                     "tool_name": normalized_tool_name,
                     "status_code": response.status_code,
+                    "elapsed_ms": _elapsed_ms(started_at),
                 }
             )
             _raise_gateway_error(
@@ -897,6 +1052,7 @@ class AsyncOphanixToolGatewayClient:
                 "request_id": result.request_id,
                 "correlation_id": result.correlation_id,
                 "reason_code": result.reason_code,
+                "elapsed_ms": _elapsed_ms(started_at),
             }
         )
         return result
@@ -971,6 +1127,31 @@ class AsyncOphanixToolGatewayClient:
             if self._list_cache is not None:
                 self._list_cache.clear()
 
+    async def check_compatibility(self) -> GatewayCompatibility:
+        """Probe the gateway contract version exposed by the authenticated endpoint."""
+
+        self._ensure_open()
+        auth_context = await self._auth_context()
+        try:
+            response = await _send_limited_async_request(
+                self._http_client,
+                "GET",
+                f"{self.base_url}{GATEWAY_CAPABILITIES_PATH}",
+                max_response_bytes=self.max_response_bytes,
+                headers=auth_context.headers,
+                timeout=self.timeout_seconds,
+            )
+        except httpx.HTTPError as exc:
+            raise ToolGatewayError("Tool Gateway transport error.", code="transport_error") from exc
+        response_body = _response_json(response, max_response_bytes=self.max_response_bytes)
+        if response.status_code >= 400:
+            _raise_gateway_error(
+                response_body,
+                response.status_code,
+                retry_after_seconds=_retry_after_seconds(response),
+            )
+        return _gateway_compatibility(response_body)
+
     async def get_tool(self, tool_name: str) -> ToolDefinition:
         """Return one tool definition by name or id from the list contract."""
 
@@ -993,9 +1174,9 @@ class AsyncOphanixToolGatewayClient:
                 break
             offset += page_size
         raise ToolGatewayError(
-            f"Tool not found: {_safe_lookup_text(normalized_tool_name)}",
+            f"Tool is not visible through gateway discovery: {_safe_lookup_text(normalized_tool_name)}",
             status_code=404,
-            code="tool_not_found",
+            code="tool_not_visible",
         )
 
     async def __aenter__(self) -> AsyncOphanixToolGatewayClient:
@@ -1106,6 +1287,14 @@ class AsyncOphanixToolGatewayClient:
         response: httpx.Response | None,
     ) -> None:
         delay = self._discovery_retry_delay(attempt, response=response)
+        self._emit_event(
+            {
+                "event": "tool_discovery.retry",
+                "attempt": attempt + 1,
+                "delay_seconds": delay,
+                "status_code": response.status_code if response is not None else None,
+            }
+        )
         if delay <= 0:
             return
         await self._sleep(delay)
@@ -1273,6 +1462,12 @@ def _client_config(
     )
 
 
+def _require_client_config(config: object) -> ToolGatewayClientConfig:
+    if not isinstance(config, ToolGatewayClientConfig):
+        raise ToolGatewayValidationError("config must be a ToolGatewayClientConfig")
+    return config
+
+
 def _normalize_base_url(base_url: object, *, allow_insecure_http: bool = False) -> str:
     normalized = _require_text(base_url, "base_url").rstrip("/")
     if not normalized:
@@ -1427,6 +1622,19 @@ def _tool_definition(body: dict[str, Any]) -> ToolDefinition:
     )
 
 
+def _gateway_compatibility(body: dict[str, Any]) -> GatewayCompatibility:
+    gateway_contract_version = _optional_response_string_field(body, "gateway_contract_version")
+    min_sdk_version = _optional_response_string_field(body, "min_sdk_version")
+    return GatewayCompatibility(
+        compatible=gateway_contract_version == SDK_GATEWAY_CONTRACT_VERSION,
+        sdk_version=SDK_VERSION,
+        expected_gateway_contract_version=SDK_GATEWAY_CONTRACT_VERSION,
+        gateway_contract_version=gateway_contract_version,
+        min_sdk_version=min_sdk_version,
+        raw=_immutable_mapping(body),
+    )
+
+
 def _clone_tool_definition(tool: ToolDefinition) -> ToolDefinition:
     return ToolDefinition(
         id=tool.id,
@@ -1448,9 +1656,8 @@ def _trim_cache(cache: dict[Any, Any], max_entries: int) -> None:
 
 
 def _raise_denied(body: dict[str, Any], status_code: int) -> None:
-    decision = _optional_mapping(body.get("decision"))
     reason_code = body.get("reason_code")
-    if decision is None or reason_code is None:
+    if reason_code is None:
         _raise_gateway_error(body, status_code)
     raise ToolDeniedError(
         "Tool call denied by gateway policy.",
@@ -1786,6 +1993,10 @@ def _require_gateway_token(value: object) -> str:
         raise ToolGatewayValidationError("token must be the raw gateway token without the Bearer prefix")
     if any(character.isspace() for character in token):
         raise ToolGatewayValidationError("token must not contain whitespace")
+    if len(token) > MAX_GATEWAY_TOKEN_LENGTH:
+        raise ToolGatewayValidationError(
+            f"token must be {MAX_GATEWAY_TOKEN_LENGTH} characters or fewer"
+        )
     if not RAW_GATEWAY_TOKEN_PATTERN.fullmatch(token):
         raise ToolGatewayValidationError("token contains unsupported characters")
     return token
@@ -1804,6 +2015,10 @@ def _safe_lookup_text(value: str, *, max_length: int = 80) -> str:
 
 def _has_control_character(value: str) -> bool:
     return any(ord(character) < 32 or ord(character) == 127 for character in value)
+
+
+def _elapsed_ms(started_at: float) -> float:
+    return round((time.perf_counter() - started_at) * 1000, 3)
 
 
 def _require_json_object(

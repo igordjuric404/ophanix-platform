@@ -13,6 +13,12 @@
 "agent-governance":
   - changed-files:
       - any-glob-to-any-file: "packages/agent-governance/**"
+"product-platform":
+  - changed-files:
+      - any-glob-to-any-file: "packages/product-platform/**"
+"tool-gateway-sdk":
+  - changed-files:
+      - any-glob-to-any-file: "packages/ophanix-tool-gateway-sdk/**"
 "ci/cd":
   - changed-files:
       - any-glob-to-any-file: ".github/**"

@@ -58,6 +58,22 @@ class ToolGatewaySdkPackageTests(unittest.TestCase):
             "AsyncOphanixToolGatewayClient OphanixToolGatewayClient",
         )
 
+    def test_product_compatibility_exports_include_validation_and_config_types(self) -> None:
+        from product_platform.tool_gateway import (
+            GatewayCompatibility,
+            ToolGatewayClientConfig,
+            ToolGatewayValidationError,
+        )
+        from product_platform.tool_gateway.sdk import (
+            GatewayCompatibility as ShimGatewayCompatibility,
+            ToolGatewayClientConfig as ShimToolGatewayClientConfig,
+            ToolGatewayValidationError as ShimToolGatewayValidationError,
+        )
+
+        self.assertIs(GatewayCompatibility, ShimGatewayCompatibility)
+        self.assertIs(ToolGatewayClientConfig, ShimToolGatewayClientConfig)
+        self.assertIs(ToolGatewayValidationError, ShimToolGatewayValidationError)
+
 
 if __name__ == "__main__":
     unittest.main()

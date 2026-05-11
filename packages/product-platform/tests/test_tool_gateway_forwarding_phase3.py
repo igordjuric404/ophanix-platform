@@ -233,10 +233,7 @@ class ToolGatewayForwardingPhase3Tests(unittest.TestCase):
         self.assertEqual(response.status_code, 502, response.text)
         payload = response.json()
         self.assertEqual(payload["error"]["code"], "upstream_error")
-        self.assertEqual(payload["result"]["status"], "failed")
-        self.assertEqual(payload["result"]["upstream_status_code"], 500)
-        self.assertIsNone(payload["result"]["body"])
-        self.assertFalse(payload["result"]["exposed_to_agent"])
+        self.assertIsNone(payload["result"])
 
     def test_integration_upstream_redirect_is_not_treated_as_success(self) -> None:
         self.app.state.tool_gateway_http_client = FakeHTTPClient(
@@ -252,9 +249,7 @@ class ToolGatewayForwardingPhase3Tests(unittest.TestCase):
         self.assertEqual(response.status_code, 502, response.text)
         payload = response.json()
         self.assertEqual(payload["error"]["code"], "upstream_error")
-        self.assertEqual(payload["result"]["status"], "failed")
-        self.assertEqual(payload["result"]["upstream_status_code"], 302)
-        self.assertIsNone(payload["result"]["body"])
+        self.assertIsNone(payload["result"])
 
     def test_integration_oversized_upstream_response_is_blocked_before_json_parse(self) -> None:
         self.app.state.tool_gateway_http_client = FakeHTTPClient(

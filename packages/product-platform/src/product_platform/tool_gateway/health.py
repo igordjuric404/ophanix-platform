@@ -89,10 +89,12 @@ class ToolUpstreamHealthChecker:
         try:
             if isinstance(self.http_client, httpx.AsyncClient):
                 raise TypeError("Async health clients must use check_target_async().")
-            response = self.http_client.get(health["health_url"], timeout=timeout_seconds)
-            if inspect.isawaitable(response):
-                raise TypeError("Async health clients must use check_target_async().")
-            status, error, observed_status = _status_from_response(response, health)
+            status, error, observed_status = _sync_health_status(
+                self.http_client,
+                health["health_url"],
+                timeout_seconds=timeout_seconds,
+                health=health,
+            )
         except httpx.TimeoutException:
             status = "unhealthy"
             error = "Health check timed out."
@@ -117,9 +119,12 @@ class ToolUpstreamHealthChecker:
         checked_at = utc_now_iso()
         timeout_seconds = int(target["timeout_ms"]) / 1000
         try:
-            maybe_response = self.http_client.get(health["health_url"], timeout=timeout_seconds)
-            response = await maybe_response if inspect.isawaitable(maybe_response) else maybe_response
-            status, error, observed_status = _status_from_response(response, health)
+            status, error, observed_status = await _async_health_status(
+                self.http_client,
+                health["health_url"],
+                timeout_seconds=timeout_seconds,
+                health=health,
+            )
         except httpx.TimeoutException:
             status = "unhealthy"
             error = "Health check timed out."
@@ -156,6 +161,39 @@ def _status_from_response(response: Any, health: Any) -> tuple[str, str | None, 
     if observed_status == expected_status:
         return "healthy", None, observed_status
     return "degraded", f"Expected status {expected_status}, received {observed_status}.", observed_status
+
+
+def _sync_health_status(
+    http_client: Any,
+    url: str,
+    *,
+    timeout_seconds: float,
+    health: Any,
+) -> tuple[str, str | None, int]:
+    stream = getattr(http_client, "stream", None)
+    if callable(stream):
+        with stream("GET", url, timeout=timeout_seconds) as response:
+            return _status_from_response(response, health)
+    response = http_client.get(url, timeout=timeout_seconds)
+    if inspect.isawaitable(response):
+        raise TypeError("Async health clients must use check_target_async().")
+    return _status_from_response(response, health)
+
+
+async def _async_health_status(
+    http_client: Any,
+    url: str,
+    *,
+    timeout_seconds: float,
+    health: Any,
+) -> tuple[str, str | None, int]:
+    stream = getattr(http_client, "stream", None)
+    if callable(stream):
+        async with stream("GET", url, timeout=timeout_seconds) as response:
+            return _status_from_response(response, health)
+    maybe_response = http_client.get(url, timeout=timeout_seconds)
+    response = await maybe_response if inspect.isawaitable(maybe_response) else maybe_response
+    return _status_from_response(response, health)
 
 
 def _summarize_exception(exc: Exception) -> str:

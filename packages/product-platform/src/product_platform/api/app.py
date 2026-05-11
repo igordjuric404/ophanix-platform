@@ -537,6 +537,7 @@ from product_platform.tool_gateway.models import (
     AgentToolPermissionGrantRequest,
     AgentToolPermissionPatchRequest,
     AgentToolPermissionResponse,
+    GatewayCapabilitiesResponse,
     GatewayToolDefinitionResponse,
     ToolDefinitionCreateRequest,
     ToolDefinitionPatchRequest,
@@ -744,7 +745,7 @@ def _validate_production_settings(settings: Settings) -> None:
 
 
 def _is_tool_gateway_runtime_path(path: str) -> bool:
-    return path == "/api/v1/gateway/tools" or (
+    return path in {"/api/v1/gateway/tools", "/api/v1/gateway/capabilities"} or (
         len(path.split("/")) == 6
         and path.startswith("/api/v1/tools/")
         and path.endswith("/invoke")
@@ -773,6 +774,12 @@ def _tool_gateway_rate_limit_result(app: FastAPI, request: Request) -> tuple[boo
     now = time.monotonic()
     key = _gateway_rate_limit_key(request)
     limits: dict[str, tuple[float, int]] = app.state.tool_gateway_rate_limits
+    overflow_limits: dict[str, tuple[float, int]] = getattr(
+        app.state,
+        "tool_gateway_rate_limit_overflow_limits",
+        {},
+    )
+    app.state.tool_gateway_rate_limit_overflow_limits = overflow_limits
     max_keys = int(getattr(settings, "tool_gateway_rate_limit_max_keys", 10_000))
     lock = getattr(app.state, "tool_gateway_rate_limit_lock", None)
     if lock is None:
@@ -794,11 +801,20 @@ def _tool_gateway_rate_limit_result(app: FastAPI, request: Request) -> tuple[boo
             for expired_key in expired_keys:
                 limits.pop(expired_key, None)
             if len(limits) >= max_keys:
-                # Do not let caller-controlled, previously unseen Authorization
-                # values exhaust the key budget and deny service to legitimate
-                # credentials. Existing keys remain rate-limited; overflow keys
-                # are allowed through to authentication without being stored.
-                return False, 0
+                client_host = request.client.host if request.client else "unknown"
+                overflow_key = f"client:{client_host}:overflow"
+                overflow_started_at, overflow_count = overflow_limits.get(
+                    overflow_key,
+                    (now, 0),
+                )
+                overflow_elapsed = now - overflow_started_at
+                overflow_retry_after = max(1, int(math.ceil(window_seconds - overflow_elapsed)))
+                if overflow_elapsed >= window_seconds:
+                    overflow_limits[overflow_key] = (now, 1)
+                    return False, 0
+                overflow_count += 1
+                overflow_limits[overflow_key] = (overflow_started_at, overflow_count)
+                return overflow_count > max_requests, overflow_retry_after
         count += 1
         limits[key] = (window_started_at, count)
         return count > max_requests, retry_after
@@ -982,6 +998,7 @@ def create_app(
     app.state.started_at = started_at
     app.state.tool_gateway_http_client = httpx.AsyncClient(follow_redirects=False, trust_env=False)
     app.state.tool_gateway_rate_limits = {}
+    app.state.tool_gateway_rate_limit_overflow_limits = {}
     app.state.tool_gateway_rate_limit_lock = threading.Lock()
 
     async def _close_tool_gateway_http_client() -> None:
@@ -3321,6 +3338,19 @@ def create_app(
                 )
             ]
 
+    @app.get(
+        "/api/v1/gateway/capabilities",
+        response_model=GatewayCapabilitiesResponse,
+        tags=["tool-gateway"],
+    )
+    async def get_gateway_capabilities(
+        principal: GatewayPrincipal = Depends(_get_gateway_principal),
+    ) -> GatewayCapabilitiesResponse:
+        """Return the authenticated SDK compatibility contract."""
+
+        _ = principal
+        return GatewayCapabilitiesResponse()
+
     @app.post(
         "/api/v1/tools/{tool_name}/invoke",
         response_model=ToolInvocationResponse,
@@ -3390,12 +3420,12 @@ def create_app(
                                 request_id=context.request_id,
                                 correlation_id=correlation_id,
                                 tool_name=tool_name,
-                                decision=decision,
-                                reason_code=decision.reason_code,
+                                decision=None,
+                                reason_code="tool_call_denied",
                                 result=None,
                                 error={
-                                    "code": decision.reason_code,
-                                    "message": decision.reason_message,
+                                    "code": "tool_call_denied",
+                                    "message": "Tool call denied by gateway policy.",
                                 },
                             )
                         ),
@@ -3646,7 +3676,7 @@ def create_app(
                             tool_name=tool_name,
                             decision=decision,
                             reason_code=decision.reason_code,
-                            result=result,
+                            result=None,
                             error=execution.error
                             or {
                                 "code": "upstream_error",

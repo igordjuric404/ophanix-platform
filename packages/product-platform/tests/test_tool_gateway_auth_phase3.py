@@ -252,6 +252,42 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
         self.assertEqual(len(app.state.tool_gateway_rate_limits), 1)
         self.assertTrue(next(iter(app.state.tool_gateway_rate_limits)).startswith("authorization:"))
 
+    def test_api_gateway_rate_limit_caps_new_authorization_overflow_per_client(self) -> None:
+        app = create_app(
+            Settings(
+                app_name="Ophanix Test Platform",
+                environment="test",
+                build_sha="test-sha",
+                build_time="2026-05-01T00:00:00Z",
+                session_secret="test-secret",
+                tool_gateway_rate_limit_window_seconds=60,
+                tool_gateway_rate_limit_max_requests=1,
+                tool_gateway_rate_limit_max_keys=1,
+            ),
+            database=self.database,
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+
+        first = client.get(
+            "/api/v1/gateway/tools",
+            headers=self._headers("not-a-real-token-1"),
+        )
+        second = client.get(
+            "/api/v1/gateway/tools",
+            headers=self._headers("not-a-real-token-2"),
+        )
+        third = client.get(
+            "/api/v1/gateway/tools",
+            headers=self._headers("not-a-real-token-3"),
+        )
+
+        self.assertEqual(first.status_code, 401)
+        self.assertEqual(second.status_code, 401)
+        self.assertEqual(third.status_code, 429)
+        self.assertEqual(third.json()["code"], "TOOL_GATEWAY_RATE_LIMITED")
+        self.assertEqual(len(app.state.tool_gateway_rate_limits), 1)
+        self.assertEqual(len(app.state.tool_gateway_rate_limit_overflow_limits), 1)
+
     def test_api_rejects_wildcard_cors_with_credentials_in_production(self) -> None:
         with self.assertRaisesRegex(ValueError, "CORS wildcard origins"):
             create_app(
