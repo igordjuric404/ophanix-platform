@@ -38,6 +38,7 @@ REGISTERED_PACKAGES = {
     "pydantic", "pyyaml", "cryptography", "pynacl", "httpx", "aiohttp",
     "fastapi", "uvicorn", "structlog", "click", "rich", "numpy", "scipy",
     "pytest", "pytest-asyncio", "pytest-cov", "ruff", "mypy", "build",
+    "twine", "pip-audit",
     "openai", "anthropic", "langchain", "langchain-core", "crewai",
     "redis", "sqlalchemy", "asyncpg", "chromadb", "pinecone-client",
     "sentence-transformers", "prometheus-client", "opentelemetry-api",
@@ -129,6 +130,15 @@ REGISTERED_NPM_PACKAGES = {
     # npm deps from agent-os-vscode
     "@types/glob", "@types/mocha", "@vscode/test-electron",
     "autoprefixer", "glob", "mocha", "postcss", "tailwindcss",
+    # npm deps from product-platform/frontend
+    "@hookform/resolvers", "@radix-ui/react-dialog", "@radix-ui/react-slot",
+    "@tanstack/react-query", "@tanstack/react-router",
+    "class-variance-authority", "clsx", "lucide-react", "react-hook-form",
+    "recharts", "tailwind-merge", "@eslint/js", "@playwright/test",
+    "@testing-library/jest-dom", "@testing-library/react",
+    "@testing-library/user-event", "@vitejs/plugin-react",
+    "eslint-plugin-react-refresh", "jsdom", "prettier", "typescript-eslint",
+    "vite",
 }
 
 # Known Cargo crate names

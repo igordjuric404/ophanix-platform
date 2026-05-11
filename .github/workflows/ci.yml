@@ -213,7 +213,7 @@ jobs:
         working-directory: packages/${{ matrix.package }}
         run: |
           if [[ "${{ matrix.package }}" == "product-platform" ]]; then
-            pip install --no-cache-dir -e ../agent-discovery -e ../agent-mesh -e ".[dev]"
+            pip install --no-cache-dir -e ../agent-os -e ../agent-discovery -e ../agent-mesh -e ".[dev]"
           elif [[ "${{ matrix.package }}" == "ophanix-tool-gateway-sdk" ]]; then
             pip install --no-cache-dir -e ".[dev]"
           else
