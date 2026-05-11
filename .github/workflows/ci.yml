@@ -22,6 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       python: ${{ steps.filter.outputs.python }}
+      python-packages: ${{ steps.python-matrix.outputs.packages }}
+      python-versions: ${{ steps.python-matrix.outputs.versions }}
       dotnet: ${{ steps.filter.outputs.dotnet }}
       typescript: ${{ steps.filter.outputs.typescript }}
       integrations: ${{ steps.filter.outputs.integrations }}
@@ -47,6 +49,24 @@ jobs:
               - 'packages/ophanix-tool-gateway-sdk/**'
               - 'scripts/**'
               - 'requirements/**'
+            agent-os:
+              - 'packages/agent-os/**'
+            agent-mesh:
+              - 'packages/agent-mesh/**'
+            agent-hypervisor:
+              - 'packages/agent-hypervisor/**'
+            agent-sre:
+              - 'packages/agent-sre/**'
+            agent-compliance:
+              - 'packages/agent-compliance/**'
+            agent-runtime:
+              - 'packages/agent-runtime/**'
+            agent-lightning:
+              - 'packages/agent-lightning/**'
+            product-platform:
+              - 'packages/product-platform/**'
+            ophanix-tool-gateway-sdk:
+              - 'packages/ophanix-tool-gateway-sdk/**'
             dotnet:
               - 'packages/agent-governance-dotnet/**'
             typescript:
@@ -66,15 +86,68 @@ jobs:
               - '**/*.md'
               - 'notebooks/**'
               - 'docs/**'
+      - name: Build Python package matrix
+        id: python-matrix
+        shell: bash
+        run: |
+          all_packages=(
+            '"agent-os"'
+            '"agent-mesh"'
+            '"agent-hypervisor"'
+            '"agent-sre"'
+            '"agent-compliance"'
+            '"agent-runtime"'
+            '"agent-lightning"'
+            '"product-platform"'
+            '"ophanix-tool-gateway-sdk"'
+          )
+
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            packages=$(IFS=,; echo "${all_packages[*]}")
+            echo "packages=[$packages]" >> "$GITHUB_OUTPUT"
+            echo 'versions=["3.10","3.11","3.12","3.13"]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          packages=()
+          [[ "${{ steps.filter.outputs['agent-os'] }}" == "true" ]] && packages+=('"agent-os"')
+          [[ "${{ steps.filter.outputs['agent-mesh'] }}" == "true" ]] && packages+=('"agent-mesh"')
+          [[ "${{ steps.filter.outputs['agent-hypervisor'] }}" == "true" ]] && packages+=('"agent-hypervisor"')
+          [[ "${{ steps.filter.outputs['agent-sre'] }}" == "true" ]] && packages+=('"agent-sre"')
+          [[ "${{ steps.filter.outputs['agent-compliance'] }}" == "true" ]] && packages+=('"agent-compliance"')
+          [[ "${{ steps.filter.outputs['agent-runtime'] }}" == "true" ]] && packages+=('"agent-runtime"')
+          [[ "${{ steps.filter.outputs['agent-lightning'] }}" == "true" ]] && packages+=('"agent-lightning"')
+          [[ "${{ steps.filter.outputs['product-platform'] }}" == "true" ]] && packages+=('"product-platform"')
+          [[ "${{ steps.filter.outputs['ophanix-tool-gateway-sdk'] }}" == "true" ]] && packages+=('"ophanix-tool-gateway-sdk"')
+
+          is_dependabot_pr=false
+          if [[ "${{ github.event_name }}" == "pull_request" && "${{ github.event.pull_request.user.login }}" == "dependabot[bot]" ]]; then
+            is_dependabot_pr=true
+          fi
+
+          if [[ "$is_dependabot_pr" != "true" && "${{ steps.filter.outputs.python }}" == "true" ]]; then
+            packages=("${all_packages[@]}")
+          elif [[ ${#packages[@]} -eq 0 && "${{ steps.filter.outputs.python }}" == "true" ]]; then
+            packages=("${all_packages[@]}")
+          fi
+
+          joined=$(IFS=,; echo "${packages[*]}")
+          echo "packages=[$joined]" >> "$GITHUB_OUTPUT"
+
+          if [[ "$is_dependabot_pr" == "true" ]]; then
+            echo 'versions=["3.11"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'versions=["3.10","3.11","3.12","3.13"]' >> "$GITHUB_OUTPUT"
+          fi
 
   # ── Python lint + test (only when Python files change) ────────────────
   lint:
     needs: changes
-    if: needs.changes.outputs.python == 'true' || github.event_name == 'schedule'
+    if: needs.changes.outputs['python-packages'] != '[]'
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        package: [agent-os, agent-mesh, agent-hypervisor, agent-sre, agent-compliance, agent-runtime, agent-lightning, product-platform, ophanix-tool-gateway-sdk]
+        package: ${{ fromJSON(needs.changes.outputs['python-packages']) }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -109,13 +182,13 @@ jobs:
   # ── Python test (only when Python files change) ───────────────────────
   test:
     needs: changes
-    if: needs.changes.outputs.python == 'true' || github.event_name == 'schedule'
+    if: needs.changes.outputs['python-packages'] != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        package: [agent-os, agent-mesh, agent-hypervisor, agent-sre, agent-compliance, agent-runtime, agent-lightning, product-platform, ophanix-tool-gateway-sdk]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        package: ${{ fromJSON(needs.changes.outputs['python-packages']) }}
+        python-version: ${{ fromJSON(needs.changes.outputs['python-versions']) }}
         exclude:
           - package: agent-mesh
             python-version: "3.10"
@@ -154,12 +227,12 @@ jobs:
   # ── PyPI package build (only when Python files change) ────────────────
   build-pypi:
     needs: changes
-    if: needs.changes.outputs.python == 'true' || github.event_name == 'schedule'
+    if: needs.changes.outputs['python-packages'] != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        package: [agent-os, agent-mesh, agent-hypervisor, agent-sre, agent-compliance, agent-runtime, agent-lightning, product-platform, ophanix-tool-gateway-sdk]
+        package: ${{ fromJSON(needs.changes.outputs['python-packages']) }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -189,7 +262,7 @@ jobs:
   # ── Python dependency safety (only when Python files change) ──────────
   security:
     needs: changes
-    if: needs.changes.outputs.python == 'true' || github.event_name == 'schedule'
+    if: (needs.changes.outputs.python == 'true' || github.event_name == 'schedule') && (github.event_name != 'pull_request' || github.event.pull_request.user.login != 'dependabot[bot]')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -242,7 +315,7 @@ jobs:
   # ── Integration tests (only when integration packages change) ────────
   test-integrations:
     needs: changes
-    if: needs.changes.outputs.integrations == 'true' || needs.changes.outputs.python == 'true' || github.event_name == 'schedule'
+    if: needs.changes.outputs.integrations == 'true' || github.event_name == 'schedule' || (needs.changes.outputs.python == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.user.login != 'dependabot[bot]'))
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -315,6 +388,7 @@ jobs:
 
   # ── Dependency confusion scan (always runs — security gate) ──────────
   dependency-scan:
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

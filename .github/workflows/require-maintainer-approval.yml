@@ -22,6 +22,7 @@ jobs:
     name: Maintainer approval gate
     runs-on: ubuntu-latest
     if: >-
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
       github.event.pull_request.author_association != 'MEMBER' &&
       github.event.pull_request.author_association != 'OWNER'
     steps:
