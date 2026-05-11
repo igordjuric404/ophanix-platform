@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import base64
-import time
+import hashlib
 import json
+import time
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 from urllib.parse import parse_qs, urlparse
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.encoders import jsonable_encoder
@@ -528,6 +530,7 @@ from product_platform.tool_gateway.models import (
     AgentToolPermissionGrantRequest,
     AgentToolPermissionPatchRequest,
     AgentToolPermissionResponse,
+    GatewayToolDefinitionResponse,
     ToolDefinitionCreateRequest,
     ToolDefinitionPatchRequest,
     ToolDefinitionResponse,
@@ -552,6 +555,7 @@ from product_platform.tool_gateway.repository import (
     ToolUpstreamTargetNotFoundError,
     ToolUpstreamTargetValidationError,
     agent_tool_permission_response,
+    gateway_tool_definition_response,
     tool_definition_response,
     tool_definition_version_response,
     tool_response_policy_response,
@@ -651,6 +655,65 @@ def _error_response(
     )
 
 
+def _is_tool_gateway_runtime_path(path: str) -> bool:
+    return path in {"/api/v1/gateway/tools", "/api/v1/gateway/principal-probe"} or (
+        len(path.split("/")) == 6
+        and path.startswith("/api/v1/tools/")
+        and path.endswith("/invoke")
+    )
+
+
+def _gateway_rate_limit_key(request: Request) -> str:
+    authorization = request.headers.get("Authorization", "")
+    if authorization:
+        digest = hashlib.sha256(authorization.encode("utf-8")).hexdigest()
+        return f"authorization:{digest}"
+    client_host = request.client.host if request.client else "unknown"
+    return f"client:{client_host}"
+
+
+def _tool_gateway_rate_limit_exceeded(app: FastAPI, request: Request) -> bool:
+    settings = app.state.settings
+    max_requests = int(settings.tool_gateway_rate_limit_max_requests)
+    window_seconds = int(settings.tool_gateway_rate_limit_window_seconds)
+    if max_requests <= 0 or window_seconds <= 0:
+        return False
+    now = time.monotonic()
+    key = _gateway_rate_limit_key(request)
+    limits: dict[str, tuple[float, int]] = app.state.tool_gateway_rate_limits
+    window_started_at, count = limits.get(key, (now, 0))
+    if now - window_started_at >= window_seconds:
+        limits[key] = (now, 1)
+        return False
+    count += 1
+    limits[key] = (window_started_at, count)
+    return count > max_requests
+
+
+class _ToolGatewayRequestBodyTooLarge(Exception):
+    pass
+
+
+def _install_tool_gateway_body_limiter(request: Request, max_body_bytes: int) -> None:
+    if max_body_bytes <= 0:
+        return
+    original_receive = request._receive  # type: ignore[attr-defined]
+    received_bytes = 0
+
+    async def limited_receive() -> dict[str, Any]:
+        nonlocal received_bytes
+        message = await original_receive()
+        if message.get("type") == "http.request":
+            body = message.get("body", b"")
+            if isinstance(body, bytes):
+                received_bytes += len(body)
+                if received_bytes > max_body_bytes:
+                    raise _ToolGatewayRequestBodyTooLarge
+        return message
+
+    request._receive = limited_receive  # type: ignore[attr-defined]
+
+
 def create_app(
     settings: Settings | None = None,
     dependency_registry: DependencyRegistry | None = None,
@@ -682,13 +745,38 @@ def create_app(
     app.state.database = database
     app.state.denied_audit_events = []
     app.state.started_at = started_at
+    app.state.tool_gateway_http_client = httpx.Client()
+    app.state.tool_gateway_rate_limits = {}
+
+    def _close_tool_gateway_http_client() -> None:
+        close = getattr(app.state.tool_gateway_http_client, "close", None)
+        if callable(close):
+            close()
+
+    app.router.add_event_handler("shutdown", _close_tool_gateway_http_client)
+
+    if (
+        resolved_settings.environment.lower() not in {"development", "dev", "local", "test"}
+        and "*" in resolved_settings.cors_origins
+    ):
+        raise ValueError("CORS wildcard origins are not allowed when credentials are enabled.")
 
     app.add_middleware(
         CORSMiddleware,
         allow_origins=resolved_settings.cors_origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["DELETE", "GET", "OPTIONS", "PATCH", "POST", "PUT"],
+        allow_headers=[
+            "Accept",
+            "Authorization",
+            "Content-Type",
+            "X-Actor-Type",
+            "X-Correlation-ID",
+            "X-Environment-ID",
+            "X-Organization-ID",
+            "X-Request-ID",
+            "X-User-ID",
+        ],
     )
 
     @app.middleware("http")
@@ -722,61 +810,95 @@ def create_app(
     public_api_paths = {"/api/v1/auth/dev-login"}
 
     def _uses_gateway_auth_path(path: str) -> bool:
-        return path.startswith("/api/v1/gateway/") or (
-            path.startswith("/api/v1/tools/") and path.endswith("/invoke")
-        )
+        return _is_tool_gateway_runtime_path(path)
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next: Any) -> Any:
-        if (
-            request.url.path.startswith("/api/v1")
-            and request.url.path not in public_api_paths
-            and not _uses_gateway_auth_path(request.url.path)
-        ):
-            principal = auth_service.authenticate_request(request)
-            if principal is None:
-                authorization = request.headers.get("Authorization", "")
-                scheme, _, token = authorization.partition(" ")
-                if scheme.lower() == "bearer" and token:
-                    principal = api_keys.authenticate(token)
-            if principal is None:
+        if _uses_gateway_auth_path(request.url.path):
+            max_body_bytes = int(resolved_settings.tool_gateway_max_body_bytes)
+            content_length = request.headers.get("Content-Length")
+            if content_length is not None:
+                try:
+                    body_bytes = int(content_length)
+                except ValueError:
+                    return _error_response(
+                        request,
+                        status_code=400,
+                        code="INVALID_CONTENT_LENGTH",
+                        message="Content-Length must be an integer.",
+                    )
+                if max_body_bytes > 0 and body_bytes > max_body_bytes:
+                    return _error_response(
+                        request,
+                        status_code=413,
+                        code="REQUEST_BODY_TOO_LARGE",
+                        message="Tool Gateway request body exceeds the configured size limit.",
+                    )
+            _install_tool_gateway_body_limiter(request, max_body_bytes)
+            if _tool_gateway_rate_limit_exceeded(app, request):
                 return _error_response(
                     request,
-                    status_code=401,
-                    code="UNAUTHENTICATED",
-                    message="Authentication is required.",
+                    status_code=429,
+                    code="TOOL_GATEWAY_RATE_LIMITED",
+                    message="Tool Gateway rate limit exceeded.",
                 )
-            request.state.principal = principal
-            selected_organization_id = (
-                request.headers.get("X-Organization-ID") or principal.organization_id
-            )
-            if not selected_organization_id or selected_organization_id != principal.organization_id:
-                return _error_response(
-                    request,
-                    status_code=403,
-                    code="FORBIDDEN",
-                    message="Organization access is denied.",
+        try:
+            if (
+                request.url.path.startswith("/api/v1")
+                and request.url.path not in public_api_paths
+                and not _uses_gateway_auth_path(request.url.path)
+            ):
+                principal = auth_service.authenticate_request(request)
+                if principal is None:
+                    authorization = request.headers.get("Authorization", "")
+                    scheme, _, token = authorization.partition(" ")
+                    if scheme.lower() == "bearer" and token:
+                        principal = api_keys.authenticate(token)
+                if principal is None:
+                    return _error_response(
+                        request,
+                        status_code=401,
+                        code="UNAUTHENTICATED",
+                        message="Authentication is required.",
+                    )
+                request.state.principal = principal
+                selected_organization_id = (
+                    request.headers.get("X-Organization-ID") or principal.organization_id
                 )
-            if tenants.get_organization(selected_organization_id) is None:
-                return _error_response(
-                    request,
-                    status_code=403,
-                    code="FORBIDDEN",
-                    message="Organization access is denied.",
-                )
-            selected_environment_id = request.headers.get("X-Environment-ID")
-            if selected_environment_id:
-                environment = tenants.get_environment(selected_environment_id)
-                if environment is None or environment.organization_id != selected_organization_id:
+                if not selected_organization_id or selected_organization_id != principal.organization_id:
                     return _error_response(
                         request,
                         status_code=403,
                         code="FORBIDDEN",
-                        message="Environment access is denied.",
+                        message="Organization access is denied.",
                     )
-            request.state.selected_organization_id = selected_organization_id
-            request.state.selected_environment_id = selected_environment_id
-        return await call_next(request)
+                if tenants.get_organization(selected_organization_id) is None:
+                    return _error_response(
+                        request,
+                        status_code=403,
+                        code="FORBIDDEN",
+                        message="Organization access is denied.",
+                    )
+                selected_environment_id = request.headers.get("X-Environment-ID")
+                if selected_environment_id:
+                    environment = tenants.get_environment(selected_environment_id)
+                    if environment is None or environment.organization_id != selected_organization_id:
+                        return _error_response(
+                            request,
+                            status_code=403,
+                            code="FORBIDDEN",
+                            message="Environment access is denied.",
+                        )
+                request.state.selected_organization_id = selected_organization_id
+                request.state.selected_environment_id = selected_environment_id
+            return await call_next(request)
+        except _ToolGatewayRequestBodyTooLarge:
+            return _error_response(
+                request,
+                status_code=413,
+                code="REQUEST_BODY_TOO_LARGE",
+                message="Tool Gateway request body exceeds the configured size limit.",
+            )
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(
@@ -951,11 +1073,16 @@ def create_app(
             {"reason_code": error.reason_code},
         )
 
-    def _runtime_response_summary(execution: Any) -> dict[str, Any]:
+    def _runtime_response_summary(
+        execution: Any,
+        *,
+        store_full_response: bool = False,
+    ) -> dict[str, Any]:
         if isinstance(execution, ToolExecutionResult):
             return {
                 "status": execution.status,
-                "body": execution.body,
+                "body": execution.body if store_full_response else None,
+                "body_stored": bool(store_full_response),
                 "upstream_status_code": execution.upstream_status_code,
                 "response_schema_valid": execution.response_schema_valid,
                 "redaction_applied": execution.redaction_applied,
@@ -2337,7 +2464,7 @@ def create_app(
             request,
             status_code=422,
             code="SCHEMA_VALIDATION_ERROR",
-            message=str(exc),
+            message="Payload failed schema validation.",
             details={"field": exc.field},
         )
 
@@ -2910,6 +3037,36 @@ def create_app(
         app.state.gateway_principal_probe_executed = True
         return principal
 
+    @app.get(
+        "/api/v1/gateway/tools",
+        response_model=list[GatewayToolDefinitionResponse],
+        tags=["tool-gateway"],
+    )
+    async def list_gateway_callable_tools(
+        owner_team: str | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        principal: GatewayPrincipal = Depends(_get_gateway_principal),
+    ) -> list[GatewayToolDefinitionResponse]:
+        """List active Tool Gateway contracts callable by the authenticated agent."""
+
+        with _audit_database().transaction() as connection:
+            repository = ToolRegistryRepository(
+                connection,
+                principal.organization_id,
+                principal.environment_id,
+            )
+            return [
+                gateway_tool_definition_response(row)
+                for row in repository.list_tools_for_gateway_principal(
+                    agent_id=principal.agent_id,
+                    credential_id=principal.credential_id,
+                    owner_team=owner_team,
+                    limit=limit,
+                    offset=offset,
+                )
+            ]
+
     @app.post(
         "/api/v1/tools/{tool_name}/invoke",
         response_model=ToolInvocationResponse,
@@ -2932,16 +3089,6 @@ def create_app(
                     principal.organization_id,
                     principal.environment_id,
                 )
-                tool = repository.get_tool_by_name(tool_name, active_only=True)
-                if tool is None:
-                    raise HTTPException(status_code=404, detail="Tool not found.")
-                input_schema = (
-                    json.loads(tool["input_schema_json"])
-                    if tool["input_schema_json"] is not None
-                    else None
-                )
-                if input_schema is not None:
-                    validate_payload(body.payload, input_schema)
                 decision = ToolPolicyDecisionService(
                     connection,
                     principal.organization_id,
@@ -2958,21 +3105,21 @@ def create_app(
                     principal.organization_id,
                     principal.environment_id,
                 )
-                runtime_action = runtime_repository.create_action(
-                    ToolRuntimeActionCreate(
-                        request_id=context.request_id,
-                        correlation_id=correlation_id,
-                        agent_id=principal.agent_id,
-                        credential_id=principal.credential_id,
-                        tool_id=tool["id"],
-                        permission_id=decision.permission_id,
-                        decision_id=decision.id,
-                        action_status="denied" if decision.decision == "deny" else "allowed",
-                        reason_code=decision.reason_code,
-                        payload_summary=body.payload,
-                    )
-                )
                 if decision.decision == "deny":
+                    runtime_action = runtime_repository.create_action(
+                        ToolRuntimeActionCreate(
+                            request_id=context.request_id,
+                            correlation_id=correlation_id,
+                            agent_id=principal.agent_id,
+                            credential_id=principal.credential_id,
+                            tool_id=decision.tool_id,
+                            permission_id=decision.permission_id,
+                            decision_id=decision.id,
+                            action_status="denied",
+                            reason_code=decision.reason_code,
+                            payload_summary=body.payload,
+                        )
+                    )
                     _append_tool_runtime_event(
                         runtime_repository,
                         runtime_action["id"],
@@ -2998,6 +3145,30 @@ def create_app(
                                 },
                             )
                         ),
+                    )
+                tool = repository.get_tool_by_name(tool_name, active_only=True)
+                if tool is None:
+                    raise HTTPException(status_code=404, detail="Tool not found.")
+                input_schema = (
+                    json.loads(tool["input_schema_json"])
+                    if tool["input_schema_json"] is not None
+                    else None
+                )
+                if input_schema is not None:
+                    validate_payload(body.payload, input_schema)
+                runtime_action = runtime_repository.create_action(
+                    ToolRuntimeActionCreate(
+                        request_id=context.request_id,
+                        correlation_id=correlation_id,
+                        agent_id=principal.agent_id,
+                        credential_id=principal.credential_id,
+                        tool_id=tool["id"],
+                        permission_id=decision.permission_id,
+                        decision_id=decision.id,
+                        action_status="denied" if decision.decision == "deny" else "allowed",
+                        reason_code=decision.reason_code,
+                        payload_summary=body.payload,
+                    )
                 )
                 _append_tool_runtime_event(
                     runtime_repository,
@@ -3104,11 +3275,12 @@ def create_app(
                         else None,
                     },
                 )
+                response_policy: Any | None = None
                 if isinstance(execution, ToolExecutionResult):
                     try:
-                        policy = repository.get_response_policy(tool["id"])
-                        if policy is not None:
-                            execution = process_tool_execution_response(tool, policy, execution)
+                        response_policy = repository.get_response_policy(tool["id"])
+                        if response_policy is not None:
+                            execution = process_tool_execution_response(tool, response_policy, execution)
                     except ToolExecutionError as exc:
                         runtime_repository.update_action(
                             runtime_action["id"],
@@ -3116,7 +3288,12 @@ def create_app(
                                 action_status="response_blocked",
                                 upstream_status_code=execution.upstream_status_code,
                                 latency_ms=execution.latency_ms,
-                                response_summary=_runtime_response_summary(execution),
+                                response_summary=_runtime_response_summary(
+                                    execution,
+                                    store_full_response=bool(response_policy["store_full_response"])
+                                    if response_policy is not None
+                                    else False,
+                                ),
                                 redaction_applied=execution.redaction_applied,
                                 error_code=exc.code,
                             ),
@@ -3150,7 +3327,12 @@ def create_app(
                             action_status="upstream_failed",
                             upstream_status_code=execution.upstream_status_code,
                             latency_ms=execution.latency_ms,
-                            response_summary=_runtime_response_summary(execution),
+                            response_summary=_runtime_response_summary(
+                                execution,
+                                store_full_response=bool(response_policy["store_full_response"])
+                                if response_policy is not None
+                                else False,
+                            ),
                             redaction_applied=execution.redaction_applied,
                             error_code=error_code,
                         ),
@@ -3189,7 +3371,12 @@ def create_app(
                         latency_ms=execution.latency_ms
                         if isinstance(execution, ToolExecutionResult)
                         else None,
-                        response_summary=_runtime_response_summary(execution),
+                        response_summary=_runtime_response_summary(
+                            execution,
+                            store_full_response=bool(response_policy["store_full_response"])
+                            if response_policy is not None
+                            else False,
+                        ),
                         redaction_applied=execution.redaction_applied
                         if isinstance(execution, ToolExecutionResult)
                         else False,

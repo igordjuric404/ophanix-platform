@@ -4,7 +4,7 @@ import unittest
 
 from product_platform.db.seed import DEMO_ADMIN_USER_ID, DEMO_ENV_ID, DEMO_ORG_ID, seed_demo_data
 from product_platform.db.testing import create_migrated_test_database
-from product_platform.tool_gateway.auth import GatewayPrincipal
+from product_platform.tool_gateway.auth import GatewayCredentialScope, GatewayPrincipal
 from product_platform.tool_gateway.decision import (
     ToolPolicyDecisionRepository,
     ToolPolicyDecisionService,
@@ -94,6 +94,13 @@ class ToolGatewayDecisionPhase3Tests(unittest.TestCase):
             agent_id="agent_decision_policy",
             credential_id="cred_policy",
             scopes=["claims.lookup:read"],
+            scope_grants=[
+                GatewayCredentialScope(
+                    scope="claims.lookup:read",
+                    resource_type="tool",
+                    resource_id="claims.lookup",
+                )
+            ],
             request_id="req-policy",
         )
 

@@ -43,12 +43,13 @@ class FakeHTTPClient:
         self.response = response
         self.calls: list[dict[str, object]] = []
 
-    def request(self, method: str, url: str, *, json, headers, timeout: float):
+    def request(self, method: str, url: str, *, headers, timeout: float, json=None, params=None):
         self.calls.append(
             {
                 "method": method,
                 "url": url,
                 "json": json,
+                "params": params,
                 "headers": headers,
                 "timeout": timeout,
             }

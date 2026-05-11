@@ -12,6 +12,9 @@ from product_platform.tool_gateway.direct_http_examples import (
     DIRECT_HTTP_DENIED_AGENT_ID,
     DIRECT_HTTP_DENIED_TOKEN,
     DIRECT_HTTP_TOOL_NAME,
+    SUPPORT_BULK_CLAIMS_TOOL_NAME,
+    SUPPORT_CROSS_CUSTOMER_CLAIM_TOOL_NAME,
+    seed_support_demo_tool_gateway_fixtures,
     seed_tool_gateway_direct_http_fixtures,
 )
 
@@ -113,6 +116,54 @@ class ToolGatewayDirectHttpExamplesPhase1Tests(unittest.TestCase):
             self.assertTrue(token.startswith("ophanix-local-only-"))
             for pattern in FORBIDDEN_SECRET_PATTERNS:
                 self.assertIsNone(pattern.search(token))
+
+    def test_support_demo_denied_tools_are_seeded_in_platform_without_permissions(self) -> None:
+        with self.database.transaction() as connection:
+            seed_tool_gateway_direct_http_fixtures(connection, upstream_base_url="http://127.0.0.1:8096")
+            seed_support_demo_tool_gateway_fixtures(connection, upstream_base_url="http://127.0.0.1:8096")
+
+            rows = connection.execute(
+                """
+                SELECT id, name, required_scope
+                FROM tool_definitions
+                WHERE organization_id = ? AND environment_id = ?
+                  AND name IN (?, ?)
+                ORDER BY name
+                """,
+                (
+                    DEMO_ORG_ID,
+                    DEMO_ENV_ID,
+                    SUPPORT_BULK_CLAIMS_TOOL_NAME,
+                    SUPPORT_CROSS_CUSTOMER_CLAIM_TOOL_NAME,
+                ),
+            ).fetchall()
+
+            self.assertEqual([row["name"] for row in rows], [
+                SUPPORT_BULK_CLAIMS_TOOL_NAME,
+                SUPPORT_CROSS_CUSTOMER_CLAIM_TOOL_NAME,
+            ])
+            self.assertEqual(rows[0]["required_scope"], "claims.bulk:read")
+            self.assertEqual(rows[1]["required_scope"], "claims.cross_customer:read")
+
+            permission_count = connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM agent_tool_permissions
+                WHERE organization_id = ? AND environment_id = ?
+                  AND tool_id IN (?, ?)
+                  AND agent_id IN (?, ?)
+                  AND status = 'active'
+                """,
+                (
+                    DEMO_ORG_ID,
+                    DEMO_ENV_ID,
+                    rows[0]["id"],
+                    rows[1]["id"],
+                    DIRECT_HTTP_ALLOWED_AGENT_ID,
+                    DIRECT_HTTP_DENIED_AGENT_ID,
+                ),
+            ).fetchone()["count"]
+            self.assertEqual(permission_count, 0)
 
 
 if __name__ == "__main__":

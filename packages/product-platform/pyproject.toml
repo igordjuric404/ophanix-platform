@@ -23,7 +23,26 @@ dependencies = [
 ophanix-product-api = "product_platform.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/product_platform"]
+packages = ["src/product_platform", "src/ophanix_tool_gateway"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/examples",
+    "/README.md",
+    "/pyproject.toml",
+]
+exclude = [
+    "*.db",
+    "*.db.*",
+    "*.sqlite",
+    "*.sqlite3",
+    "**/__pycache__",
+    "**/*.pyc",
+    "/frontend/node_modules",
+    "/frontend/dist",
+]
 
 [tool.ruff]
 target-version = "py311"

@@ -1,4 +1,5 @@
-"""Compatibility exports for the standalone Tool Gateway SDK package."""
+# SPDX-License-Identifier: MIT
+"""Ophanix Tool Gateway Python SDK."""
 
 from __future__ import annotations
 

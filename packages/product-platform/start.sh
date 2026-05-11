@@ -309,8 +309,10 @@ run_local() {
 
   log "Applying migrations..."
   python3 -m product_platform.cli db migrate
-  log "Seeding demo data..."
-  python3 -m product_platform.cli db seed
+  # Keep the local platform blank by default. Re-enable this if you want
+  # built-in demo organizations, agents, tools, and sample activity.
+  # log "Seeding demo data..."
+  # python3 -m product_platform.cli db seed
 
   start_process "API on http://$API_HOST:$API_PORT" \
     python3 -m product_platform.cli serve --host "$API_HOST" --port "$API_PORT"

@@ -43,6 +43,8 @@ jobs:
               - 'packages/agent-compliance/**'
               - 'packages/agent-runtime/**'
               - 'packages/agent-lightning/**'
+              - 'packages/product-platform/**'
+              - 'packages/ophanix-tool-gateway-sdk/**'
               - 'scripts/**'
               - 'requirements/**'
             dotnet:
@@ -72,7 +74,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        package: [agent-os, agent-mesh, agent-hypervisor, agent-sre, agent-compliance, agent-runtime, agent-lightning]
+        package: [agent-os, agent-mesh, agent-hypervisor, agent-sre, agent-compliance, agent-runtime, agent-lightning, product-platform, ophanix-tool-gateway-sdk]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -82,6 +84,12 @@ jobs:
         run: pip install --require-hashes --no-cache-dir -r requirements/ci-lint.txt
       - name: Lint ${{ matrix.package }}
         run: ruff check packages/${{ matrix.package }}/src/ --select E,F,W --ignore E501
+      - name: Type check Tool Gateway SDK
+        if: matrix.package == 'ophanix-tool-gateway-sdk'
+        working-directory: packages/ophanix-tool-gateway-sdk
+        run: |
+          pip install --no-cache-dir ".[dev]"
+          python -m mypy src/ophanix_tool_gateway
 
   # ── Python test (only when Python files change) ───────────────────────
   test:
@@ -91,7 +99,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [agent-os, agent-mesh, agent-hypervisor, agent-sre, agent-compliance, agent-runtime, agent-lightning]
+        package: [agent-os, agent-mesh, agent-hypervisor, agent-sre, agent-compliance, agent-runtime, agent-lightning, product-platform, ophanix-tool-gateway-sdk]
         python-version: ["3.10", "3.11", "3.12", "3.13"]
         exclude:
           - package: agent-mesh
@@ -126,7 +134,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [agent-os, agent-mesh, agent-hypervisor, agent-sre, agent-compliance, agent-runtime, agent-lightning]
+        package: [agent-os, agent-mesh, agent-hypervisor, agent-sre, agent-compliance, agent-runtime, agent-lightning, product-platform, ophanix-tool-gateway-sdk]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -140,6 +148,12 @@ jobs:
       - name: Verify wheel
         working-directory: packages/${{ matrix.package }}
         run: ls -la dist/*.whl
+      - name: Validate Tool Gateway SDK release artifacts
+        if: matrix.package == 'ophanix-tool-gateway-sdk'
+        working-directory: packages/ophanix-tool-gateway-sdk
+        run: |
+          python -m pip install --no-cache-dir ".[release,security]"
+          python scripts/validate_release.py --out-dir /tmp/ophanix-sdk-ci-release --require-dependency-audit
 
   # ── Python dependency safety (only when Python files change) ──────────
   security:
@@ -158,7 +172,7 @@ jobs:
         env:
           GIT_TERMINAL_PROMPT: "0"
         run: |
-          for pkg in agent-os agent-mesh agent-hypervisor agent-sre agent-compliance agent-runtime agent-lightning; do
+          for pkg in agent-os agent-mesh agent-hypervisor agent-sre agent-compliance agent-runtime agent-lightning product-platform ophanix-tool-gateway-sdk; do
             echo "=== $pkg ==="
             cd packages/$pkg
             pip install --no-cache-dir -e . 2>/dev/null || true  # Install local package (Scorecard: pinned via pyproject.toml)

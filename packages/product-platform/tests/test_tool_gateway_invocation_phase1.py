@@ -96,8 +96,8 @@ class ToolGatewayInvocationPhase1Tests(unittest.TestCase):
             json={"payload": {"claim_id": "claim_123"}},
         )
 
-        self.assertEqual(response.status_code, 404)
-        self.assertEqual(response.json()["message"], "Tool not found.")
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "tool_missing")
 
     def test_api_correlation_and_request_id_are_preserved(self) -> None:
         response = self.client.post(
@@ -106,7 +106,7 @@ class ToolGatewayInvocationPhase1Tests(unittest.TestCase):
             json={"payload": {"claim_id": "claim_123"}},
         )
 
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["request_id"], "req-preserved")
         self.assertEqual(response.headers["X-Request-ID"], "req-preserved")
         self.assertEqual(response.headers["X-Correlation-ID"], "corr-preserved")

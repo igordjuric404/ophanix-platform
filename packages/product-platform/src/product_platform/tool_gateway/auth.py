@@ -34,6 +34,14 @@ class GatewayAuthenticationError(ValueError):
         self.credential_id = credential_id
 
 
+class GatewayCredentialScope(BaseModel):
+    """Structured scope grant attached to one gateway credential."""
+
+    scope: str
+    resource_type: str
+    resource_id: str | None = None
+
+
 class GatewayPrincipal(BaseModel):
     """Authenticated external agent principal for Tool Gateway routes."""
 
@@ -42,7 +50,25 @@ class GatewayPrincipal(BaseModel):
     agent_id: str
     credential_id: str
     scopes: list[str] = Field(default_factory=list)
+    scope_grants: list[GatewayCredentialScope] = Field(default_factory=list)
     request_id: str
+
+    def allows_tool_scope(self, required_scope: str, *, tool_id: str, tool_name: str) -> bool:
+        """Return whether this credential grants a scope for the specific tool resource."""
+
+        normalized_scope = required_scope.strip()
+        if not normalized_scope:
+            return False
+        tool_resource_ids = {tool_id.strip(), tool_name.strip().lower()}
+        for grant in self.scope_grants:
+            if grant.scope != normalized_scope or grant.resource_type != "tool":
+                continue
+            if grant.resource_id is None:
+                return True
+            resource_id = grant.resource_id.strip()
+            if resource_id == tool_id or resource_id.lower() in tool_resource_ids:
+                return True
+        return False
 
 
 def parse_bearer_authorization(authorization: str | None) -> str:
@@ -141,6 +167,7 @@ class GatewayTokenVerifier:
             agent_id=row["agent_id"],
             credential_id=row["credential_id"],
             scopes=self._credential_scopes(row["credential_id"]),
+            scope_grants=self._credential_scope_grants(row["credential_id"]),
             request_id=request_id,
         )
 
@@ -166,14 +193,33 @@ class GatewayTokenVerifier:
     def _credential_scopes(self, credential_id: str) -> list[str]:
         rows = self.connection.execute(
             """
-            SELECT scope
+            SELECT DISTINCT scope
             FROM credential_scopes
             WHERE credential_id = ?
-            ORDER BY scope ASC, id ASC
+            ORDER BY scope ASC
             """,
             (credential_id,),
         ).fetchall()
         return [row["scope"] for row in rows]
+
+    def _credential_scope_grants(self, credential_id: str) -> list[GatewayCredentialScope]:
+        rows = self.connection.execute(
+            """
+            SELECT scope, resource_type, resource_id
+            FROM credential_scopes
+            WHERE credential_id = ?
+            ORDER BY scope ASC, resource_type ASC, resource_id ASC, id ASC
+            """,
+            (credential_id,),
+        ).fetchall()
+        return [
+            GatewayCredentialScope(
+                scope=row["scope"],
+                resource_type=row["resource_type"],
+                resource_id=row["resource_id"],
+            )
+            for row in rows
+        ]
 
     def _credential_error(self, row: Row, reason_code: str, message: str) -> GatewayAuthenticationError:
         return GatewayAuthenticationError(

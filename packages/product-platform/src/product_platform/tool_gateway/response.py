@@ -10,6 +10,7 @@ from product_platform.tool_gateway.invocation import ToolExecutionError, ToolExe
 from product_platform.tool_gateway.schemas import ToolSchemaValidationError, validate_payload
 
 REDACTED_VALUE = "[redacted]"
+MAX_REDACTION_DEPTH = 20
 
 
 def process_tool_execution_response(
@@ -19,13 +20,11 @@ def process_tool_execution_response(
 ) -> ToolExecutionResult:
     """Return a safe agent-facing execution result."""
 
-    if execution.status != "succeeded":
-        return execution
     body = execution.body
     schema_valid: bool | None = None
     warnings = list(execution.warnings)
     output_schema = _json_from_row_value(tool["output_schema_json"])
-    if output_schema is not None:
+    if execution.status == "succeeded" and output_schema is not None:
         try:
             validate_payload(body, output_schema)
             schema_valid = True
@@ -34,7 +33,7 @@ def process_tool_execution_response(
             if bool(policy["strict_output_validation"]):
                 raise ToolExecutionError(
                     code="response_schema_invalid",
-                    message=f"Upstream response failed output schema validation: {exc}",
+                    message="Upstream response failed output schema validation.",
                     status_code=502,
                 ) from exc
             warnings.append("response_schema_invalid")
@@ -68,16 +67,41 @@ def _json_from_row_value(value: Any) -> Any:
 
 
 def _redact_value(value: Any, rules: dict[str, Any], *, key: str = "") -> tuple[Any, bool]:
-    redact_keys = [item.lower() for item in rules.get("redact_keys", [])]
-    redact_patterns = [re.compile(pattern) for pattern in rules.get("redact_patterns", [])]
+    return _redact_value_at_depth(value, _compiled_redaction_rules(rules), key=key, depth=0)
+
+
+def _compiled_redaction_rules(rules: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "redact_keys": [_normalize_redaction_key(item) for item in rules.get("redact_keys", [])],
+        "redact_patterns": [re.compile(pattern) for pattern in rules.get("redact_patterns", [])],
+    }
+
+
+def _redact_value_at_depth(
+    value: Any,
+    rules: dict[str, Any],
+    *,
+    key: str = "",
+    depth: int,
+) -> tuple[Any, bool]:
+    if depth > MAX_REDACTION_DEPTH:
+        return "[truncated]", True
+    redact_keys = rules.get("redact_keys", [])
+    redact_patterns = rules.get("redact_patterns", [])
     lowered = key.lower()
-    if key and any(token in lowered for token in redact_keys):
+    normalized_key = _normalize_redaction_key(lowered)
+    if key and _is_redaction_key_match(normalized_key, redact_keys):
         return REDACTED_VALUE, True
     if isinstance(value, dict):
         changed = False
         output: dict[str, Any] = {}
         for child_key, child_value in value.items():
-            redacted, child_changed = _redact_value(child_value, rules, key=str(child_key))
+            redacted, child_changed = _redact_value_at_depth(
+                child_value,
+                rules,
+                key=str(child_key),
+                depth=depth + 1,
+            )
             output[str(child_key)] = redacted
             changed = changed or child_changed
         return output, changed
@@ -85,7 +109,12 @@ def _redact_value(value: Any, rules: dict[str, Any], *, key: str = "") -> tuple[
         changed = False
         output_list = []
         for item in value:
-            redacted, child_changed = _redact_value(item, rules, key=key)
+            redacted, child_changed = _redact_value_at_depth(
+                item,
+                rules,
+                key=key,
+                depth=depth + 1,
+            )
             output_list.append(redacted)
             changed = changed or child_changed
         return output_list, changed
@@ -97,6 +126,60 @@ def _redact_value(value: Any, rules: dict[str, Any], *, key: str = "") -> tuple[
             changed = changed or count > 0
         return redacted, changed
     return value, False
+
+
+def validate_redaction_rules(rules: dict[str, Any]) -> dict[str, Any]:
+    """Validate and normalize response redaction rules at policy-write time."""
+
+    allowed = {"redact_keys", "redact_patterns"}
+    unknown = set(rules) - allowed
+    if unknown:
+        raise ValueError(f"unsupported redaction rule keys: {', '.join(sorted(unknown))}.")
+    normalized: dict[str, Any] = {}
+    for key in ["redact_keys", "redact_patterns"]:
+        if key in rules and (
+            not isinstance(rules[key], list)
+            or not all(isinstance(item, str) and item.strip() for item in rules[key])
+        ):
+            raise ValueError(f"{key} must be a list of nonblank strings.")
+    normalized["redact_keys"] = [
+        item.strip()
+        for item in rules.get("redact_keys", [])
+    ]
+    normalized["redact_patterns"] = [
+        _validate_redaction_pattern(item.strip())
+        for item in rules.get("redact_patterns", [])
+    ]
+    return {key: value for key, value in normalized.items() if key in rules}
+
+
+def _validate_redaction_pattern(pattern: str) -> str:
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        raise ValueError(f"invalid redaction regex pattern: {exc}") from exc
+    if len(pattern) > 500:
+        raise ValueError("redact_patterns entries must be 500 characters or fewer.")
+    # Keep policy regexes simple enough to avoid obvious catastrophic backtracking.
+    if re.search(r"\([^)]*[+*][^)]*\)[+*?]", pattern):
+        raise ValueError("redact_patterns entries must not contain nested unbounded quantifiers.")
+    return pattern
+
+
+def _normalize_redaction_key(key: str) -> str:
+    with_word_boundaries = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key.strip())
+    return re.sub(r"[^a-z0-9]+", "_", with_word_boundaries.lower()).strip("_")
+
+
+def _is_redaction_key_match(normalized_key: str, redact_keys: list[str]) -> bool:
+    normalized_rules = [_normalize_redaction_key(rule) for rule in redact_keys]
+    return any(
+        normalized_key == rule
+        or normalized_key.endswith(f"_{rule}")
+        or rule.endswith(f"_{normalized_key}")
+        for rule in normalized_rules
+        if rule
+    )
 
 
 def _response_size(value: Any) -> int:

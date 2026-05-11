@@ -96,7 +96,7 @@ class ToolGatewayUpstreamPhase3Tests(unittest.TestCase):
             "base_url": "https://claims.internal.example",
             "path_template": "/v1/claims/{claim_id}",
             "method": "POST",
-            "auth_mode": "bearer",
+            "auth_mode": "none",
             "timeout_ms": 1200,
             "health_url": "https://claims.internal.example/ready",
             "expected_status": 204,

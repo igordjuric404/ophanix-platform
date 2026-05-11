@@ -4,10 +4,11 @@ import unittest
 
 from product_platform.db.seed import DEMO_ADMIN_USER_ID, DEMO_ENV_ID, DEMO_ORG_ID, seed_demo_data
 from product_platform.db.testing import create_migrated_test_database
-from product_platform.tool_gateway.auth import GatewayPrincipal
+from product_platform.tool_gateway.auth import GatewayCredentialScope, GatewayPrincipal
 from product_platform.tool_gateway.decision import (
     ToolPolicyDecisionRepository,
     ToolPolicyDecisionService,
+    summarize_tool_payload,
 )
 from product_platform.tool_gateway.models import (
     AgentToolPermissionGrantRequest,
@@ -63,12 +64,21 @@ class ToolGatewayDecisionPhase2Tests(unittest.TestCase):
         )
 
     def _principal(self, *, agent_id: str = "agent_decision_active", scopes: list[str] | None = None) -> GatewayPrincipal:
+        resolved_scopes = scopes or ["claims.lookup:read"]
         return GatewayPrincipal(
             organization_id=DEMO_ORG_ID,
             environment_id=DEMO_ENV_ID,
             agent_id=agent_id,
             credential_id=f"cred_{agent_id}",
-            scopes=scopes or ["claims.lookup:read"],
+            scopes=resolved_scopes,
+            scope_grants=[
+                GatewayCredentialScope(
+                    scope=scope,
+                    resource_type="tool",
+                    resource_id=scope.rsplit(":", 1)[0],
+                )
+                for scope in resolved_scopes
+            ],
             request_id="req-decision",
         )
 
@@ -127,6 +137,21 @@ class ToolGatewayDecisionPhase2Tests(unittest.TestCase):
             DEMO_ENV_ID,
         ).get_decision(decision.id)
         self.assertIsNotNone(persisted)
+
+    def test_unit_payload_summary_caps_items_depth_and_strings(self) -> None:
+        nested = current = {}
+        for index in range(12):
+            child = {"value": f"level-{index}"}
+            current["child"] = child
+            current = child
+        payload = {f"field_{index}": "x" * 200 for index in range(80)}
+        payload["a_nested"] = nested
+
+        summary = summarize_tool_payload(payload)
+
+        self.assertLessEqual(len(summary), 50)
+        self.assertEqual(summary["field_0"], ("x" * 117) + "...")
+        self.assertIn("[truncated]", str(summary))
 
     def test_unit_suspended_agent_is_denied(self) -> None:
         with self.database.transaction():

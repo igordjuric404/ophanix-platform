@@ -1,0 +1,1588 @@
+# SPDX-License-Identifier: MIT
+"""Thin Python client for calling the Tool Gateway HTTP contract."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import ipaddress
+import inspect
+import json
+import math
+import os
+import random
+import re
+import threading
+import time
+import tomllib
+from dataclasses import dataclass, field
+from datetime import timezone
+from email.utils import parsedate_to_datetime
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any, Awaitable, Callable, Literal, Mapping, Protocol
+from urllib.parse import quote
+from urllib.parse import urlparse
+
+import httpx
+
+SDK_PACKAGE_NAME = "ophanix-tool-gateway-sdk"
+COMPAT_PACKAGE_NAME = "ophanix-product-platform"
+
+
+def _sdk_version() -> str:
+    try:
+        return version(SDK_PACKAGE_NAME)
+    except PackageNotFoundError:
+        try:
+            return version(COMPAT_PACKAGE_NAME)
+        except PackageNotFoundError:
+            return _version_from_local_pyproject() or "0.0.0"
+
+
+def _version_from_local_pyproject() -> str | None:
+    for parent in Path(__file__).resolve().parents:
+        pyproject = parent / "pyproject.toml"
+        if not pyproject.exists():
+            continue
+        try:
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        name = data.get("project", {}).get("name")
+        if name in {SDK_PACKAGE_NAME, COMPAT_PACKAGE_NAME}:
+            project_version = data.get("project", {}).get("version")
+            return project_version if isinstance(project_version, str) else None
+    return None
+
+
+GATEWAY_TOOL_DISCOVERY_PATH = "/api/v1/gateway/tools"
+GATEWAY_TOOL_INVOKE_PATH_PREFIX = "/api/v1/tools"
+GATEWAY_TOOL_INVOKE_PATH_SUFFIX = "/invoke"
+SDK_VERSION = _sdk_version()
+SDK_USER_AGENT = f"ophanix-tool-gateway-python/{SDK_VERSION}"
+DEFAULT_GATEWAY_TOKEN_ENV_VAR = "OPHANIX_GATEWAY_TOKEN"
+RETRYABLE_DISCOVERY_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+DEFAULT_DISCOVERY_RETRY_MAX_SLEEP_SECONDS = 5.0
+DEFAULT_DISCOVERY_RETRY_JITTER_RATIO = 0.2
+DEFAULT_CACHE_TTL_SECONDS = 300.0
+MAX_ERROR_BODY_STRING_LENGTH = 512
+MAX_ERROR_BODY_ITEMS = 20
+MAX_ERROR_BODY_DEPTH = 20
+MAX_NON_JSON_ERROR_EXCERPT_BYTES = 2048
+DEFAULT_MAX_PAYLOAD_BYTES = 1_000_000
+_ToolCacheKey = tuple[str, str]
+_ListCacheKey = tuple[tuple[str, str], ...]
+_ToolCacheValue = tuple[float, "ToolDefinition"]
+_ListCacheValue = tuple[float, list["ToolDefinition"]]
+TelemetryEventHook = Callable[[Mapping[str, Any]], None]
+SENSITIVE_KEY_NAMES = frozenset(
+    {
+        "authorization",
+        "api_key",
+        "apikey",
+        "client_secret",
+        "credential",
+        "credentials",
+        "id_token",
+        "key",
+        "password",
+        "passwd",
+        "private_key",
+        "pwd",
+        "refresh_token",
+        "secret",
+        "token",
+    }
+)
+SENSITIVE_KEY_SUFFIXES = ("_credential", "_key", "_password", "_secret", "_token")
+BEARER_TOKEN_RE = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
+SENSITIVE_TEXT_ASSIGNMENT_RE = re.compile(
+    r"(?P<key>\b(?:"
+    r"authorization|"
+    r"api[-_\s]?key|apikey|"
+    r"client[-_\s]?secret|"
+    r"credential|"
+    r"id[-_\s]?token|"
+    r"password|passwd|pwd|"
+    r"private[-_\s]?key|"
+    r"refresh[-_\s]?token|"
+    r"access[-_\s]?token|"
+    r"secret|"
+    r"token"
+    r")\b)"
+    r"(?P<before_sep>\s*)(?P<sep>[:=])(?P<after_sep>\s*)"
+    r"(?P<value>bearer\s+[^\s,;]+|\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+    re.IGNORECASE,
+)
+
+
+class TokenProvider(Protocol):
+    """Supplies bearer tokens for gateway requests."""
+
+    def get_token(self) -> str:
+        """Return the raw bearer token without the `Bearer` prefix."""
+
+
+class AsyncTokenProvider(Protocol):
+    """Supplies bearer tokens for async gateway requests."""
+
+    def get_token(self) -> str | Awaitable[str]:
+        """Return, or awaitably return, the raw bearer token."""
+
+
+@dataclass(frozen=True)
+class StaticTokenProvider:
+    """Token provider for callers that already have a long-lived gateway token."""
+
+    token: str = field(repr=False)
+
+    def get_token(self) -> str:
+        return _require_text(self.token, "token")
+
+
+@dataclass(frozen=True)
+class EnvironmentTokenProvider:
+    """Token provider that reads a gateway token from an environment variable."""
+
+    env_var: str = DEFAULT_GATEWAY_TOKEN_ENV_VAR
+
+    def get_token(self) -> str:
+        env_var = _require_text(self.env_var, "env_var")
+        token = os.environ.get(env_var)
+        if token is None:
+            raise ValueError(f"{env_var} environment variable is required")
+        return _require_text(token, env_var)
+
+
+@dataclass(frozen=True)
+class ToolCallResult:
+    """Typed response returned by a successful gateway invocation."""
+
+    request_id: str
+    correlation_id: str
+    tool_name: str
+    result: Any | None = None
+    reason_code: str | None = None
+    decision: dict[str, Any] | None = None
+    raw: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ToolDefinition:
+    """SDK view of a Tool Gateway contract."""
+
+    id: str
+    name: str
+    display_name: str
+    description: str
+    owner_team: str
+    status: str
+    required_scope: str
+    input_schema_json: dict[str, Any] | None = None
+    output_schema_json: dict[str, Any] | None = None
+    raw: Mapping[str, Any] = field(default_factory=dict)
+
+
+class ToolGatewayError(RuntimeError):
+    """Base SDK error for gateway, upstream, and transport failures."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        code: str | None = None,
+        request_id: str | None = None,
+        correlation_id: str | None = None,
+        response_body: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.code = code
+        self.request_id = request_id
+        self.correlation_id = correlation_id
+        self.response_body = _sanitize_error_body(response_body or {})
+
+
+class ToolDeniedError(ToolGatewayError):
+    """Raised when gateway policy denies a tool call."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str | None = None,
+        status_code: int | None = 403,
+        request_id: str | None = None,
+        correlation_id: str | None = None,
+        response_body: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            status_code=status_code,
+            code=reason_code,
+            request_id=request_id,
+            correlation_id=correlation_id,
+            response_body=response_body,
+        )
+        self.reason_code = reason_code
+
+
+class ToolAuthenticationError(ToolGatewayError):
+    """Raised when gateway authentication fails before policy evaluation."""
+
+
+@dataclass(frozen=True)
+class _AuthContext:
+    headers: dict[str, str]
+    cache_key: str
+
+
+@dataclass(frozen=True)
+class _ClientConfig:
+    base_url: str
+    timeout_seconds: float
+    max_payload_bytes: int
+    cache_tools: bool
+    cache_ttl_seconds: float
+    allow_insecure_http: bool
+    user_agent: str
+    discovery_max_retries: int
+    discovery_retry_backoff_seconds: float
+    discovery_retry_max_sleep_seconds: float
+    discovery_retry_jitter_ratio: float
+
+
+class OphanixToolGatewayClient:
+    """Small synchronous SDK client for external Python agents."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        token_provider: TokenProvider,
+        timeout_seconds: float = 5.0,
+        max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+        http_client: httpx.Client | None = None,
+        cache_tools: bool = False,
+        cache_ttl_seconds: float = DEFAULT_CACHE_TTL_SECONDS,
+        event_hook: TelemetryEventHook | None = None,
+        allow_insecure_http: bool = False,
+        user_agent: str | None = None,
+        discovery_max_retries: int = 2,
+        discovery_retry_backoff_seconds: float = 0.2,
+        discovery_retry_max_sleep_seconds: float = DEFAULT_DISCOVERY_RETRY_MAX_SLEEP_SECONDS,
+        discovery_retry_jitter_ratio: float = DEFAULT_DISCOVERY_RETRY_JITTER_RATIO,
+    ) -> None:
+        if token_provider is None:
+            raise ValueError("token_provider is required")
+        if not callable(getattr(token_provider, "get_token", None)):
+            raise ValueError("token_provider must provide get_token()")
+        config = _client_config(
+            base_url=base_url,
+            timeout_seconds=timeout_seconds,
+            max_payload_bytes=max_payload_bytes,
+            cache_tools=cache_tools,
+            cache_ttl_seconds=cache_ttl_seconds,
+            allow_insecure_http=allow_insecure_http,
+            user_agent=user_agent,
+            discovery_max_retries=discovery_max_retries,
+            discovery_retry_backoff_seconds=discovery_retry_backoff_seconds,
+            discovery_retry_max_sleep_seconds=discovery_retry_max_sleep_seconds,
+            discovery_retry_jitter_ratio=discovery_retry_jitter_ratio,
+        )
+        self.token_provider = token_provider
+        self.base_url = config.base_url
+        self.timeout_seconds: float = config.timeout_seconds
+        self.max_payload_bytes: int = config.max_payload_bytes
+        self.cache_tools: bool = config.cache_tools
+        self.cache_ttl_seconds: float = config.cache_ttl_seconds
+        self.allow_insecure_http: bool = config.allow_insecure_http
+        self.user_agent: str = config.user_agent
+        self.discovery_max_retries: int = config.discovery_max_retries
+        self.discovery_retry_backoff_seconds: float = config.discovery_retry_backoff_seconds
+        self.discovery_retry_max_sleep_seconds: float = config.discovery_retry_max_sleep_seconds
+        self.discovery_retry_jitter_ratio: float = config.discovery_retry_jitter_ratio
+        self.event_hook = _optional_event_hook(event_hook)
+        self._sleep: Callable[[float], None] = time.sleep
+        self._random: Callable[[], float] = random.random
+        self._cache_lock = threading.RLock()
+        self._tool_cache: dict[_ToolCacheKey, _ToolCacheValue] | None = (
+            {} if self.cache_tools else None
+        )
+        self._list_cache: dict[_ListCacheKey, _ListCacheValue] | None = (
+            {} if self.cache_tools else None
+        )
+        self._owns_http_client = http_client is None
+        _validate_sync_http_client(http_client)
+        self._http_client = http_client or httpx.Client(timeout=self.timeout_seconds)
+
+    def close(self) -> None:
+        """Close the underlying HTTP client if this SDK instance created it."""
+
+        if self._owns_http_client:
+            self._http_client.close()
+
+    def call_tool(
+        self,
+        tool_name: str,
+        payload: dict[str, Any],
+        correlation_id: str | None = None,
+    ) -> ToolCallResult:
+        """Invoke one registered gateway tool with bearer authentication."""
+
+        normalized_tool_name = _require_text(tool_name, "tool_name")
+        _require_json_object(payload, "payload", max_bytes=self.max_payload_bytes)
+        body: dict[str, Any] = {"payload": payload}
+        auth_context = self._auth_context()
+        headers = auth_context.headers
+        normalized_correlation_id = _optional_header_text(correlation_id, "correlation_id")
+        if normalized_correlation_id is not None:
+            body["correlation_id"] = normalized_correlation_id
+            headers["X-Correlation-ID"] = normalized_correlation_id
+        self._emit_event(
+            {
+                "event": "tool_call.start",
+                "tool_name": normalized_tool_name,
+                "correlation_id": normalized_correlation_id,
+            }
+        )
+        try:
+            response = self._http_client.post(
+                (
+                    f"{self.base_url}{GATEWAY_TOOL_INVOKE_PATH_PREFIX}/"
+                    f"{quote(normalized_tool_name, safe='')}{GATEWAY_TOOL_INVOKE_PATH_SUFFIX}"
+                ),
+                json=body,
+                headers=headers,
+                timeout=self.timeout_seconds,
+            )
+        except httpx.HTTPError as exc:
+            self._emit_event(
+                {
+                    "event": "tool_call.error",
+                    "tool_name": normalized_tool_name,
+                    "code": "transport_error",
+                }
+            )
+            raise ToolGatewayError("Tool Gateway transport error.", code="transport_error") from exc
+        response_body = _response_json(response)
+        if response.status_code == 403:
+            self._emit_event(
+                {
+                    "event": "tool_call.denied",
+                    "tool_name": normalized_tool_name,
+                    "status_code": response.status_code,
+                }
+            )
+            _raise_denied(response_body, response.status_code)
+        if response.status_code >= 400:
+            self._emit_event(
+                {
+                    "event": "tool_call.error",
+                    "tool_name": normalized_tool_name,
+                    "status_code": response.status_code,
+                }
+            )
+            _raise_gateway_error(response_body, response.status_code)
+        result = _tool_call_result(response_body)
+        self._emit_event(
+            {
+                "event": "tool_call.success",
+                "tool_name": result.tool_name,
+                "request_id": result.request_id,
+                "correlation_id": result.correlation_id,
+                "reason_code": result.reason_code,
+            }
+        )
+        return result
+
+    def list_tools(
+        self,
+        *,
+        status: Literal["active"] | None = None,
+        owner_team: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[ToolDefinition]:
+        """List Tool Gateway contracts visible to the configured caller."""
+
+        auth_context = self._auth_context()
+        params = _tool_list_params(status, owner_team, limit, offset)
+        return self._list_tools_with_auth(params, auth_context)
+
+    def list_all_tools(
+        self,
+        *,
+        owner_team: str | None = None,
+        page_size: int = 200,
+    ) -> list[ToolDefinition]:
+        """List every callable tool by following gateway discovery pagination."""
+
+        page_size = _require_integer(page_size, "page_size")
+        if page_size <= 0:
+            raise ValueError("page_size must be greater than zero")
+        if page_size > 200:
+            raise ValueError("page_size must be less than or equal to 200")
+        auth_context = self._auth_context()
+        tools: list[ToolDefinition] = []
+        offset = 0
+        while True:
+            params = _tool_list_params(None, owner_team, page_size, offset)
+            page = self._list_tools_with_auth(params, auth_context)
+            tools.extend(page)
+            if len(page) < page_size:
+                return tools
+            offset += page_size
+
+    def clear_tool_cache(self) -> None:
+        """Clear cached discovery results when permissions or tool contracts change."""
+
+        with self._cache_lock:
+            if self._tool_cache is not None:
+                self._tool_cache.clear()
+            if self._list_cache is not None:
+                self._list_cache.clear()
+
+    def get_tool(self, tool_name: str) -> ToolDefinition:
+        """Return one tool definition by name or id from the list contract."""
+
+        normalized_tool_name = _require_text(tool_name, "tool_name")
+        auth_context = self._auth_context()
+        cache_key = _tool_cache_key(auth_context.cache_key, normalized_tool_name)
+        cached = self._cached_tool(cache_key)
+        if cached is not None:
+            return cached
+        page_size = 200
+        offset = 0
+        while True:
+            params = _tool_list_params(None, None, page_size, offset)
+            tools = self._list_tools_with_auth(params, auth_context)
+            for tool in tools:
+                if tool.name == normalized_tool_name or tool.id == normalized_tool_name:
+                    return tool
+            if len(tools) < page_size:
+                break
+            offset += page_size
+        raise ToolGatewayError(
+            f"Tool not found: {normalized_tool_name}",
+            status_code=404,
+            code="tool_not_found",
+        )
+
+    def __enter__(self) -> OphanixToolGatewayClient:
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.close()
+
+    def _auth_context(self) -> _AuthContext:
+        token_value = self.token_provider.get_token()
+        if inspect.isawaitable(token_value):
+            _close_awaitable(token_value)
+            raise ValueError(
+                "sync token_provider.get_token() must return a string; "
+                "use AsyncOphanixToolGatewayClient for awaitable tokens"
+            )
+        token = _require_header_text(token_value, "token")
+        token_fingerprint = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        return _AuthContext(
+            headers={
+                "Authorization": f"Bearer {token}",
+                "User-Agent": self.user_agent,
+            },
+            cache_key=token_fingerprint,
+        )
+
+    def _list_tools_with_auth(
+        self,
+        params: list[tuple[str, str]],
+        auth_context: _AuthContext,
+    ) -> list[ToolDefinition]:
+        cache_key = _list_cache_key(auth_context.cache_key, params)
+        cached = self._cached_list(cache_key)
+        if cached is not None:
+            return cached
+        response = self._get_discovery_response(params, headers=auth_context.headers)
+        response_data = _response_data(response)
+        if response.status_code >= 400:
+            _raise_gateway_error(_mapping_response(response_data), response.status_code)
+        if not isinstance(response_data, list):
+            raise ToolGatewayError(
+                "Tool Gateway returned an invalid tools response.",
+                code="invalid_response",
+            )
+        tools = [
+            _tool_definition(_require_mapping(item, "tool definition"))
+            for item in response_data
+        ]
+        self._remember_tools(tools, credential_cache_key=auth_context.cache_key)
+        if self._list_cache is not None:
+            with self._cache_lock:
+                self._list_cache[cache_key] = (self._cache_deadline(), list(tools))
+        return tools
+
+    def _get_discovery_response(
+        self,
+        params: list[tuple[str, str]],
+        *,
+        headers: dict[str, str],
+    ) -> httpx.Response:
+        attempts = 0
+        while True:
+            try:
+                response = self._http_client.get(
+                    f"{self.base_url}{GATEWAY_TOOL_DISCOVERY_PATH}",
+                    params=dict(params),
+                    headers=headers,
+                    timeout=self.timeout_seconds,
+                )
+            except httpx.TransportError as exc:
+                if attempts < self.discovery_max_retries:
+                    self._sleep_before_discovery_retry(attempts, response=None)
+                    attempts += 1
+                    continue
+                raise ToolGatewayError(
+                    "Tool Gateway transport error.",
+                    code="transport_error",
+                ) from exc
+            except httpx.HTTPError as exc:
+                raise ToolGatewayError(
+                    "Tool Gateway transport error.",
+                    code="transport_error",
+                ) from exc
+            if (
+                response.status_code in RETRYABLE_DISCOVERY_STATUS_CODES
+                and attempts < self.discovery_max_retries
+            ):
+                self._sleep_before_discovery_retry(attempts, response=response)
+                attempts += 1
+                continue
+            return response
+
+    def _sleep_before_discovery_retry(
+        self,
+        attempt: int,
+        *,
+        response: httpx.Response | None,
+    ) -> None:
+        delay = self._discovery_retry_delay(attempt, response=response)
+        if delay <= 0:
+            return
+        self._sleep(delay)
+
+    def _discovery_retry_delay(
+        self,
+        attempt: int,
+        *,
+        response: httpx.Response | None,
+    ) -> float:
+        retry_after = _retry_after_seconds(response)
+        if retry_after is not None:
+            return min(retry_after, self.discovery_retry_max_sleep_seconds)
+        delay = float(
+            min(
+                self.discovery_retry_backoff_seconds * (2**attempt),
+                self.discovery_retry_max_sleep_seconds,
+            )
+        )
+        if delay <= 0 or self.discovery_retry_jitter_ratio <= 0:
+            return delay
+        jitter = float(1 + ((self._random() * 2 - 1) * self.discovery_retry_jitter_ratio))
+        return float(min(delay * jitter, self.discovery_retry_max_sleep_seconds))
+
+    def _remember_tools(self, tools: list[ToolDefinition], *, credential_cache_key: str) -> None:
+        if self._tool_cache is None:
+            return
+        deadline = self._cache_deadline()
+        with self._cache_lock:
+            for tool in tools:
+                self._tool_cache[_tool_cache_key(credential_cache_key, tool.name)] = (
+                    deadline,
+                    tool,
+                )
+                self._tool_cache[_tool_cache_key(credential_cache_key, tool.id)] = (
+                    deadline,
+                    tool,
+                )
+
+    def _cached_tool(self, cache_key: _ToolCacheKey) -> ToolDefinition | None:
+        if self._tool_cache is None:
+            return None
+        with self._cache_lock:
+            cached = self._tool_cache.get(cache_key)
+            if cached is None:
+                return None
+            expires_at, tool = cached
+            if expires_at <= time.monotonic():
+                self._tool_cache.pop(cache_key, None)
+                return None
+            return tool
+
+    def _cached_list(self, cache_key: _ListCacheKey) -> list[ToolDefinition] | None:
+        if self._list_cache is None:
+            return None
+        with self._cache_lock:
+            cached = self._list_cache.get(cache_key)
+            if cached is None:
+                return None
+            expires_at, tools = cached
+            if expires_at <= time.monotonic():
+                self._list_cache.pop(cache_key, None)
+                return None
+            return list(tools)
+
+    def _cache_deadline(self) -> float:
+        return time.monotonic() + self.cache_ttl_seconds
+
+    def _emit_event(self, event: dict[str, Any]) -> None:
+        if self.event_hook is None:
+            return
+        try:
+            self.event_hook(MappingProxyType(dict(event)))
+        except Exception:
+            return
+
+
+class AsyncOphanixToolGatewayClient:
+    """Async SDK client for external Python agents running on event loops."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        token_provider: TokenProvider | AsyncTokenProvider,
+        timeout_seconds: float = 5.0,
+        max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+        http_client: httpx.AsyncClient | None = None,
+        cache_tools: bool = False,
+        cache_ttl_seconds: float = DEFAULT_CACHE_TTL_SECONDS,
+        event_hook: TelemetryEventHook | None = None,
+        allow_insecure_http: bool = False,
+        user_agent: str | None = None,
+        discovery_max_retries: int = 2,
+        discovery_retry_backoff_seconds: float = 0.2,
+        discovery_retry_max_sleep_seconds: float = DEFAULT_DISCOVERY_RETRY_MAX_SLEEP_SECONDS,
+        discovery_retry_jitter_ratio: float = DEFAULT_DISCOVERY_RETRY_JITTER_RATIO,
+    ) -> None:
+        if token_provider is None:
+            raise ValueError("token_provider is required")
+        if not callable(getattr(token_provider, "get_token", None)):
+            raise ValueError("token_provider must provide get_token()")
+        config = _client_config(
+            base_url=base_url,
+            timeout_seconds=timeout_seconds,
+            max_payload_bytes=max_payload_bytes,
+            cache_tools=cache_tools,
+            cache_ttl_seconds=cache_ttl_seconds,
+            allow_insecure_http=allow_insecure_http,
+            user_agent=user_agent,
+            discovery_max_retries=discovery_max_retries,
+            discovery_retry_backoff_seconds=discovery_retry_backoff_seconds,
+            discovery_retry_max_sleep_seconds=discovery_retry_max_sleep_seconds,
+            discovery_retry_jitter_ratio=discovery_retry_jitter_ratio,
+        )
+        self.token_provider = token_provider
+        self.base_url = config.base_url
+        self.timeout_seconds: float = config.timeout_seconds
+        self.max_payload_bytes: int = config.max_payload_bytes
+        self.cache_tools: bool = config.cache_tools
+        self.cache_ttl_seconds: float = config.cache_ttl_seconds
+        self.allow_insecure_http: bool = config.allow_insecure_http
+        self.user_agent: str = config.user_agent
+        self.discovery_max_retries: int = config.discovery_max_retries
+        self.discovery_retry_backoff_seconds: float = config.discovery_retry_backoff_seconds
+        self.discovery_retry_max_sleep_seconds: float = config.discovery_retry_max_sleep_seconds
+        self.discovery_retry_jitter_ratio: float = config.discovery_retry_jitter_ratio
+        self.event_hook = _optional_event_hook(event_hook)
+        self._sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+        self._random: Callable[[], float] = random.random
+        self._cache_lock = threading.RLock()
+        self._tool_cache: dict[_ToolCacheKey, _ToolCacheValue] | None = (
+            {} if self.cache_tools else None
+        )
+        self._list_cache: dict[_ListCacheKey, _ListCacheValue] | None = (
+            {} if self.cache_tools else None
+        )
+        self._owns_http_client = http_client is None
+        _validate_async_http_client(http_client)
+        self._http_client = http_client or httpx.AsyncClient(timeout=self.timeout_seconds)
+
+    async def close(self) -> None:
+        """Close the underlying HTTP client if this SDK instance created it."""
+
+        if self._owns_http_client:
+            await self._http_client.aclose()
+
+    async def call_tool(
+        self,
+        tool_name: str,
+        payload: dict[str, Any],
+        correlation_id: str | None = None,
+    ) -> ToolCallResult:
+        """Invoke one registered gateway tool with bearer authentication."""
+
+        normalized_tool_name = _require_text(tool_name, "tool_name")
+        _require_json_object(payload, "payload", max_bytes=self.max_payload_bytes)
+        body: dict[str, Any] = {"payload": payload}
+        auth_context = await self._auth_context()
+        headers = auth_context.headers
+        normalized_correlation_id = _optional_header_text(correlation_id, "correlation_id")
+        if normalized_correlation_id is not None:
+            body["correlation_id"] = normalized_correlation_id
+            headers["X-Correlation-ID"] = normalized_correlation_id
+        self._emit_event(
+            {
+                "event": "tool_call.start",
+                "tool_name": normalized_tool_name,
+                "correlation_id": normalized_correlation_id,
+            }
+        )
+        try:
+            response = await self._http_client.post(
+                (
+                    f"{self.base_url}{GATEWAY_TOOL_INVOKE_PATH_PREFIX}/"
+                    f"{quote(normalized_tool_name, safe='')}{GATEWAY_TOOL_INVOKE_PATH_SUFFIX}"
+                ),
+                json=body,
+                headers=headers,
+                timeout=self.timeout_seconds,
+            )
+        except httpx.HTTPError as exc:
+            self._emit_event(
+                {
+                    "event": "tool_call.error",
+                    "tool_name": normalized_tool_name,
+                    "code": "transport_error",
+                }
+            )
+            raise ToolGatewayError("Tool Gateway transport error.", code="transport_error") from exc
+        response_body = _response_json(response)
+        if response.status_code == 403:
+            self._emit_event(
+                {
+                    "event": "tool_call.denied",
+                    "tool_name": normalized_tool_name,
+                    "status_code": response.status_code,
+                }
+            )
+            _raise_denied(response_body, response.status_code)
+        if response.status_code >= 400:
+            self._emit_event(
+                {
+                    "event": "tool_call.error",
+                    "tool_name": normalized_tool_name,
+                    "status_code": response.status_code,
+                }
+            )
+            _raise_gateway_error(response_body, response.status_code)
+        result = _tool_call_result(response_body)
+        self._emit_event(
+            {
+                "event": "tool_call.success",
+                "tool_name": result.tool_name,
+                "request_id": result.request_id,
+                "correlation_id": result.correlation_id,
+                "reason_code": result.reason_code,
+            }
+        )
+        return result
+
+    async def list_tools(
+        self,
+        *,
+        status: Literal["active"] | None = None,
+        owner_team: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[ToolDefinition]:
+        """List Tool Gateway contracts visible to the configured caller."""
+
+        auth_context = await self._auth_context()
+        params = _tool_list_params(status, owner_team, limit, offset)
+        return await self._list_tools_with_auth(params, auth_context)
+
+    async def list_all_tools(
+        self,
+        *,
+        owner_team: str | None = None,
+        page_size: int = 200,
+    ) -> list[ToolDefinition]:
+        """List every callable tool by following gateway discovery pagination."""
+
+        page_size = _require_integer(page_size, "page_size")
+        if page_size <= 0:
+            raise ValueError("page_size must be greater than zero")
+        if page_size > 200:
+            raise ValueError("page_size must be less than or equal to 200")
+        auth_context = await self._auth_context()
+        tools: list[ToolDefinition] = []
+        offset = 0
+        while True:
+            params = _tool_list_params(None, owner_team, page_size, offset)
+            page = await self._list_tools_with_auth(params, auth_context)
+            tools.extend(page)
+            if len(page) < page_size:
+                return tools
+            offset += page_size
+
+    def clear_tool_cache(self) -> None:
+        """Clear cached discovery results when permissions or tool contracts change."""
+
+        with self._cache_lock:
+            if self._tool_cache is not None:
+                self._tool_cache.clear()
+            if self._list_cache is not None:
+                self._list_cache.clear()
+
+    async def get_tool(self, tool_name: str) -> ToolDefinition:
+        """Return one tool definition by name or id from the list contract."""
+
+        normalized_tool_name = _require_text(tool_name, "tool_name")
+        auth_context = await self._auth_context()
+        cache_key = _tool_cache_key(auth_context.cache_key, normalized_tool_name)
+        cached = self._cached_tool(cache_key)
+        if cached is not None:
+            return cached
+        page_size = 200
+        offset = 0
+        while True:
+            params = _tool_list_params(None, None, page_size, offset)
+            tools = await self._list_tools_with_auth(params, auth_context)
+            for tool in tools:
+                if tool.name == normalized_tool_name or tool.id == normalized_tool_name:
+                    return tool
+            if len(tools) < page_size:
+                break
+            offset += page_size
+        raise ToolGatewayError(
+            f"Tool not found: {normalized_tool_name}",
+            status_code=404,
+            code="tool_not_found",
+        )
+
+    async def __aenter__(self) -> AsyncOphanixToolGatewayClient:
+        return self
+
+    async def __aexit__(self, *_exc_info: object) -> None:
+        await self.close()
+
+    async def _auth_context(self) -> _AuthContext:
+        token_value = self.token_provider.get_token()
+        if inspect.isawaitable(token_value):
+            token_value = await token_value
+        token = _require_header_text(token_value, "token")
+        token_fingerprint = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        return _AuthContext(
+            headers={
+                "Authorization": f"Bearer {token}",
+                "User-Agent": self.user_agent,
+            },
+            cache_key=token_fingerprint,
+        )
+
+    async def _list_tools_with_auth(
+        self,
+        params: list[tuple[str, str]],
+        auth_context: _AuthContext,
+    ) -> list[ToolDefinition]:
+        cache_key = _list_cache_key(auth_context.cache_key, params)
+        cached = self._cached_list(cache_key)
+        if cached is not None:
+            return cached
+        response = await self._get_discovery_response(params, headers=auth_context.headers)
+        response_data = _response_data(response)
+        if response.status_code >= 400:
+            _raise_gateway_error(_mapping_response(response_data), response.status_code)
+        if not isinstance(response_data, list):
+            raise ToolGatewayError(
+                "Tool Gateway returned an invalid tools response.",
+                code="invalid_response",
+            )
+        tools = [
+            _tool_definition(_require_mapping(item, "tool definition"))
+            for item in response_data
+        ]
+        self._remember_tools(tools, credential_cache_key=auth_context.cache_key)
+        if self._list_cache is not None:
+            with self._cache_lock:
+                self._list_cache[cache_key] = (self._cache_deadline(), list(tools))
+        return tools
+
+    async def _get_discovery_response(
+        self,
+        params: list[tuple[str, str]],
+        *,
+        headers: dict[str, str],
+    ) -> httpx.Response:
+        attempts = 0
+        while True:
+            try:
+                response = await self._http_client.get(
+                    f"{self.base_url}{GATEWAY_TOOL_DISCOVERY_PATH}",
+                    params=dict(params),
+                    headers=headers,
+                    timeout=self.timeout_seconds,
+                )
+            except httpx.TransportError as exc:
+                if attempts < self.discovery_max_retries:
+                    await self._sleep_before_discovery_retry(attempts, response=None)
+                    attempts += 1
+                    continue
+                raise ToolGatewayError(
+                    "Tool Gateway transport error.",
+                    code="transport_error",
+                ) from exc
+            except httpx.HTTPError as exc:
+                raise ToolGatewayError(
+                    "Tool Gateway transport error.",
+                    code="transport_error",
+                ) from exc
+            if (
+                response.status_code in RETRYABLE_DISCOVERY_STATUS_CODES
+                and attempts < self.discovery_max_retries
+            ):
+                await self._sleep_before_discovery_retry(attempts, response=response)
+                attempts += 1
+                continue
+            return response
+
+    async def _sleep_before_discovery_retry(
+        self,
+        attempt: int,
+        *,
+        response: httpx.Response | None,
+    ) -> None:
+        delay = self._discovery_retry_delay(attempt, response=response)
+        if delay <= 0:
+            return
+        await self._sleep(delay)
+
+    def _discovery_retry_delay(
+        self,
+        attempt: int,
+        *,
+        response: httpx.Response | None,
+    ) -> float:
+        retry_after = _retry_after_seconds(response)
+        if retry_after is not None:
+            return min(retry_after, self.discovery_retry_max_sleep_seconds)
+        delay = float(
+            min(
+                self.discovery_retry_backoff_seconds * (2**attempt),
+                self.discovery_retry_max_sleep_seconds,
+            )
+        )
+        if delay <= 0 or self.discovery_retry_jitter_ratio <= 0:
+            return delay
+        jitter = float(1 + ((self._random() * 2 - 1) * self.discovery_retry_jitter_ratio))
+        return float(min(delay * jitter, self.discovery_retry_max_sleep_seconds))
+
+    def _remember_tools(self, tools: list[ToolDefinition], *, credential_cache_key: str) -> None:
+        if self._tool_cache is None:
+            return
+        deadline = self._cache_deadline()
+        with self._cache_lock:
+            for tool in tools:
+                self._tool_cache[_tool_cache_key(credential_cache_key, tool.name)] = (
+                    deadline,
+                    tool,
+                )
+                self._tool_cache[_tool_cache_key(credential_cache_key, tool.id)] = (
+                    deadline,
+                    tool,
+                )
+
+    def _cached_tool(self, cache_key: _ToolCacheKey) -> ToolDefinition | None:
+        if self._tool_cache is None:
+            return None
+        with self._cache_lock:
+            cached = self._tool_cache.get(cache_key)
+            if cached is None:
+                return None
+            expires_at, tool = cached
+            if expires_at <= time.monotonic():
+                self._tool_cache.pop(cache_key, None)
+                return None
+            return tool
+
+    def _cached_list(self, cache_key: _ListCacheKey) -> list[ToolDefinition] | None:
+        if self._list_cache is None:
+            return None
+        with self._cache_lock:
+            cached = self._list_cache.get(cache_key)
+            if cached is None:
+                return None
+            expires_at, tools = cached
+            if expires_at <= time.monotonic():
+                self._list_cache.pop(cache_key, None)
+                return None
+            return list(tools)
+
+    def _cache_deadline(self) -> float:
+        return time.monotonic() + self.cache_ttl_seconds
+
+    def _emit_event(self, event: dict[str, Any]) -> None:
+        if self.event_hook is None:
+            return
+        try:
+            self.event_hook(MappingProxyType(dict(event)))
+        except Exception:
+            return
+
+
+def _client_config(
+    *,
+    base_url: object,
+    timeout_seconds: object,
+    max_payload_bytes: object,
+    cache_tools: object,
+    cache_ttl_seconds: object,
+    allow_insecure_http: object,
+    user_agent: object | None,
+    discovery_max_retries: object,
+    discovery_retry_backoff_seconds: object,
+    discovery_retry_max_sleep_seconds: object,
+    discovery_retry_jitter_ratio: object,
+) -> _ClientConfig:
+    allow_insecure_http = _require_bool(allow_insecure_http, "allow_insecure_http")
+    normalized_base_url = _normalize_base_url(
+        base_url,
+        allow_insecure_http=allow_insecure_http,
+    )
+    timeout_seconds = _require_finite_number(
+        timeout_seconds,
+        "timeout_seconds",
+        minimum=0,
+        include_minimum=False,
+    )
+    max_payload_bytes = _require_integer(max_payload_bytes, "max_payload_bytes")
+    if max_payload_bytes <= 0:
+        raise ValueError("max_payload_bytes must be greater than zero")
+    cache_ttl_seconds = _require_finite_number(
+        cache_ttl_seconds,
+        "cache_ttl_seconds",
+        minimum=0,
+        include_minimum=False,
+    )
+    discovery_max_retries = _require_integer(discovery_max_retries, "discovery_max_retries")
+    if discovery_max_retries < 0:
+        raise ValueError("discovery_max_retries must be greater than or equal to zero")
+    discovery_retry_backoff_seconds = _require_finite_number(
+        discovery_retry_backoff_seconds,
+        "discovery_retry_backoff_seconds",
+        minimum=0,
+        include_minimum=True,
+    )
+    discovery_retry_max_sleep_seconds = _require_finite_number(
+        discovery_retry_max_sleep_seconds,
+        "discovery_retry_max_sleep_seconds",
+        minimum=0,
+        include_minimum=True,
+    )
+    discovery_retry_jitter_ratio = _require_finite_number(
+        discovery_retry_jitter_ratio,
+        "discovery_retry_jitter_ratio",
+        minimum=0,
+        include_minimum=True,
+    )
+    if discovery_retry_jitter_ratio > 1:
+        raise ValueError("discovery_retry_jitter_ratio must be less than or equal to 1")
+    return _ClientConfig(
+        base_url=normalized_base_url,
+        timeout_seconds=timeout_seconds,
+        max_payload_bytes=max_payload_bytes,
+        cache_tools=_require_bool(cache_tools, "cache_tools"),
+        cache_ttl_seconds=cache_ttl_seconds,
+        allow_insecure_http=allow_insecure_http,
+        user_agent=_optional_header_text(user_agent, "user_agent") or SDK_USER_AGENT,
+        discovery_max_retries=discovery_max_retries,
+        discovery_retry_backoff_seconds=discovery_retry_backoff_seconds,
+        discovery_retry_max_sleep_seconds=discovery_retry_max_sleep_seconds,
+        discovery_retry_jitter_ratio=discovery_retry_jitter_ratio,
+    )
+
+
+def _normalize_base_url(base_url: object, *, allow_insecure_http: bool = False) -> str:
+    normalized = _require_text(base_url, "base_url").rstrip("/")
+    if not normalized:
+        raise ValueError("base_url is required")
+    if _has_control_character(normalized):
+        raise ValueError("base_url must not contain control characters")
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("base_url must be an absolute http or https URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("base_url must not include credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError("base_url must not include a query string or fragment")
+    if (
+        parsed.scheme == "http"
+        and not allow_insecure_http
+        and not _is_local_http_host(parsed.hostname)
+    ):
+        raise ValueError(
+            "base_url must use https unless it targets localhost or allow_insecure_http=True"
+        )
+    return normalized
+
+
+def _validate_sync_http_client(http_client: object | None) -> None:
+    if http_client is None:
+        return
+    if isinstance(http_client, httpx.AsyncClient):
+        raise ValueError("http_client must be an httpx.Client-compatible sync client")
+    for method_name in ("get", "post", "close"):
+        if not callable(getattr(http_client, method_name, None)):
+            raise ValueError("http_client must provide get(), post(), and close()")
+
+
+def _validate_async_http_client(http_client: object | None) -> None:
+    if http_client is None:
+        return
+    if isinstance(http_client, httpx.Client):
+        raise ValueError("http_client must be an httpx.AsyncClient-compatible async client")
+    for method_name in ("get", "post", "aclose"):
+        if not callable(getattr(http_client, method_name, None)):
+            raise ValueError("http_client must provide async get(), post(), and aclose()")
+
+
+def _optional_event_hook(event_hook: object | None) -> TelemetryEventHook | None:
+    if event_hook is None:
+        return None
+    if not callable(event_hook):
+        raise ValueError("event_hook must be callable")
+    return event_hook
+
+
+def _tool_list_params(
+    status: Literal["active"] | None,
+    owner_team: str | None,
+    limit: int,
+    offset: int,
+) -> list[tuple[str, str]]:
+    limit = _require_integer(limit, "limit")
+    offset = _require_integer(offset, "offset")
+    if limit <= 0:
+        raise ValueError("limit must be greater than zero")
+    if limit > 200:
+        raise ValueError("limit must be less than or equal to 200")
+    if offset < 0:
+        raise ValueError("offset must be greater than or equal to zero")
+    params: list[tuple[str, str]] = []
+    normalized_status = _optional_text(status)
+    normalized_owner_team = _optional_text(owner_team)
+    if normalized_status is not None and normalized_status != "active":
+        raise ValueError("gateway discovery only supports active callable tools")
+    if normalized_owner_team is not None:
+        params.append(("owner_team", normalized_owner_team))
+    params.append(("limit", str(limit)))
+    params.append(("offset", str(offset)))
+    return params
+
+
+def _list_cache_key(credential_cache_key: str, params: list[tuple[str, str]]) -> _ListCacheKey:
+    return (("__credential", credential_cache_key), *params)
+
+
+def _tool_cache_key(credential_cache_key: str, tool_lookup: str) -> _ToolCacheKey:
+    return (credential_cache_key, tool_lookup)
+
+
+def _close_awaitable(value: Awaitable[Any]) -> None:
+    close = getattr(value, "close", None)
+    if callable(close):
+        close()
+
+
+def _tool_call_result(body: dict[str, Any]) -> ToolCallResult:
+    error = body.get("error")
+    if error not in (None, {}):
+        raise ToolGatewayError(
+            "Tool Gateway returned an error in a successful HTTP response.",
+            code="invalid_response",
+            response_body=body,
+        )
+    request_id = _required_response_string(body, "request_id")
+    correlation_id = _required_response_string(body, "correlation_id")
+    tool_name = _required_response_string(body, "tool_name")
+    return ToolCallResult(
+        request_id=request_id,
+        correlation_id=correlation_id,
+        tool_name=tool_name,
+        reason_code=_optional_response_string_field(body, "reason_code"),
+        decision=_optional_response_mapping_field(body, "decision"),
+        result=body.get("result"),
+        raw=_immutable_mapping(body),
+    )
+
+
+def _tool_definition(body: dict[str, Any]) -> ToolDefinition:
+    description_value = body.get("description")
+    if description_value is not None and not isinstance(description_value, str):
+        raise ToolGatewayError(
+            "Tool Gateway response field must be a string: description.",
+            code="invalid_response",
+            response_body=body,
+        )
+    return ToolDefinition(
+        id=_required_response_string(body, "id"),
+        name=_required_response_string(body, "name"),
+        display_name=_required_response_string(body, "display_name"),
+        description=_response_string(description_value) or "",
+        owner_team=_required_response_string(body, "owner_team"),
+        status=_required_response_string(body, "status"),
+        required_scope=_required_response_string(body, "required_scope"),
+        input_schema_json=_optional_response_mapping_field(body, "input_schema_json"),
+        output_schema_json=_optional_response_mapping_field(body, "output_schema_json"),
+        raw=_immutable_mapping(body),
+    )
+
+
+def _raise_denied(body: dict[str, Any], status_code: int) -> None:
+    error = _optional_mapping(body.get("error")) or {}
+    reason_code = body.get("reason_code") or error.get("code")
+    raise ToolDeniedError(
+        "Tool call denied by gateway policy.",
+        reason_code=str(reason_code) if reason_code is not None else None,
+        status_code=status_code,
+        request_id=_optional_string(body.get("request_id")),
+        correlation_id=_optional_string(body.get("correlation_id")),
+        response_body=body,
+    )
+
+
+def _raise_gateway_error(body: dict[str, Any], status_code: int) -> None:
+    error = _optional_mapping(body.get("error")) or {}
+    code = error.get("code") or body.get("reason_code")
+    if status_code == 401:
+        raise ToolAuthenticationError(
+            "Tool Gateway authentication failed.",
+            status_code=status_code,
+            code=str(code) if code is not None else None,
+            request_id=_optional_string(body.get("request_id")),
+            correlation_id=_optional_string(body.get("correlation_id")),
+            response_body=body,
+        )
+    raise ToolGatewayError(
+        f"Tool Gateway returned HTTP {status_code}.",
+        status_code=status_code,
+        code=str(code) if code is not None else None,
+        request_id=_optional_string(body.get("request_id")),
+        correlation_id=_optional_string(body.get("correlation_id")),
+        response_body=body,
+    )
+
+
+def _response_json(response: httpx.Response) -> dict[str, Any]:
+    return _mapping_response(_response_data(response))
+
+
+def _response_data(response: httpx.Response) -> Any:
+    try:
+        return response.json()
+    except ValueError:
+        return {
+            "error": {
+                "code": "non_json_response",
+                "message": "Tool Gateway returned a non-JSON response.",
+                "body_excerpt": _sanitize_text(_response_text_excerpt(response)),
+            }
+        }
+
+
+def _mapping_response(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    return {"result": value}
+
+
+def _optional_mapping(value: Any) -> dict[str, Any] | None:
+    return value if isinstance(value, dict) else None
+
+
+def _optional_response_mapping_field(
+    body: dict[str, Any],
+    field_name: str,
+) -> dict[str, Any] | None:
+    value = body.get(field_name)
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ToolGatewayError(
+            f"Tool Gateway response field must be an object: {field_name}.",
+            code="invalid_response",
+            response_body=body,
+        )
+    return value
+
+
+def _optional_response_string_field(body: dict[str, Any], field_name: str) -> str | None:
+    value = body.get(field_name)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ToolGatewayError(
+            f"Tool Gateway response field must be a string: {field_name}.",
+            code="invalid_response",
+            response_body=body,
+        )
+    return value
+
+
+def _optional_string(value: Any) -> str | None:
+    return str(value) if value is not None else None
+
+
+def _immutable_mapping(value: dict[str, Any]) -> Mapping[str, Any]:
+    return MappingProxyType(dict(value))
+
+
+def _response_text_excerpt(response: httpx.Response) -> str:
+    content = getattr(response, "content", b"")
+    if isinstance(content, bytes):
+        excerpt = content[:MAX_NON_JSON_ERROR_EXCERPT_BYTES]
+        return excerpt.decode(response.encoding or "utf-8", errors="replace")
+    return str(content)[:MAX_NON_JSON_ERROR_EXCERPT_BYTES]
+
+
+def _require_text(value: object, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string")
+    stripped = value.strip()
+    if not stripped:
+        raise ValueError(f"{field_name} is required")
+    return stripped
+
+
+def _optional_text(value: object | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("optional text values must be strings")
+    stripped = value.strip()
+    return stripped or None
+
+
+def _require_integer(value: object, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field_name} must be an integer")
+    return value
+
+
+def _require_bool(value: object, field_name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a boolean")
+    return value
+
+
+def _require_finite_number(
+    value: object,
+    field_name: str,
+    *,
+    minimum: float,
+    include_minimum: bool,
+) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name} must be a number")
+    normalized = float(value)
+    if not math.isfinite(normalized):
+        raise ValueError(f"{field_name} must be a finite number")
+    if include_minimum:
+        if normalized < minimum:
+            raise ValueError(f"{field_name} must be greater than or equal to {minimum:g}")
+    elif normalized <= minimum:
+        raise ValueError(f"{field_name} must be greater than {minimum:g}")
+    return normalized
+
+
+def _require_header_text(value: object, field_name: str) -> str:
+    stripped = _require_text(value, field_name)
+    if _has_control_character(stripped):
+        raise ValueError(f"{field_name} must not contain header control characters")
+    return stripped
+
+
+def _optional_header_text(value: object | None, field_name: str) -> str | None:
+    stripped = _optional_text(value)
+    if stripped is None:
+        return None
+    if _has_control_character(stripped):
+        raise ValueError(f"{field_name} must not contain header control characters")
+    return stripped
+
+
+def _has_control_character(value: str) -> bool:
+    return any(ord(character) < 32 or ord(character) == 127 for character in value)
+
+
+def _require_json_object(
+    value: object,
+    field_name: str,
+    *,
+    max_bytes: int | None = None,
+) -> None:
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be a dictionary")
+    _validate_json_value(value, field_name)
+    try:
+        serialized = json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be JSON serializable") from exc
+    if max_bytes is not None and len(serialized.encode("utf-8")) > max_bytes:
+        raise ValueError(f"{field_name} exceeds max_payload_bytes")
+
+
+def _validate_json_value(value: object, field_name: str) -> None:
+    if isinstance(value, dict):
+        for key, child_value in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"{field_name} keys must be strings")
+            _validate_json_value(child_value, field_name)
+        return
+    if isinstance(value, list):
+        for child_value in value:
+            _validate_json_value(child_value, field_name)
+        return
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"{field_name} must contain only finite numbers")
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return
+    raise ValueError(f"{field_name} must be JSON serializable")
+
+
+def _sanitize_error_body(value: Any) -> dict[str, Any]:
+    sanitized = _sanitize_error_value(value)
+    return sanitized if isinstance(sanitized, dict) else {"result": sanitized}
+
+
+def _sanitize_error_value(
+    value: Any,
+    *,
+    key: str | None = None,
+    depth: int = 0,
+) -> Any:
+    if depth > MAX_ERROR_BODY_DEPTH:
+        return "[truncated]"
+    if key is not None and _is_sensitive_key(key):
+        return "[redacted]"
+    if isinstance(value, dict):
+        return {
+            str(child_key): _sanitize_error_value(
+                child_value,
+                key=str(child_key),
+                depth=depth + 1,
+            )
+            for child_key, child_value in list(value.items())[:MAX_ERROR_BODY_ITEMS]
+        }
+    if isinstance(value, list):
+        return [
+            _sanitize_error_value(item, key=key, depth=depth + 1)
+            for item in value[:MAX_ERROR_BODY_ITEMS]
+        ]
+    if isinstance(value, str):
+        return _sanitize_text(value)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return _sanitize_text(str(value))
+
+
+def _is_sensitive_key(key: str) -> bool:
+    normalized = _normalize_sensitive_key(key)
+    return normalized in SENSITIVE_KEY_NAMES or normalized.endswith(SENSITIVE_KEY_SUFFIXES)
+
+
+def _normalize_sensitive_key(key: str) -> str:
+    with_word_boundaries = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key.strip())
+    return re.sub(r"[^a-z0-9]+", "_", with_word_boundaries.lower()).strip("_")
+
+
+def _truncate_string(value: str) -> str:
+    if len(value) <= MAX_ERROR_BODY_STRING_LENGTH:
+        return value
+    return f"{value[:MAX_ERROR_BODY_STRING_LENGTH - 3]}..."
+
+
+def _sanitize_text(value: str) -> str:
+    redacted = SENSITIVE_TEXT_ASSIGNMENT_RE.sub(_redact_sensitive_assignment, value)
+    redacted = BEARER_TOKEN_RE.sub("Bearer [redacted]", redacted)
+    return _truncate_string(redacted)
+
+
+def _redact_sensitive_assignment(match: re.Match[str]) -> str:
+    return (
+        f"{match.group('key')}"
+        f"{match.group('before_sep')}"
+        f"{match.group('sep')}"
+        f"{match.group('after_sep')}"
+        "[redacted]"
+    )
+
+
+def _retry_after_seconds(response: httpx.Response | None) -> float | None:
+    if response is None:
+        return None
+    retry_after = response.headers.get("Retry-After")
+    if retry_after is None:
+        return None
+    stripped = retry_after.strip()
+    if not stripped:
+        return None
+    try:
+        seconds = float(stripped)
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(stripped)
+        except (TypeError, ValueError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        seconds = retry_at.timestamp() - time.time()
+    if not math.isfinite(seconds):
+        return None
+    return max(0.0, seconds)
+
+
+def _require_mapping(value: Any, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ToolGatewayError(
+            f"Tool Gateway returned an invalid {label}.",
+            code="invalid_response",
+        )
+    return value
+
+
+def _required_response_string(body: dict[str, Any], field_name: str) -> str:
+    value = _response_string(body.get(field_name))
+    if not value:
+        raise ToolGatewayError(
+            f"Tool Gateway response is missing required field: {field_name}.",
+            code="invalid_response",
+            response_body=body,
+        )
+    return value
+
+
+def _response_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _is_local_http_host(hostname: str | None) -> bool:
+    if hostname is None:
+        return False
+    normalized = hostname.strip("[]").lower()
+    if normalized in {"localhost", "::1"} or normalized.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False

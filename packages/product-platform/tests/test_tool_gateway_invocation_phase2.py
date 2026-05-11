@@ -11,6 +11,7 @@ from product_platform.api.settings import Settings
 from product_platform.db.seed import DEMO_ADMIN_USER_ID, DEMO_ENV_ID, DEMO_ORG_ID, seed_demo_data
 from product_platform.db.testing import create_migrated_test_database
 from product_platform.tool_gateway.models import ToolDefinitionCreateRequest
+from product_platform.tool_gateway.models import AgentToolPermissionGrantRequest
 from product_platform.tool_gateway.repository import ToolRegistryRepository
 
 
@@ -54,6 +55,7 @@ class ToolGatewayInvocationPhase2Tests(unittest.TestCase):
                 ),
                 created_by=DEMO_ADMIN_USER_ID,
             )
+            self.tool_id = tool["id"]
             registry.activate_tool(tool["id"], actor_id=DEMO_ADMIN_USER_ID)
         self.app = create_app(
             Settings(
@@ -115,7 +117,33 @@ class ToolGatewayInvocationPhase2Tests(unittest.TestCase):
         self.assertEqual(payload["reason_code"], "permission_missing")
         self.assertEqual(payload["decision"]["reason_code"], "permission_missing")
 
-    def test_api_missing_required_payload_field_returns_422(self) -> None:
+    def test_api_missing_required_payload_field_is_denied_before_schema_for_unauthorized_agent(self) -> None:
+        response = self.client.post(
+            "/api/v1/tools/claims.lookup/invoke",
+            headers=self._headers(),
+            json={"payload": {}},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["error"]["code"], "permission_missing")
+
+    def test_api_missing_required_payload_field_returns_422_after_authorization(self) -> None:
+        with self.database.transaction() as connection:
+            ToolRegistryRepository(
+                connection,
+                DEMO_ORG_ID,
+                DEMO_ENV_ID,
+            ).grant_agent_tool_permission(
+                "agent_invoke_phase2",
+                AgentToolPermissionGrantRequest(
+                    tool_id=self.tool_id,
+                    scope="claims.lookup:read",
+                    granted_reason="schema validation fixture",
+                ),
+                granted_by=DEMO_ADMIN_USER_ID,
+            )
+
         response = self.client.post(
             "/api/v1/tools/claims.lookup/invoke",
             headers=self._headers(),
@@ -125,17 +153,18 @@ class ToolGatewayInvocationPhase2Tests(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
         payload = response.json()
         self.assertEqual(payload["code"], "SCHEMA_VALIDATION_ERROR")
+        self.assertEqual(payload["message"], "Payload failed schema validation.")
         self.assertEqual(payload["details"]["field"], "payload")
 
-    def test_api_unknown_tool_returns_safe_404(self) -> None:
+    def test_api_unknown_tool_returns_policy_denial_without_schema_oracle(self) -> None:
         response = self.client.post(
             "/api/v1/tools/claims.missing/invoke",
             headers=self._headers(),
             json={"payload": {"claim_id": "claim_123"}},
         )
 
-        self.assertEqual(response.status_code, 404)
-        self.assertEqual(response.json()["message"], "Tool not found.")
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "tool_missing")
 
 
 if __name__ == "__main__":

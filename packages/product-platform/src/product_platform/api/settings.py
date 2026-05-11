@@ -25,6 +25,13 @@ def _bool_env(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return int(raw.strip())
+
+
 @dataclass(frozen=True)
 class Settings:
     """Settings loaded from environment variables.
@@ -82,6 +89,15 @@ class Settings:
     )
     system_dependency_breaks: list[str] = field(
         default_factory=lambda: _csv_env("OPHANIX_SYSTEM_DEPENDENCY_BREAKS", "")
+    )
+    tool_gateway_max_body_bytes: int = field(
+        default_factory=lambda: _int_env("OPHANIX_TOOL_GATEWAY_MAX_BODY_BYTES", 1_000_000)
+    )
+    tool_gateway_rate_limit_window_seconds: int = field(
+        default_factory=lambda: _int_env("OPHANIX_TOOL_GATEWAY_RATE_LIMIT_WINDOW_SECONDS", 60)
+    )
+    tool_gateway_rate_limit_max_requests: int = field(
+        default_factory=lambda: _int_env("OPHANIX_TOOL_GATEWAY_RATE_LIMIT_MAX_REQUESTS", 600)
     )
 
 

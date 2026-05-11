@@ -25,6 +25,10 @@ TOOL_POLICY_REASON_CODES = {
     "policy_error",
     "allowed",
 }
+MAX_PAYLOAD_SUMMARY_DEPTH = 8
+MAX_PAYLOAD_SUMMARY_ITEMS = 50
+MAX_PAYLOAD_SUMMARY_STRING_LENGTH = 120
+MAX_PAYLOAD_SUMMARY_TOTAL_CHARS = 16_384
 REDACTED_PAYLOAD_VALUE = "[redacted]"
 SECRET_LIKE_KEY_TOKENS = (
     "authorization",
@@ -352,7 +356,11 @@ class ToolPolicyDecisionService:
                 correlation_id=correlation_id,
                 payload_summary=payload_summary,
             )
-        if required_scope not in principal.scopes:
+        if not principal.allows_tool_scope(
+            required_scope,
+            tool_id=str(tool["id"]),
+            tool_name=str(tool["name"]),
+        ):
             return self._persist(
                 agent_id=agent["id"],
                 tool_id=tool["id"],
@@ -491,10 +499,14 @@ class ToolPolicyDecisionService:
 def summarize_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Create a deterministic, redacted payload summary for decision records."""
 
-    return {
-        str(key): _summarize_value(str(key), value)
-        for key, value in sorted(payload.items(), key=lambda item: str(item[0]))
+    summary = {
+        str(key): _summarize_value(str(key), value, depth=0)
+        for key, value in _sorted_limited_items(payload)
     }
+    serialized = json.dumps(summary, sort_keys=True, default=str)
+    if len(serialized) > MAX_PAYLOAD_SUMMARY_TOTAL_CHARS:
+        return {"summary_truncated": True, "summary_excerpt": serialized[:MAX_PAYLOAD_SUMMARY_TOTAL_CHARS]}
+    return summary
 
 
 def tool_policy_decision_response(row: Row) -> ToolPolicyDecisionResult:
@@ -518,19 +530,25 @@ def tool_policy_decision_response(row: Row) -> ToolPolicyDecisionResult:
     )
 
 
-def _summarize_value(key: str, value: Any) -> Any:
+def _summarize_value(key: str, value: Any, *, depth: int) -> Any:
+    if depth > MAX_PAYLOAD_SUMMARY_DEPTH:
+        return "[truncated]"
     lowered_key = key.lower()
     if any(token in lowered_key for token in SECRET_LIKE_KEY_TOKENS):
         return REDACTED_PAYLOAD_VALUE
     if isinstance(value, dict):
         return {
-            str(child_key): _summarize_value(str(child_key), child_value)
-            for child_key, child_value in sorted(value.items(), key=lambda item: str(item[0]))
+            str(child_key): _summarize_value(str(child_key), child_value, depth=depth + 1)
+            for child_key, child_value in _sorted_limited_items(value)
         }
     if isinstance(value, list):
-        return [_summarize_value(key, item) for item in value[:10]]
-    if isinstance(value, str) and len(value) > 120:
-        return f"{value[:117]}..."
+        return [_summarize_value(key, item, depth=depth + 1) for item in value[:10]]
+    if isinstance(value, str) and len(value) > MAX_PAYLOAD_SUMMARY_STRING_LENGTH:
+        return f"{value[:MAX_PAYLOAD_SUMMARY_STRING_LENGTH - 3]}..."
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
+
+
+def _sorted_limited_items(value: dict[Any, Any]) -> list[tuple[Any, Any]]:
+    return sorted(value.items(), key=lambda item: str(item[0]))[:MAX_PAYLOAD_SUMMARY_ITEMS]

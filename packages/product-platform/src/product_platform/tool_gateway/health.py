@@ -37,7 +37,16 @@ class ToolUpstreamHealthChecker:
         http_client: Any | None = None,
     ) -> None:
         self.repository = repository
+        self._owns_http_client = http_client is None
         self.http_client = http_client or httpx.Client()
+
+    def close(self) -> None:
+        """Close the owned HTTP client when this checker created it."""
+
+        if self._owns_http_client:
+            close = getattr(self.http_client, "close", None)
+            if callable(close):
+                close()
 
     def check_target(self, target_id: str) -> ToolUpstreamHealthResponse:
         """Run one health check and persist the resulting target status."""

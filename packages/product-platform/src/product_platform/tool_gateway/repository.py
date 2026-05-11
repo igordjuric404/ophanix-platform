@@ -15,6 +15,7 @@ from product_platform.tool_gateway.models import (
     AgentToolPermissionHistoryResponse,
     AgentToolPermissionPatchRequest,
     AgentToolPermissionResponse,
+    GatewayToolDefinitionResponse,
     ToolDefinitionCreateRequest,
     ToolDefinitionPatchRequest,
     ToolDefinitionResponse,
@@ -258,6 +259,78 @@ class ToolRegistryRepository:
             FROM tool_definitions
             WHERE {' AND '.join(clauses)}
             ORDER BY updated_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            values,
+        ).fetchall()
+
+    def list_tools_for_gateway_principal(
+        self,
+        *,
+        agent_id: str,
+        credential_id: str,
+        owner_team: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        now: str | None = None,
+    ) -> list[Row]:
+        """List active tools callable by one authenticated gateway principal."""
+
+        normalized_agent_id = agent_id.strip()
+        if not normalized_agent_id:
+            return []
+        if limit <= 0:
+            raise ValueError("limit must be greater than zero")
+        if offset < 0:
+            raise ValueError("offset must be greater than or equal to zero")
+        normalized_credential_id = credential_id.strip()
+        if not normalized_credential_id:
+            return []
+        comparison_time = now or utc_now_iso()
+        clauses = [
+            "d.organization_id = ?",
+            "d.environment_id = ?",
+            "d.status = 'active'",
+            "p.agent_id = ?",
+            "p.status = 'active'",
+            "(p.expires_at IS NULL OR p.expires_at > ?)",
+            "p.scope = d.required_scope",
+            """
+            EXISTS (
+                SELECT 1
+                FROM credential_scopes s
+                WHERE s.credential_id = ?
+                  AND s.scope = d.required_scope
+                  AND s.resource_type = 'tool'
+                  AND (
+                    s.resource_id IS NULL
+                    OR s.resource_id = d.id
+                    OR lower(s.resource_id) = lower(d.name)
+                  )
+            )
+            """,
+        ]
+        values: list[object] = [
+            self.organization_id,
+            self.environment_id,
+            normalized_agent_id,
+            comparison_time,
+            normalized_credential_id,
+        ]
+        if owner_team:
+            clauses.append("d.owner_team = ?")
+            values.append(owner_team.strip())
+        values.extend([limit, offset])
+        return self.connection.execute(
+            f"""
+            SELECT d.*
+            FROM tool_definitions d
+            JOIN agent_tool_permissions p
+              ON p.organization_id = d.organization_id
+             AND p.environment_id = d.environment_id
+             AND p.tool_id = d.id
+            WHERE {' AND '.join(clauses)}
+            ORDER BY d.updated_at DESC, d.id DESC
             LIMIT ? OFFSET ?
             """,
             values,
@@ -1254,6 +1327,22 @@ def tool_definition_response(
             tool_definition_version_response(version)
             for version in (repository.list_versions(row["id"]) if include_versions else [])
         ],
+    )
+
+
+def gateway_tool_definition_response(row: Row) -> GatewayToolDefinitionResponse:
+    """Serialize a tool definition for authenticated agent discovery."""
+
+    return GatewayToolDefinitionResponse(
+        id=row["id"],
+        name=row["name"],
+        display_name=row["display_name"],
+        description=row["description"],
+        owner_team=row["owner_team"],
+        status=row["status"],
+        required_scope=row["required_scope"],
+        input_schema_json=_schema_from_json(row["input_schema_json"]),
+        output_schema_json=_schema_from_json(row["output_schema_json"]),
     )
 
 

@@ -13,6 +13,8 @@ from pydantic import BaseModel, Field, field_validator
 
 from product_platform.tool_gateway.decision import ToolPolicyDecisionResult
 
+MAX_UPSTREAM_TEXT_BODY_CHARS = 8192
+
 
 class ToolInvocationRequest(BaseModel):
     """External agent request to invoke a registered tool."""
@@ -85,8 +87,17 @@ class HttpToolInvocationExecutor:
         fail_closed_unhealthy: bool = True,
     ) -> None:
         self.repository = repository
+        self._owns_http_client = http_client is None
         self.http_client = http_client or httpx.Client()
         self.fail_closed_unhealthy = fail_closed_unhealthy
+
+    def close(self) -> None:
+        """Close the owned HTTP client when this executor created it."""
+
+        if self._owns_http_client:
+            close = getattr(self.http_client, "close", None)
+            if callable(close):
+                close()
 
     def execute(
         self,
@@ -109,6 +120,12 @@ class HttpToolInvocationExecutor:
                 message="Configured upstream target is unhealthy.",
                 status_code=503,
             )
+        if target["auth_mode"] != "none":
+            raise ToolExecutionError(
+                code="upstream_auth_mode_unsupported",
+                message="Configured upstream authentication mode is not supported.",
+                status_code=502,
+            )
 
         url = build_upstream_url(target, payload)
         headers = {
@@ -123,9 +140,9 @@ class HttpToolInvocationExecutor:
             response = self.http_client.request(
                 target["method"],
                 url,
-                json=payload,
                 headers=headers,
                 timeout=timeout_seconds,
+                **_request_payload_kwargs(target["method"], payload),
             )
         except httpx.TimeoutException as exc:
             raise ToolExecutionError(
@@ -208,7 +225,17 @@ def _response_body(response: Any) -> Any:
     try:
         return response.json()
     except Exception:
-        return getattr(response, "text", None)
+        text = getattr(response, "text", None)
+        if isinstance(text, str) and len(text) > MAX_UPSTREAM_TEXT_BODY_CHARS:
+            return f"{text[:MAX_UPSTREAM_TEXT_BODY_CHARS - 3]}..."
+        return text
+
+
+def _request_payload_kwargs(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+    normalized_method = method.upper()
+    if normalized_method in {"GET", "DELETE"}:
+        return {"params": payload}
+    return {"json": payload}
 
 
 def _headers_summary(response: Any) -> dict[str, str]:

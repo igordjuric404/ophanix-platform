@@ -25,6 +25,24 @@ VALID_INPUT_SCHEMA = {
 }
 
 
+class FakeHTTPResponse:
+    status_code = 200
+    headers = {"content-type": "application/json"}
+    text = "{}"
+
+    def json(self):
+        return {"ok": True}
+
+
+class RecordingHTTPClient:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def request(self, method: str, url: str, **kwargs):
+        self.calls.append({"method": method, "url": url, **kwargs})
+        return FakeHTTPResponse()
+
+
 class ToolGatewayForwardingPhase2Tests(unittest.TestCase):
     def setUp(self) -> None:
         self.database = create_migrated_test_database()
@@ -181,6 +199,32 @@ class ToolGatewayForwardingPhase2Tests(unittest.TestCase):
 
         self.assertEqual(default_target["base_url"], "https://default.internal.example")
         self.assertEqual(other_target["base_url"], "https://other.internal.example")
+
+    def test_unit_get_target_uses_query_params_instead_of_json_body(self) -> None:
+        with self.database.transaction():
+            tool = self._create_active_tool(self.repository)
+            self.repository.create_upstream_target(
+                tool["id"],
+                ToolUpstreamTargetCreateRequest(
+                    base_url="https://claims.internal.example",
+                    path_template="/v1/claims",
+                    method="GET",
+                    auth_mode="none",
+                    timeout_ms=1200,
+                    health_url="https://claims.internal.example/health",
+                ),
+            )
+            http_client = RecordingHTTPClient()
+            HttpToolInvocationExecutor(self.repository, http_client=http_client).execute(
+                tool=tool,
+                payload={"claim_id": "claim_123"},
+                decision=self._decision(tool_id=tool["id"]),
+                principal=self._principal(),
+            )
+
+        self.assertEqual(http_client.calls[0]["method"], "GET")
+        self.assertNotIn("json", http_client.calls[0])
+        self.assertEqual(http_client.calls[0]["params"], {"claim_id": "claim_123"})
 
 
 if __name__ == "__main__":

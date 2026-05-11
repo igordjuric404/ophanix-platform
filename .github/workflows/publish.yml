@@ -17,6 +17,8 @@ on:
           - agent-compliance
           - agent-runtime
           - agent-lightning
+          - product-platform
+          - ophanix-tool-gateway-sdk
           - agent-governance-dotnet
           - all
 
@@ -48,6 +50,8 @@ jobs:
           - agent-compliance
           - agent-runtime
           - agent-lightning
+          - product-platform
+          - ophanix-tool-gateway-sdk
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -75,6 +79,12 @@ jobs:
             echo "::error::No wheel (.whl) found for ${{ matrix.package }} — at least one wheel is required"
             exit 1
           fi
+      - name: Validate Tool Gateway SDK release artifacts
+        if: matrix.package == 'ophanix-tool-gateway-sdk'
+        working-directory: packages/ophanix-tool-gateway-sdk
+        run: |
+          python -m pip install --no-cache-dir ".[release,security]"
+          python scripts/validate_release.py --out-dir /tmp/ophanix-sdk-publish-release --require-dependency-audit
 
       - name: Sign release artifacts with sigstore
         uses: sigstore/gh-action-sigstore-python@04cffa1d795717b140764e8b640de88853c92acc # v3.3.0

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 from fastapi.testclient import TestClient
@@ -30,23 +31,24 @@ OUTPUT_SCHEMA = {
 
 
 class FakeHTTPResponse:
-    status_code = 200
     headers = {"content-type": "application/json"}
     text = "{}"
 
-    def __init__(self, body) -> None:
+    def __init__(self, body, *, status_code: int = 200) -> None:
         self._body = body
+        self.status_code = status_code
 
     def json(self):
         return self._body
 
 
 class FakeHTTPClient:
-    def __init__(self, body) -> None:
+    def __init__(self, body, *, status_code: int = 200) -> None:
         self.body = body
+        self.status_code = status_code
 
     def request(self, *args, **kwargs):
-        return FakeHTTPResponse(self.body)
+        return FakeHTTPResponse(self.body, status_code=self.status_code)
 
 
 class ToolGatewayResponsePhase3Tests(unittest.TestCase):
@@ -64,6 +66,51 @@ class ToolGatewayResponsePhase3Tests(unittest.TestCase):
 
         self.assertEqual(result.body, {"token": "[redacted]", "safe": "ok"})
         self.assertTrue(result.redaction_applied)
+
+    def test_unit_failed_response_is_redacted_and_can_be_hidden(self) -> None:
+        result = process_tool_execution_response(
+            {"output_schema_json": OUTPUT_SCHEMA},
+            {
+                "max_response_bytes": 32768,
+                "redaction_rules_json": {"redact_keys": ["token"], "redact_patterns": []},
+                "expose_to_agent": 0,
+                "store_full_response": 0,
+                "strict_output_validation": 1,
+            },
+            ToolExecutionResult(
+                status="failed",
+                body={"token": "secret", "safe": "ok"},
+                error={"code": "upstream_error"},
+            ),
+        )
+
+        self.assertIsNone(result.body)
+        self.assertTrue(result.redaction_applied)
+        self.assertFalse(result.exposed_to_agent)
+
+    def test_unit_key_redaction_uses_exact_or_suffix_matches(self) -> None:
+        result = process_tool_execution_response(
+            {"output_schema_json": None},
+            {
+                "max_response_bytes": 32768,
+                "redaction_rules_json": {"redact_keys": ["key"], "redact_patterns": []},
+                "expose_to_agent": 1,
+                "store_full_response": 1,
+                "strict_output_validation": 1,
+            },
+            ToolExecutionResult(
+                status="succeeded",
+                body={"key": "secret", "api_key": "secret", "monkey": "visible"},
+            ),
+        )
+
+        self.assertEqual(result.body["key"], "[redacted]")
+        self.assertEqual(result.body["api_key"], "[redacted]")
+        self.assertEqual(result.body["monkey"], "visible")
+
+    def test_unit_invalid_redaction_regex_is_rejected_at_policy_write_time(self) -> None:
+        with self.assertRaises(ValueError):
+            ToolResponsePolicyPatchRequest(redaction_rules_json={"redact_patterns": ["("]})
 
     def test_unit_oversized_response_is_blocked(self) -> None:
         with self.assertRaises(ToolExecutionError) as context:
@@ -111,6 +158,63 @@ class ToolGatewayResponsePhase3Tests(unittest.TestCase):
         result = response.json()["result"]
         self.assertEqual(result["body"]["token"], "[redacted]")
         self.assertTrue(result["redaction_applied"])
+
+    def test_api_failed_upstream_response_policy_redacts_body_before_returning(self) -> None:
+        client, app, tool_id = self._client_with_tool(
+            FakeHTTPClient({"claim_status": "open", "token": "secret-token"}, status_code=500)
+        )
+        self._patch_policy(client, tool_id, {"redaction_rules_json": {"redact_keys": ["token"]}})
+
+        response = client.post(
+            "/api/v1/tools/claims.lookup/invoke",
+            headers=self._gateway_headers(),
+            json={"payload": {"claim_id": "claim_123"}},
+        )
+
+        self.assertEqual(response.status_code, 502, response.text)
+        result = response.json()["result"]
+        self.assertEqual(result["body"]["token"], "[redacted]")
+        self.assertNotIn("secret-token", response.text)
+
+    def test_api_store_full_response_false_omits_body_from_runtime_summary(self) -> None:
+        client, app, tool_id = self._client_with_tool(FakeHTTPClient({"claim_status": "open"}))
+        self._patch_policy(client, tool_id, {"store_full_response": False})
+
+        response = client.post(
+            "/api/v1/tools/claims.lookup/invoke",
+            headers=self._gateway_headers(),
+            json={"payload": {"claim_id": "claim_123"}},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        summary = self._latest_response_summary(app)
+        self.assertIsNone(summary["body"])
+        self.assertFalse(summary["body_stored"])
+
+    def test_api_store_full_response_true_keeps_redacted_body_in_runtime_summary(self) -> None:
+        client, app, tool_id = self._client_with_tool(
+            FakeHTTPClient({"claim_status": "open", "token": "secret-token"})
+        )
+        self._patch_policy(
+            client,
+            tool_id,
+            {
+                "store_full_response": True,
+                "redaction_rules_json": {"redact_keys": ["token"]},
+            },
+        )
+
+        response = client.post(
+            "/api/v1/tools/claims.lookup/invoke",
+            headers=self._gateway_headers(),
+            json={"payload": {"claim_id": "claim_123"}},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        summary = self._latest_response_summary(app)
+        self.assertTrue(summary["body_stored"])
+        self.assertEqual(summary["body"]["token"], "[redacted]")
+        self.assertNotIn("secret-token", json.dumps(summary))
 
     def _gateway_headers(self) -> dict[str, str]:
         return {
@@ -181,6 +285,19 @@ class ToolGatewayResponsePhase3Tests(unittest.TestCase):
         headers = {"Authorization": f"Bearer {login.json()['access_token']}", "X-Environment-ID": DEMO_ENV_ID}
         response = client.patch(f"/api/v1/tools/{tool_id}/response-policy", headers=headers, json=body)
         self.assertEqual(response.status_code, 200, response.text)
+
+    def _latest_response_summary(self, app) -> dict:
+        row = app.state.database.connect().execute(
+            """
+            SELECT response_summary_json
+            FROM tool_runtime_actions
+            WHERE response_summary_json IS NOT NULL
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        self.assertIsNotNone(row)
+        return json.loads(row["response_summary_json"])
 
     def _insert_agent(self, connection) -> None:
         now = "2026-05-01T00:00:00+00:00"

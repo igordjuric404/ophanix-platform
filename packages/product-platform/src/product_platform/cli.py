@@ -7,7 +7,9 @@ import time
 
 import uvicorn
 
+from product_platform.api.app import create_app
 from product_platform.api.settings import load_settings
+from product_platform.db.connection import Database
 from product_platform.db.migrator import MigrationRunner
 from product_platform.db.seed import reset_demo_data, seed_demo_data
 from product_platform.demo.services import check_demo_http_health, run_demo_http_service
@@ -109,7 +111,10 @@ def main() -> None:
 
     host = args.host or "127.0.0.1"
     port = args.port or 8088
-    uvicorn.run("product_platform.api.app:app", host=host, port=port, reload=False)
+    settings = load_settings()
+    database = Database(settings.database_url)
+    database.migrate()
+    uvicorn.run(create_app(settings, database=database), host=host, port=port, reload=False)
 
 
 def _run_noop_worker_job():

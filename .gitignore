@@ -20,6 +20,10 @@ venv/
 htmlcov/
 .coverage
 *.cover
+*.db
+*.db.*
+*.sqlite
+*.sqlite3
 
 # Node
 node_modules/

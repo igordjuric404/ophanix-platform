@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import ipaddress
 from typing import Any
 from urllib.parse import urlparse
 
@@ -11,7 +12,7 @@ from pydantic import BaseModel, Field, field_validator
 SUPPORTED_TOOL_STATUSES = {"draft", "active", "disabled", "retired"}
 TOOL_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]*$")
 SUPPORTED_UPSTREAM_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
-SUPPORTED_UPSTREAM_AUTH_MODES = {"none", "api_key", "bearer", "mtls", "custom"}
+SUPPORTED_UPSTREAM_AUTH_MODES = {"none"}
 SUPPORTED_UPSTREAM_STATUSES = {"configured", "healthy", "degraded", "unhealthy", "disabled"}
 SUPPORTED_AGENT_TOOL_PERMISSION_STATUSES = {"active", "paused", "revoked", "expired"}
 
@@ -136,6 +137,20 @@ class ToolDefinitionResponse(BaseModel):
     updated_at: str
     latest_version: ToolDefinitionVersionResponse | None = None
     versions: list[ToolDefinitionVersionResponse] = Field(default_factory=list)
+
+
+class GatewayToolDefinitionResponse(BaseModel):
+    """Tool definition fields safe for authenticated agent SDK discovery."""
+
+    id: str
+    name: str
+    display_name: str
+    description: str
+    owner_team: str
+    status: str
+    required_scope: str
+    input_schema_json: dict[str, Any] | None = None
+    output_schema_json: dict[str, Any] | None = None
 
 
 class ToolUpstreamTargetCreateRequest(BaseModel):
@@ -410,21 +425,7 @@ class ToolResponsePolicyPatchRequest(BaseModel):
     def _validate_redaction_rules(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
         if value is None:
             return None
-        allowed = {"redact_keys", "redact_patterns"}
-        unknown = set(value) - allowed
-        if unknown:
-            raise ValueError(f"unsupported redaction rule keys: {', '.join(sorted(unknown))}.")
-        for key in ["redact_keys", "redact_patterns"]:
-            if key in value and (
-                not isinstance(value[key], list)
-                or not all(isinstance(item, str) and item.strip() for item in value[key])
-            ):
-                raise ValueError(f"{key} must be a list of nonblank strings.")
-        return {
-            key: [item.strip() for item in value.get(key, [])]
-            for key in ["redact_keys", "redact_patterns"]
-            if key in value
-        }
+        return _validate_redaction_rules(value)
 
     @field_validator("status")
     @classmethod
@@ -461,4 +462,77 @@ def validate_http_url(value: str, *, field: str) -> str:
     parsed = urlparse(stripped)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError(f"{field} must be an absolute http or https URL.")
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError(f"{field} must include a hostname.")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError(f"{field} must not include credentials.")
+    if parsed.query or parsed.fragment:
+        raise ValueError(f"{field} must not include a query string or fragment.")
+    local_http = parsed.scheme == "http" and _is_loopback_host(hostname)
+    if parsed.scheme == "http" and not local_http:
+        raise ValueError(f"{field} must use https outside localhost development.")
+    if _is_forbidden_upstream_host(hostname):
+        raise ValueError(f"{field} must not target private, link-local, or metadata hosts.")
     return stripped.rstrip("/")
+
+
+def _validate_redaction_rules(value: dict[str, Any]) -> dict[str, Any]:
+    allowed = {"redact_keys", "redact_patterns"}
+    unknown = set(value) - allowed
+    if unknown:
+        raise ValueError(f"unsupported redaction rule keys: {', '.join(sorted(unknown))}.")
+    for key in ["redact_keys", "redact_patterns"]:
+        if key in value and (
+            not isinstance(value[key], list)
+            or not all(isinstance(item, str) and item.strip() for item in value[key])
+        ):
+            raise ValueError(f"{key} must be a list of nonblank strings.")
+    normalized = {
+        key: [item.strip() for item in value.get(key, [])]
+        for key in ["redact_keys", "redact_patterns"]
+        if key in value
+    }
+    for pattern in normalized.get("redact_patterns", []):
+        _validate_redaction_pattern(pattern)
+    return normalized
+
+
+def _validate_redaction_pattern(pattern: str) -> None:
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        raise ValueError(f"invalid redaction regex pattern: {exc}") from exc
+    if len(pattern) > 500:
+        raise ValueError("redact_patterns entries must be 500 characters or fewer.")
+    if re.search(r"\([^)]*[+*][^)]*\)[+*?]", pattern):
+        raise ValueError("redact_patterns entries must not contain nested unbounded quantifiers.")
+
+
+def _is_loopback_host(hostname: str) -> bool:
+    lowered = hostname.strip().lower().rstrip(".")
+    if lowered in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    try:
+        return ipaddress.ip_address(lowered).is_loopback
+    except ValueError:
+        return False
+
+
+def _is_forbidden_upstream_host(hostname: str) -> bool:
+    lowered = hostname.strip().lower().rstrip(".")
+    if lowered in {"169.254.169.254", "metadata.google.internal"}:
+        return True
+    try:
+        address = ipaddress.ip_address(lowered)
+    except ValueError:
+        return False
+    if address.is_loopback:
+        return False
+    return (
+        address.is_private
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+    )

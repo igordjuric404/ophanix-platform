@@ -50,7 +50,7 @@ class ToolGatewayUpstreamPhase1Tests(unittest.TestCase):
             base_url="https://claims.internal.example",
             path_template="/v1/claims/{claim_id}",
             method="POST",
-            auth_mode="bearer",
+            auth_mode="none",
             timeout_ms=2_500,
             health_url="https://claims.internal.example/health",
             expected_status=204,
@@ -89,6 +89,25 @@ class ToolGatewayUpstreamPhase1Tests(unittest.TestCase):
             )
 
         self.assertIn("absolute http or https URL", str(context.exception))
+
+    def test_unit_unsupported_auth_mode_is_rejected_until_secret_backed_auth_exists(self) -> None:
+        with self.assertRaises(ValidationError) as context:
+            ToolUpstreamTargetCreateRequest(
+                base_url="https://claims.internal.example",
+                path_template="/claims",
+                auth_mode="bearer",
+            )
+
+        self.assertIn("auth_mode must be one of: none", str(context.exception))
+
+    def test_unit_private_ip_upstream_url_is_rejected(self) -> None:
+        with self.assertRaises(ValidationError) as context:
+            ToolUpstreamTargetCreateRequest(
+                base_url="https://169.254.169.254",
+                path_template="/claims",
+            )
+
+        self.assertIn("must not target private", str(context.exception))
 
     def test_repository_resolves_target_by_active_tool_name(self) -> None:
         with self.database.transaction():
