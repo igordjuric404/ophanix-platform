@@ -22,7 +22,7 @@ jobs:
             dockerfile: packages/product-platform/deploy/cloud/Dockerfile.worker
     steps:
       - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: Build product platform image
         uses: docker/build-push-action@v7
         with:
