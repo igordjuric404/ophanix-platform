@@ -18,3 +18,8 @@
   validation, denial-safe `tool_not_visible` lookup errors, elapsed telemetry,
   discovery retry telemetry, PII-aware diagnostic redaction, and an async worker
   example for MVP pilots.
+- Adds `Idempotency-Key` support through `call_tool(..., idempotency_key=...)`
+  and retries transient invocation failures only when an idempotency key is
+  present.
+- Release validation now writes a local CycloneDX SBOM with artifact hashes and
+  records the publish-workflow provenance requirement in the release manifest.

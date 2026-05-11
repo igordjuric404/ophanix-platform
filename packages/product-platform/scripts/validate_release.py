@@ -69,10 +69,12 @@ def main() -> int:
                 package_root,
                 missing_hint="Install release extras first: python3 -m pip install '.[release]'",
             )
+        sbom = _write_minimal_sbom(artifact_dir, package_root=package_root, artifacts=[wheel, sdist])
         _write_release_manifest(
             artifact_dir,
             package_root=package_root,
             artifacts=[wheel, sdist],
+            sbom=sbom,
             twine_check_skipped=args.skip_twine_check,
         )
         print(f"Product release artifacts validated in {artifact_dir}")
@@ -200,14 +202,19 @@ def _write_release_manifest(
     *,
     package_root: Path,
     artifacts: list[Path],
+    sbom: Path,
     twine_check_skipped: bool,
 ) -> None:
     manifest = {
         "package": "ophanix-product-platform",
         "version": _project_version(package_root),
         "sbom_provenance": {
-            "included": False,
-            "requirement": "Generate SBOM and signed provenance in the publish workflow before external release.",
+            "included": True,
+            "sbom_file": sbom.name,
+            "sbom_sha256": _sha256_file(sbom),
+            "provenance_requirement": (
+                "GitHub publish workflow signs artifacts and attests provenance before external release."
+            ),
         },
         "twine_check_skipped": twine_check_skipped,
         "artifacts": [
@@ -223,6 +230,33 @@ def _write_release_manifest(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def _write_minimal_sbom(artifact_dir: Path, *, package_root: Path, artifacts: list[Path]) -> Path:
+    sbom = {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.5",
+        "version": 1,
+        "metadata": {
+            "component": {
+                "type": "library",
+                "name": "ophanix-product-platform",
+                "version": _project_version(package_root),
+            },
+            "tools": [{"name": "scripts/validate_release.py", "version": "1"}],
+        },
+        "components": [
+            {
+                "type": "file",
+                "name": artifact.name,
+                "hashes": [{"alg": "SHA-256", "content": _sha256_file(artifact)}],
+            }
+            for artifact in artifacts
+        ],
+    }
+    path = artifact_dir / "ophanix-product-platform.cdx.json"
+    path.write_text(json.dumps(sbom, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
 
 
 def _project_version(package_root: Path) -> str:

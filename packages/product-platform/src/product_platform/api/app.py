@@ -581,14 +581,20 @@ from product_platform.tool_gateway.decision import ToolPolicyDecisionService
 from product_platform.tool_gateway.health import ToolUpstreamHealthChecker
 from product_platform.tool_gateway.invocation import (
     AsyncHttpToolInvocationExecutor,
+    InMemoryToolGatewayCircuitBreaker,
     ToolExecutionError,
     ToolExecutionResult,
     ToolInvocationRequest,
     ToolInvocationResponse,
+    invocation_request_hash,
+    validate_idempotency_key,
 )
 from product_platform.tool_gateway.schemas import ToolSchemaValidationError, validate_payload
 from product_platform.tool_gateway.response import process_tool_execution_response
 from product_platform.tool_gateway.runtime_audit import (
+    ToolInvocationIdempotencyConflictError,
+    ToolInvocationIdempotencyInProgressError,
+    ToolInvocationIdempotencyRepository,
     ToolRuntimeActionCreate,
     ToolRuntimeActionDetailResponse,
     ToolRuntimeActionEventCreate,
@@ -596,6 +602,7 @@ from product_platform.tool_gateway.runtime_audit import (
     ToolRuntimeActionRepository,
     ToolRuntimeActionResponse,
     ToolRuntimeActionUpdate,
+    idempotency_response_body,
     tool_runtime_action_detail_response,
     tool_runtime_action_response,
 )
@@ -656,6 +663,23 @@ def _trusted_trace_id(value: str | None) -> str | None:
     return stripped
 
 
+def _tool_gateway_idempotency_key(request: Request, body: ToolInvocationRequest) -> str | None:
+    header_value = request.headers.get("Idempotency-Key")
+    body_value = body.idempotency_key
+    normalized_header: str | None = None
+    if header_value is not None:
+        try:
+            normalized_header = validate_idempotency_key(header_value)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if normalized_header is not None and body_value is not None and normalized_header != body_value:
+        raise HTTPException(
+            status_code=400,
+            detail="Idempotency-Key header and body idempotency_key must match.",
+        )
+    return normalized_header or body_value
+
+
 def _error_response(
     request: Request,
     *,
@@ -701,10 +725,6 @@ def _validate_production_settings(settings: Settings) -> None:
     )
     if enable_dev_login:
         raise ValueError("Development login must be disabled in production.")
-    if is_production and settings.database_url.startswith("sqlite:///"):
-        raise ValueError(
-            "SQLite is not supported for production. Configure a managed production database."
-        )
     if settings.database_url.startswith("sqlite:///") and not settings.allow_sqlite_in_production:
         raise ValueError(
             "SQLite is not supported for production without "
@@ -734,6 +754,12 @@ def _validate_production_settings(settings: Settings) -> None:
         "OPHANIX_TOOL_GATEWAY_RATE_LIMIT_MAX_KEYS": settings.tool_gateway_rate_limit_max_keys,
         "OPHANIX_TOOL_GATEWAY_MAX_UPSTREAM_RESPONSE_BYTES": (
             settings.tool_gateway_max_upstream_response_bytes
+        ),
+        "OPHANIX_TOOL_GATEWAY_CIRCUIT_BREAKER_FAILURE_THRESHOLD": (
+            settings.tool_gateway_circuit_breaker_failure_threshold
+        ),
+        "OPHANIX_TOOL_GATEWAY_CIRCUIT_BREAKER_COOLDOWN_SECONDS": (
+            settings.tool_gateway_circuit_breaker_cooldown_seconds
         ),
     }
     unsafe_limits = [name for name, value in positive_gateway_limits.items() if int(value) <= 0]
@@ -1000,6 +1026,10 @@ def create_app(
     app.state.tool_gateway_rate_limits = {}
     app.state.tool_gateway_rate_limit_overflow_limits = {}
     app.state.tool_gateway_rate_limit_lock = threading.Lock()
+    app.state.tool_gateway_circuit_breaker = InMemoryToolGatewayCircuitBreaker(
+        failure_threshold=int(resolved_settings.tool_gateway_circuit_breaker_failure_threshold),
+        cooldown_seconds=float(resolved_settings.tool_gateway_circuit_breaker_cooldown_seconds),
+    )
 
     async def _close_tool_gateway_http_client() -> None:
         client = app.state.tool_gateway_http_client
@@ -3366,6 +3396,8 @@ def create_app(
 
         context = _request_context_from_request(request)
         correlation_id = body.correlation_id or context.correlation_id
+        idempotency_key = _tool_gateway_idempotency_key(request, body)
+        idempotency_record_id: str | None = None
         try:
             with _audit_database().transaction() as connection:
                 repository = ToolRegistryRepository(
@@ -3467,6 +3499,74 @@ def create_app(
                             },
                         )
                         return _schema_validation_error_response(request, exc)
+                if idempotency_key is not None:
+                    try:
+                        created_idempotency_record, idempotency_record = (
+                            ToolInvocationIdempotencyRepository(
+                                connection,
+                                principal.organization_id,
+                                principal.environment_id,
+                            ).begin_invocation(
+                                credential_id=principal.credential_id,
+                                tool_id=tool["id"],
+                                idempotency_key=idempotency_key,
+                                request_hash=invocation_request_hash(
+                                    tool_name=tool_name,
+                                    payload=body.payload,
+                                ),
+                                request_id=context.request_id,
+                                correlation_id=correlation_id,
+                            )
+                        )
+                    except ToolInvocationIdempotencyConflictError:
+                        return JSONResponse(
+                            status_code=409,
+                            content=jsonable_encoder(
+                                ToolInvocationResponse(
+                                    request_id=context.request_id,
+                                    correlation_id=correlation_id,
+                                    tool_name=tool_name,
+                                    decision=None,
+                                    reason_code="idempotency_conflict",
+                                    result=None,
+                                    error={
+                                        "code": "idempotency_conflict",
+                                        "message": (
+                                            "Idempotency key was already used with "
+                                            "different request content."
+                                        ),
+                                    },
+                                )
+                            ),
+                        )
+                    except ToolInvocationIdempotencyInProgressError:
+                        return JSONResponse(
+                            status_code=409,
+                            content=jsonable_encoder(
+                                ToolInvocationResponse(
+                                    request_id=context.request_id,
+                                    correlation_id=correlation_id,
+                                    tool_name=tool_name,
+                                    decision=None,
+                                    reason_code="idempotency_in_progress",
+                                    result=None,
+                                    error={
+                                        "code": "idempotency_in_progress",
+                                        "message": (
+                                            "An invocation with this idempotency key "
+                                            "is still in progress."
+                                        ),
+                                    },
+                                )
+                            ),
+                        )
+                    if not created_idempotency_record:
+                        return JSONResponse(
+                            status_code=int(idempotency_record["response_status_code"] or 200),
+                            content=jsonable_encoder(idempotency_response_body(idempotency_record)),
+                            headers={"Idempotency-Replayed": "true"},
+                        )
+                    idempotency_record_id = str(idempotency_record["id"])
                 runtime_action = runtime_repository.create_action(
                     ToolRuntimeActionCreate(
                         request_id=context.request_id,
@@ -3513,6 +3613,26 @@ def create_app(
                         event_summary,
                     )
 
+            def _store_idempotency_response(
+                status_code: int,
+                response_body: dict[str, Any],
+                *,
+                error_code: str | None = None,
+            ) -> None:
+                if idempotency_record_id is None:
+                    return
+                with _audit_database().transaction() as idem_connection:
+                    ToolInvocationIdempotencyRepository(
+                        idem_connection,
+                        principal.organization_id,
+                        principal.environment_id,
+                    ).complete_invocation(
+                        idempotency_record_id,
+                        response_status_code=status_code,
+                        response_body=response_body,
+                        error_code=error_code,
+                    )
+
             executor = getattr(app.state, "tool_gateway_executor", None)
             if executor is None:
                 executor = AsyncHttpToolInvocationExecutor(
@@ -3523,6 +3643,7 @@ def create_app(
                         resolved_settings.tool_gateway_max_upstream_response_bytes
                     ),
                     allowed_upstream_hosts=resolved_settings.tool_gateway_upstream_host_allowlist,
+                    circuit_breaker=getattr(app.state, "tool_gateway_circuit_breaker", None),
                 )
             try:
                 maybe_execution = executor.execute(
@@ -3546,19 +3667,25 @@ def create_app(
                     "tool.runtime.upstream_failed",
                     {"error_code": exc.code},
                 )
+                response_body = jsonable_encoder(
+                    ToolInvocationResponse(
+                        request_id=context.request_id,
+                        correlation_id=correlation_id,
+                        tool_name=tool_name,
+                        decision=decision,
+                        reason_code=decision.reason_code,
+                        result=None,
+                        error={"code": exc.code, "message": exc.message},
+                    )
+                )
+                _store_idempotency_response(
+                    exc.status_code,
+                    response_body,
+                    error_code=exc.code,
+                )
                 return JSONResponse(
                     status_code=exc.status_code,
-                    content=jsonable_encoder(
-                        ToolInvocationResponse(
-                            request_id=context.request_id,
-                            correlation_id=correlation_id,
-                            tool_name=tool_name,
-                            decision=decision,
-                            reason_code=decision.reason_code,
-                            result=None,
-                            error={"code": exc.code, "message": exc.message},
-                        )
-                    ),
+                    content=response_body,
                 )
             except Exception:
                 _update_runtime_action(
@@ -3570,22 +3697,24 @@ def create_app(
                     "tool.runtime.upstream_failed",
                     {"error_code": "executor_error"},
                 )
+                response_body = jsonable_encoder(
+                    ToolInvocationResponse(
+                        request_id=context.request_id,
+                        correlation_id=correlation_id,
+                        tool_name=tool_name,
+                        decision=decision,
+                        reason_code=decision.reason_code,
+                        result=None,
+                        error={
+                            "code": "executor_error",
+                            "message": "Tool executor failed.",
+                        },
+                    )
+                )
+                _store_idempotency_response(502, response_body, error_code="executor_error")
                 return JSONResponse(
                     status_code=502,
-                    content=jsonable_encoder(
-                        ToolInvocationResponse(
-                            request_id=context.request_id,
-                            correlation_id=correlation_id,
-                            tool_name=tool_name,
-                            decision=decision,
-                            reason_code=decision.reason_code,
-                            result=None,
-                            error={
-                                "code": "executor_error",
-                                "message": "Tool executor failed.",
-                            },
-                        )
-                    ),
+                    content=response_body,
                 )
 
             _update_runtime_action(
@@ -3627,19 +3756,25 @@ def create_app(
                         "tool.runtime.response_blocked",
                         {"error_code": exc.code},
                     )
+                    response_body = jsonable_encoder(
+                        ToolInvocationResponse(
+                            request_id=context.request_id,
+                            correlation_id=correlation_id,
+                            tool_name=tool_name,
+                            decision=decision,
+                            reason_code=decision.reason_code,
+                            result=None,
+                            error={"code": exc.code, "message": exc.message},
+                        )
+                    )
+                    _store_idempotency_response(
+                        exc.status_code,
+                        response_body,
+                        error_code=exc.code,
+                    )
                     return JSONResponse(
                         status_code=exc.status_code,
-                        content=jsonable_encoder(
-                            ToolInvocationResponse(
-                                request_id=context.request_id,
-                                correlation_id=correlation_id,
-                                tool_name=tool_name,
-                                decision=decision,
-                                reason_code=decision.reason_code,
-                                result=None,
-                                error={"code": exc.code, "message": exc.message},
-                            )
-                        ),
+                        content=response_body,
                     )
             result = execution.model_dump() if isinstance(execution, ToolExecutionResult) else execution
             if isinstance(execution, ToolExecutionResult) and execution.status == "failed":
@@ -3667,23 +3802,25 @@ def create_app(
                     "tool.runtime.upstream_failed",
                     {"error_code": error_code},
                 )
+                response_body = jsonable_encoder(
+                    ToolInvocationResponse(
+                        request_id=context.request_id,
+                        correlation_id=correlation_id,
+                        tool_name=tool_name,
+                        decision=decision,
+                        reason_code=decision.reason_code,
+                        result=None,
+                        error=execution.error
+                        or {
+                            "code": "upstream_error",
+                            "message": "Tool execution failed.",
+                        },
+                    )
+                )
+                _store_idempotency_response(502, response_body, error_code=error_code)
                 return JSONResponse(
                     status_code=502,
-                    content=jsonable_encoder(
-                        ToolInvocationResponse(
-                            request_id=context.request_id,
-                            correlation_id=correlation_id,
-                            tool_name=tool_name,
-                            decision=decision,
-                            reason_code=decision.reason_code,
-                            result=None,
-                            error=execution.error
-                            or {
-                                "code": "upstream_error",
-                                "message": "Tool execution failed.",
-                            },
-                        )
-                    ),
+                    content=response_body,
                 )
             _update_runtime_action(
                 ToolRuntimeActionUpdate(
@@ -3709,7 +3846,7 @@ def create_app(
                     else None,
                 },
             )
-            return ToolInvocationResponse(
+            response_model = ToolInvocationResponse(
                 request_id=context.request_id,
                 correlation_id=correlation_id,
                 tool_name=tool_name,
@@ -3718,6 +3855,8 @@ def create_app(
                 result=result,
                 error=None,
             )
+            _store_idempotency_response(200, jsonable_encoder(response_model))
+            return response_model
         except ToolSchemaValidationError as exc:
             return _schema_validation_error_response(request, exc)
 

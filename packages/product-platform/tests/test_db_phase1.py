@@ -4,14 +4,24 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from uuid import uuid4
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 from product_platform.api.settings import Settings
+from product_platform.db.connection import Database
 from product_platform.db.migrator import (
     MigrationRunner,
     connect_database,
+    database_backend_from_url,
     database_path_from_url,
     is_supported_database_url,
 )
+from product_platform.db.repositories import OrganizationRepository
+from product_platform.db.seed import DEMO_ENV_ID, DEMO_ORG_ID, DEMO_ADMIN_USER_ID, seed_demo_data
+from product_platform.db.time import utc_now_iso
+from product_platform.tool_gateway.models import ToolDefinitionCreateRequest
+from product_platform.tool_gateway.repository import ToolRegistryRepository
+from product_platform.tool_gateway.runtime_audit import ToolInvocationIdempotencyRepository
 
 
 EXPECTED_MIGRATIONS = [
@@ -76,26 +86,33 @@ FEATURE_MIGRATIONS = [
     "0056",
     "0057",
     "0058",
+    "0059",
 ]
 
 ALL_EXPECTED_MIGRATIONS = [*EXPECTED_MIGRATIONS, *FEATURE_MIGRATIONS]
 
 
 class DatabaseMigrationPhase1Tests(unittest.TestCase):
-    def test_database_url_parsing_supports_sqlite_only(self) -> None:
+    def test_database_url_parsing_supports_sqlite_and_postgres(self) -> None:
         self.assertEqual(database_path_from_url(":memory:"), ":memory:")
         self.assertEqual(database_path_from_url("sqlite:///:memory:"), ":memory:")
         self.assertEqual(database_path_from_url("sqlite:///local.db"), "local.db")
+        self.assertEqual(database_backend_from_url("sqlite:///local.db"), "sqlite")
+        self.assertEqual(
+            database_backend_from_url("postgresql://ophanix:secret@db.example.com:5432/ophanix"),
+            "postgresql",
+        )
         self.assertTrue(is_supported_database_url("sqlite:///local.db"))
         self.assertTrue(is_supported_database_url("sqlite:///:memory:"))
-
-        with self.assertRaisesRegex(ValueError, "Only sqlite:/// URLs"):
-            database_path_from_url("postgresql://ophanix:secret@db.example.com:5432/ophanix")
-        self.assertFalse(
+        self.assertTrue(
             is_supported_database_url(
                 "postgresql://ophanix:secret@db.example.com:5432/ophanix"
             )
         )
+
+        with self.assertRaisesRegex(ValueError, "Only sqlite:/// URLs"):
+            database_path_from_url("postgresql://ophanix:secret@db.example.com:5432/ophanix")
+        self.assertFalse(is_supported_database_url("mysql://db.example.com/ophanix"))
 
     def test_migration_applies_to_empty_database(self) -> None:
         connection = sqlite3.connect(":memory:")
@@ -221,6 +238,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertIn("tool_response_policies", tables)
             self.assertIn("tool_runtime_actions", tables)
             self.assertIn("tool_runtime_action_events", tables)
+            self.assertIn("tool_invocation_idempotency_records", tables)
             upstream_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(tool_upstream_targets)").fetchall()
@@ -261,6 +279,8 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
                     }
                     self.assertNotIn("auth_config_json", upstream_columns)
                     self.assertNotIn("query_parameter_allowlist_json", upstream_columns)
+                if migration == "0059":
+                    self.assertNotIn("tool_invocation_idempotency_records", tables)
                 if migration == "0051":
                     self.assertNotIn("tool_upstream_targets", tables)
                     self.assertNotIn("tool_upstream_health_checks", tables)
@@ -1680,6 +1700,151 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
 
         self.assertEqual(applied, ALL_EXPECTED_MIGRATIONS)
         self.assertEqual(count, len(ALL_EXPECTED_MIGRATIONS))
+
+    def test_postgres_database_can_be_created_migrated_and_used_when_configured(self) -> None:
+        database_url = os.environ.get("OPHANIX_TEST_POSTGRES_URL")
+        if not database_url:
+            self.skipTest("OPHANIX_TEST_POSTGRES_URL is not configured.")
+
+        try:
+            import psycopg
+        except ImportError:
+            self.skipTest("psycopg is not installed.")
+
+        schema_name = f"ophanix_test_{uuid4().hex}"
+        admin_connection = psycopg.connect(database_url, autocommit=True)
+        try:
+            admin_connection.execute(f'CREATE SCHEMA "{schema_name}"')
+            schema_url = _postgres_url_with_schema(database_url, schema_name)
+
+            database = Database(schema_url)
+            try:
+                applied = database.migrate()
+                with database.transaction() as connection:
+                    seed_demo_data(connection)
+                    now = utc_now_iso()
+                    connection.execute(
+                        """
+                        INSERT INTO agents (
+                            id, organization_id, environment_id, name, description,
+                            framework, runtime_type, endpoint_url, owner_user_id,
+                            sponsor_user_id, status, trust_score, trust_tier,
+                            credential_status, created_at, updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            "agent_postgres",
+                            DEMO_ORG_ID,
+                            DEMO_ENV_ID,
+                            "Postgres Test Agent",
+                            "Postgres backend verification fixture.",
+                            "test",
+                            "http",
+                            None,
+                            DEMO_ADMIN_USER_ID,
+                            DEMO_ADMIN_USER_ID,
+                            "active",
+                            90,
+                            "trusted",
+                            "issued",
+                            now,
+                            now,
+                        ),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO agent_credentials (
+                            id, agent_id, credential_type, token_hash, issuer,
+                            status, issued_at, expires_at, metadata_json
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            "cred_postgres",
+                            "agent_postgres",
+                            "gateway_token",
+                            "postgres-token-hash",
+                            "test",
+                            "active",
+                            now,
+                            "2099-01-01T00:00:00+00:00",
+                            "{}",
+                        ),
+                    )
+                    tool = ToolRegistryRepository(
+                        connection, DEMO_ORG_ID, DEMO_ENV_ID
+                    ).create_tool(
+                        ToolDefinitionCreateRequest(
+                            name="postgres.lookup",
+                            display_name="Postgres Lookup",
+                            owner_team="platform",
+                            required_scope="tools:postgres.lookup",
+                            status="active",
+                        ),
+                        created_by=DEMO_ADMIN_USER_ID,
+                    )
+                    idempotency = ToolInvocationIdempotencyRepository(
+                        connection, DEMO_ORG_ID, DEMO_ENV_ID
+                    )
+                    created, idempotency_row = idempotency.begin_invocation(
+                        credential_id="cred_postgres",
+                        tool_id=tool["id"],
+                        idempotency_key="postgres-test-key",
+                        request_hash="request-hash",
+                        request_id="req_postgres",
+                        correlation_id=None,
+                    )
+                    completed = idempotency.complete_invocation(
+                        idempotency_row["id"],
+                        response_status_code=200,
+                        response_body={"ok": True},
+                    )
+
+                row = OrganizationRepository(database.connect()).get(DEMO_ORG_ID)
+                migration_count = database.connect().execute(
+                    "SELECT COUNT(*) AS count FROM schema_migrations"
+                ).fetchone()["count"]
+                response_policy = ToolRegistryRepository(
+                    database.connect(), DEMO_ORG_ID, DEMO_ENV_ID
+                ).get_response_policy(tool["id"])
+                upstream_columns = {
+                    row["name"]
+                    for row in database.connect().execute(
+                        "PRAGMA table_info(tool_upstream_targets)"
+                    ).fetchall()
+                }
+            finally:
+                database.close()
+        finally:
+            admin_connection.execute(f'DROP SCHEMA IF EXISTS "{schema_name}" CASCADE')
+            admin_connection.close()
+
+        self.assertEqual(applied, ALL_EXPECTED_MIGRATIONS)
+        self.assertEqual(migration_count, len(ALL_EXPECTED_MIGRATIONS))
+        self.assertIsNotNone(row)
+        self.assertEqual(row["name"], "Ophanix Demo")
+        self.assertIsNotNone(response_policy)
+        self.assertTrue(created)
+        self.assertEqual(completed["response_status_code"], 200)
+        self.assertIn("auth_config_json", upstream_columns)
+        self.assertIn("query_parameter_allowlist_json", upstream_columns)
+
+
+def _postgres_url_with_schema(database_url: str, schema_name: str) -> str:
+    parsed = urlparse(database_url)
+    query_items = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query_items["options"] = f"-c search_path={schema_name}"
+    return urlunparse(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            parsed.params,
+            urlencode(query_items, quote_via=quote),
+            parsed.fragment,
+        )
+    )
 
 
 if __name__ == "__main__":

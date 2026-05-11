@@ -69,6 +69,70 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
         self.assertEqual(result.request_id, "req-sdk")
         self.assertEqual(result.result, {"status": "succeeded"})
 
+    def test_call_tool_sends_idempotency_key_and_retries_retryable_status(self) -> None:
+        calls: list[httpx.Request] = []
+        events: list[Mapping[str, Any]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            if len(calls) == 1:
+                return httpx.Response(503, json={"error": {"code": "try_again"}})
+            return httpx.Response(
+                200,
+                json={
+                    "request_id": "req-idem",
+                    "correlation_id": "corr-idem",
+                    "tool_name": "claims.lookup",
+                    "result": {"ok": True},
+                    "error": None,
+                },
+            )
+
+        client = _client(handler, event_hook=events.append)
+        client.invocation_retry_backoff_seconds = 0.0
+        client.invocation_retry_jitter_ratio = 0.0
+
+        result = client.call_tool(
+            "claims.lookup",
+            {"claim_id": "claim_123"},
+            idempotency_key="idem-sdk-1",
+        )
+
+        self.assertEqual(result.result, {"ok": True})
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0].headers["Idempotency-Key"], "idem-sdk-1")
+        self.assertEqual(calls[1].headers["Idempotency-Key"], "idem-sdk-1")
+        self.assertEqual(
+            [event["event"] for event in events if event["event"] == "tool_call.retry"],
+            ["tool_call.retry"],
+        )
+
+    def test_call_tool_does_not_retry_retryable_status_without_idempotency_key(self) -> None:
+        calls = 0
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(503, json={"error": {"code": "try_again"}})
+
+        client = _client(handler)
+
+        with self.assertRaises(ToolGatewayError) as raised:
+            client.call_tool("claims.lookup", {"claim_id": "claim_123"})
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(raised.exception.code, "try_again")
+
+    def test_call_tool_rejects_invalid_idempotency_key_locally(self) -> None:
+        client = _client(lambda _request: httpx.Response(200, json={}))
+
+        with self.assertRaisesRegex(ToolGatewayValidationError, "idempotency_key"):
+            client.call_tool(
+                "claims.lookup",
+                {"claim_id": "claim_123"},
+                idempotency_key="bad key",
+            )
+
     def test_list_tools_returns_isolated_schema_copies_from_cache(self) -> None:
         calls = 0
 

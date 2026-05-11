@@ -67,7 +67,7 @@ class MVPCloudDeploymentPhase2Tests(unittest.TestCase):
         self.assertEqual(dependencies["object_storage"]["status"], "unhealthy")
         self.assertEqual(dependencies["secret_manager"]["status"], "unhealthy")
 
-    def test_api_readiness_rejects_unsupported_postgres_runtime(self) -> None:
+    def test_api_readiness_reports_unreachable_postgres_runtime(self) -> None:
         app = create_app(
             Settings(
                 environment="staging",
@@ -87,7 +87,7 @@ class MVPCloudDeploymentPhase2Tests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         dependencies = {item["name"]: item for item in response.json()["dependencies"]}
         self.assertEqual(dependencies["database"]["status"], "unhealthy")
-        self.assertIn("PostgreSQL runtime support is not implemented", dependencies["database"]["message"])
+        self.assertIn("postgresql database is not ready or migrations are missing", dependencies["database"]["message"])
 
     def test_api_readiness_reports_unreachable_configured_redis(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -164,7 +164,7 @@ class MVPCloudDeploymentPhase2Tests(unittest.TestCase):
         )
 
         self.assertTrue(is_supported_database_url(database_url))
-        self.assertTrue(database_url.startswith("sqlite:///"))
+        self.assertTrue(database_url.startswith("postgresql://"))
 
     def test_api_readiness_passes_when_cloud_services_configured(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

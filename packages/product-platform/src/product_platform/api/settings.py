@@ -134,6 +134,12 @@ class Settings:
     tool_gateway_max_upstream_response_bytes: int = field(
         default_factory=lambda: _int_env("OPHANIX_TOOL_GATEWAY_MAX_UPSTREAM_RESPONSE_BYTES", 1_000_000)
     )
+    tool_gateway_circuit_breaker_failure_threshold: int = field(
+        default_factory=lambda: _int_env("OPHANIX_TOOL_GATEWAY_CIRCUIT_BREAKER_FAILURE_THRESHOLD", 5)
+    )
+    tool_gateway_circuit_breaker_cooldown_seconds: int = field(
+        default_factory=lambda: _int_env("OPHANIX_TOOL_GATEWAY_CIRCUIT_BREAKER_COOLDOWN_SECONDS", 30)
+    )
     tool_gateway_upstream_host_allowlist: list[str] = field(
         default_factory=lambda: _csv_env("OPHANIX_TOOL_GATEWAY_UPSTREAM_HOST_ALLOWLIST", "")
     )

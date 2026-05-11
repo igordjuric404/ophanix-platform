@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from sqlite3 import Connection, Row
+from sqlite3 import Connection, IntegrityError, Row
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
@@ -379,6 +379,201 @@ class ToolRuntimeActionRepository:
             """,
             values,
         ).fetchall()
+
+
+class ToolInvocationIdempotencyConflictError(ValueError):
+    """Raised when an idempotency key is reused with different request content."""
+
+
+class ToolInvocationIdempotencyInProgressError(ValueError):
+    """Raised when an idempotent invocation is already running and has no replay yet."""
+
+
+class ToolInvocationIdempotencyRepository:
+    """Persistence for idempotent Tool Gateway invocation replay records."""
+
+    def __init__(self, connection: Connection, organization_id: str, environment_id: str) -> None:
+        self.connection = connection
+        self.organization_id = organization_id
+        self.environment_id = environment_id
+
+    def begin_invocation(
+        self,
+        *,
+        credential_id: str,
+        tool_id: str,
+        idempotency_key: str,
+        request_hash: str,
+        request_id: str,
+        correlation_id: str | None,
+    ) -> tuple[bool, Row]:
+        """Create or load a replay record.
+
+        Returns `(True, row)` for a new invocation and `(False, row)` for a
+        previously completed invocation that can be replayed.
+        """
+
+        existing = self.get_record(
+            credential_id=credential_id,
+            tool_id=tool_id,
+            idempotency_key=idempotency_key,
+        )
+        if existing is not None:
+            return False, self._validated_existing(existing, request_hash=request_hash)
+        record_id = generate_id("toolidem")
+        now = utc_now_iso()
+        try:
+            self.connection.execute(
+                """
+                INSERT INTO tool_invocation_idempotency_records (
+                    id, organization_id, environment_id, credential_id, tool_id,
+                    idempotency_key, request_hash, request_id, correlation_id,
+                    status, response_status_code, response_body_json, error_code,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record_id,
+                    self.organization_id,
+                    self.environment_id,
+                    credential_id,
+                    tool_id,
+                    idempotency_key,
+                    request_hash,
+                    request_id,
+                    correlation_id,
+                    "in_progress",
+                    None,
+                    None,
+                    None,
+                    now,
+                    now,
+                ),
+            )
+        except IntegrityError:
+            existing = self.get_record(
+                credential_id=credential_id,
+                tool_id=tool_id,
+                idempotency_key=idempotency_key,
+            )
+            if existing is None:
+                raise
+            return False, self._validated_existing(existing, request_hash=request_hash)
+        row = self.get_record(
+            credential_id=credential_id,
+            tool_id=tool_id,
+            idempotency_key=idempotency_key,
+        )
+        if row is None:
+            raise ValueError("Created idempotency record could not be loaded.")
+        return True, row
+
+    def complete_invocation(
+        self,
+        record_id: str,
+        *,
+        response_status_code: int,
+        response_body: dict[str, Any],
+        error_code: str | None = None,
+    ) -> Row:
+        """Store the public gateway response for future idempotent replays."""
+
+        now = utc_now_iso()
+        self.connection.execute(
+            """
+            UPDATE tool_invocation_idempotency_records
+            SET status = ?,
+                response_status_code = ?,
+                response_body_json = ?,
+                error_code = ?,
+                updated_at = ?
+            WHERE id = ?
+              AND organization_id = ?
+              AND environment_id = ?
+            """,
+            (
+                "completed",
+                response_status_code,
+                json.dumps(response_body, sort_keys=True, separators=(",", ":")),
+                error_code,
+                now,
+                record_id,
+                self.organization_id,
+                self.environment_id,
+            ),
+        )
+        row = self.get_record_by_id(record_id)
+        if row is None:
+            raise ValueError("Idempotency record not found.")
+        return row
+
+    def get_record_by_id(self, record_id: str) -> Row | None:
+        """Get one idempotency record by id in tenant scope."""
+
+        return self.connection.execute(
+            """
+            SELECT *
+            FROM tool_invocation_idempotency_records
+            WHERE id = ?
+              AND organization_id = ?
+              AND environment_id = ?
+            """,
+            (record_id, self.organization_id, self.environment_id),
+        ).fetchone()
+
+    def get_record(
+        self,
+        *,
+        credential_id: str,
+        tool_id: str,
+        idempotency_key: str,
+    ) -> Row | None:
+        """Get one idempotency record by its external replay key."""
+
+        return self.connection.execute(
+            """
+            SELECT *
+            FROM tool_invocation_idempotency_records
+            WHERE organization_id = ?
+              AND environment_id = ?
+              AND credential_id = ?
+              AND tool_id = ?
+              AND idempotency_key = ?
+            """,
+            (
+                self.organization_id,
+                self.environment_id,
+                credential_id,
+                tool_id,
+                idempotency_key,
+            ),
+        ).fetchone()
+
+    def _validated_existing(self, row: Row, *, request_hash: str) -> Row:
+        if row["request_hash"] != request_hash:
+            raise ToolInvocationIdempotencyConflictError(
+                "Idempotency key was already used with different request content."
+            )
+        if row["status"] != "completed" or row["response_body_json"] is None:
+            raise ToolInvocationIdempotencyInProgressError(
+                "Idempotent invocation is still in progress."
+            )
+        return row
+
+
+def idempotency_response_body(row: Row) -> dict[str, Any]:
+    """Return the stored public response body for a completed replay record."""
+
+    value = row["response_body_json"]
+    if not isinstance(value, str) or not value:
+        raise ToolInvocationIdempotencyInProgressError(
+            "Idempotent invocation is still in progress."
+        )
+    loaded = json.loads(value)
+    if not isinstance(loaded, dict):
+        raise ValueError("Stored idempotency response is not an object.")
+    return loaded
 
 
 def tool_runtime_action_response(row: Row) -> ToolRuntimeActionResponse:

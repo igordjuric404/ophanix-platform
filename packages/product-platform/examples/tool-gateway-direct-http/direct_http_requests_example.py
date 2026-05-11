@@ -38,6 +38,7 @@ def invoke_tool_direct_http(
     tool_name: str,
     payload: dict[str, Any],
     correlation_id: str | None = None,
+    idempotency_key: str | None = None,
     timeout: float = 10.0,
     post: PostCallable | None = None,
 ) -> dict[str, Any]:
@@ -51,6 +52,8 @@ def invoke_tool_direct_http(
     if correlation_id:
         headers["X-Correlation-ID"] = correlation_id
         request_body["correlation_id"] = correlation_id
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
     response = post_callable(
         f"{normalized_base_url}/api/v1/tools/{tool_name}/invoke",
         headers=headers,
@@ -114,6 +117,7 @@ def main() -> None:
     parser.add_argument("--tool-name", default="claims.lookup")
     parser.add_argument("--claim-id", default="claim_123")
     parser.add_argument("--correlation-id", default="demo-direct-http-python")
+    parser.add_argument("--idempotency-key", default=None)
     args = parser.parse_args()
     if not args.token:
         raise SystemExit("Set OPHANIX_TOOL_GATEWAY_TOKEN or pass --token.")
@@ -123,6 +127,7 @@ def main() -> None:
         tool_name=args.tool_name,
         payload={"claim_id": args.claim_id},
         correlation_id=args.correlation_id,
+        idempotency_key=args.idempotency_key,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
 

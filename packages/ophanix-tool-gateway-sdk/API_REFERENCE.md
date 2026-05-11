@@ -30,6 +30,10 @@ OphanixToolGatewayClient(
     discovery_retry_backoff_seconds: float = 0.2,
     discovery_retry_max_sleep_seconds: float = 5.0,
     discovery_retry_jitter_ratio: float = 0.2,
+    invocation_max_retries: int = 2,
+    invocation_retry_backoff_seconds: float = 0.2,
+    invocation_retry_max_sleep_seconds: float = 5.0,
+    invocation_retry_jitter_ratio: float = 0.2,
     allow_buffered_custom_http_client: bool = False,
     raise_event_hook_errors: bool = False,
 )
@@ -37,7 +41,7 @@ OphanixToolGatewayClient(
 
 Methods:
 
-- `call_tool(tool_name: str, payload: dict[str, Any], correlation_id: str | None = None) -> ToolCallResult`
+- `call_tool(tool_name: str, payload: dict[str, Any], correlation_id: str | None = None, idempotency_key: str | None = None) -> ToolCallResult`
 - `check_compatibility() -> GatewayCompatibility`
 - `list_tools(status: Literal["active"] | None = None, owner_team: str | None = None, limit: int = 50, offset: int = 0) -> list[ToolDefinition]`
 - `list_all_tools(owner_team: str | None = None, page_size: int = 200, max_total: int | None = None) -> list[ToolDefinition]`
@@ -55,8 +59,9 @@ are awaitable.
 
 Reusable configuration accepted by `OphanixToolGatewayClient.from_config(...)`
 and `AsyncOphanixToolGatewayClient.from_config(...)`. It includes timeout,
-payload/response caps, cache settings, discovery retry settings, custom client
-streaming policy, user agent, and event-hook failure mode. `base_url`,
+payload/response caps, cache settings, discovery retry settings, idempotent
+invocation retry settings, custom client streaming policy, user agent, and
+event-hook failure mode. `base_url`,
 `token_provider`, `http_client`, and `event_hook` remain constructor inputs.
 
 ## Token Providers
@@ -104,11 +109,16 @@ Sanitized `response_body` values redact common credential and PII-like keys:
 
 | Event | Fields |
 | --- | --- |
-| `tool_call.start` | `tool_name`, `correlation_id` |
+| `tool_call.start` | `tool_name`, `correlation_id`, `idempotent` |
 | `tool_call.success` | `tool_name`, `request_id`, `correlation_id`, `reason_code`, `elapsed_ms` |
 | `tool_call.denied` | `tool_name`, `status_code`, `elapsed_ms` |
 | `tool_call.error` | `tool_name`, `status_code` or `code`, `elapsed_ms` |
+| `tool_call.retry` | `tool_name`, `attempt`, `delay_seconds`, `status_code`, `code` |
 | `tool_discovery.retry` | `attempt`, `delay_seconds`, `status_code` |
+
+Invocation retries are gated by `idempotency_key`. Without a key, `call_tool`
+does not retry transient failures because the SDK cannot prove that the upstream
+operation is safe to repeat.
 
 ## Compatibility And Deprecations
 

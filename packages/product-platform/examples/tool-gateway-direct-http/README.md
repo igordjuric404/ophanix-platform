@@ -10,7 +10,8 @@ controls.
 
 Direct HTTP callers must implement their own token refresh, payload validation,
 timeouts, response-size caps, retry policy, redaction, compatibility probing,
-and typed error handling before using this pattern outside a local demo.
+idempotency-key generation, and typed error handling before using this pattern
+outside a local demo.
 
 ```bash
 export OPHANIX_BASE_URL="http://127.0.0.1:8000"
@@ -24,6 +25,7 @@ Allowed invocation:
 curl -sS -X POST "$OPHANIX_BASE_URL/api/v1/tools/claims.lookup/invoke" \
   -H "Authorization: Bearer $OPHANIX_TOOL_GATEWAY_ALLOWED_TOKEN" \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: demo-direct-http-allowed-claim-123" \
   -H "X-Request-ID: req-demo-direct-http-allowed" \
   -H "X-Correlation-ID: demo-direct-http-allowed" \
   --data '{"payload": {"claim_id": "claim_123"}, "correlation_id": "demo-direct-http-allowed"}'

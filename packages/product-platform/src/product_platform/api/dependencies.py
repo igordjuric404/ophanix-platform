@@ -12,7 +12,11 @@ from urllib.request import Request, urlopen
 
 from product_platform.api.settings import Settings
 from product_platform.api.models import DependencyStatus
-from product_platform.db.migrator import connect_database, is_supported_database_url
+from product_platform.db.migrator import (
+    connect_database,
+    database_backend_from_url,
+    is_supported_database_url,
+)
 
 DependencyCheck = Callable[[], DependencyStatus]
 SettingsProbe = Callable[[Settings], DependencyStatus]
@@ -225,10 +229,10 @@ def _probe_database(settings: Settings) -> DependencyStatus:
             status="unhealthy",
             required=True,
             message=(
-                "OPHANIX_DATABASE_URL must be a sqlite:/// URL; PostgreSQL runtime support "
-                "is not implemented yet."
+                "OPHANIX_DATABASE_URL must be a sqlite:/// or postgresql:// URL."
             ),
         )
+    backend = database_backend_from_url(settings.database_url)
     try:
         connection = connect_database(settings.database_url)
         try:
@@ -242,13 +246,13 @@ def _probe_database(settings: Settings) -> DependencyStatus:
             name="database",
             status="unhealthy",
             required=True,
-            message=f"SQLite database is reachable but migrations are not ready: {exc}",
+            message=f"{backend} database is not ready or migrations are missing: {exc}",
         )
     return DependencyStatus(
         name="database",
         status="healthy",
         required=True,
-        message=f"SQLite database is reachable with {row['count']} applied migrations.",
+        message=f"{backend} database is reachable with {row['count']} applied migrations.",
     )
 
 

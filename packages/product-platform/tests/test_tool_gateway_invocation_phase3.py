@@ -158,6 +158,65 @@ class ToolGatewayInvocationPhase3Tests(unittest.TestCase):
         self.assertEqual(len(executor.calls), 1)
         self.assertEqual(executor.calls[0]["payload"], {"claim_id": "claim_123"})
 
+    def test_api_idempotency_key_replays_completed_response_without_reexecuting(self) -> None:
+        self._grant_permission()
+        executor = FakeInvocationExecutor(result={"claim_status": "open"})
+        self.app.state.tool_gateway_executor = executor
+
+        first = self.client.post(
+            "/api/v1/tools/claims.lookup/invoke",
+            headers={**self._headers(request_id="req-idem-first"), "Idempotency-Key": "idem-claim-1"},
+            json={"payload": {"claim_id": "claim_123"}},
+        )
+        second = self.client.post(
+            "/api/v1/tools/claims.lookup/invoke",
+            headers={**self._headers(request_id="req-idem-second"), "Idempotency-Key": "idem-claim-1"},
+            json={"payload": {"claim_id": "claim_123"}},
+        )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(second.headers["Idempotency-Replayed"], "true")
+        self.assertEqual(second.json()["request_id"], "req-idem-first")
+        self.assertEqual(second.json()["result"], {"claim_status": "open"})
+        self.assertEqual(len(executor.calls), 1)
+
+    def test_api_idempotency_key_conflict_blocks_different_payload(self) -> None:
+        self._grant_permission()
+        executor = FakeInvocationExecutor(result={"claim_status": "open"})
+        self.app.state.tool_gateway_executor = executor
+
+        first = self.client.post(
+            "/api/v1/tools/claims.lookup/invoke",
+            headers={**self._headers(request_id="req-idem-conflict-first"), "Idempotency-Key": "idem-conflict-1"},
+            json={"payload": {"claim_id": "claim_123"}},
+        )
+        second = self.client.post(
+            "/api/v1/tools/claims.lookup/invoke",
+            headers={**self._headers(request_id="req-idem-conflict-second"), "Idempotency-Key": "idem-conflict-1"},
+            json={"payload": {"claim_id": "claim_456"}},
+        )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 409, second.text)
+        self.assertEqual(second.json()["error"]["code"], "idempotency_conflict")
+        self.assertEqual(len(executor.calls), 1)
+
+    def test_api_rejects_mismatched_header_and_body_idempotency_keys(self) -> None:
+        self._grant_permission()
+        self.app.state.tool_gateway_executor = FakeInvocationExecutor(result={"ok": True})
+
+        response = self.client.post(
+            "/api/v1/tools/claims.lookup/invoke",
+            headers={**self._headers(request_id="req-idem-mismatch"), "Idempotency-Key": "idem-header"},
+            json={
+                "payload": {"claim_id": "claim_123"},
+                "idempotency_key": "idem-body",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400, response.text)
+
     def test_api_denied_decision_does_not_call_executor(self) -> None:
         executor = FakeInvocationExecutor(result={"should_not": "run"})
         self.app.state.tool_gateway_executor = executor

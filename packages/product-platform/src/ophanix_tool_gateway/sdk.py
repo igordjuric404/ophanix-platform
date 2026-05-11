@@ -73,8 +73,11 @@ SDK_VERSION = _sdk_version()
 SDK_USER_AGENT = f"ophanix-tool-gateway-python/{SDK_VERSION}"
 DEFAULT_GATEWAY_TOKEN_ENV_VAR = "OPHANIX_GATEWAY_TOKEN"
 RETRYABLE_DISCOVERY_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+RETRYABLE_TOOL_CALL_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
 DEFAULT_DISCOVERY_RETRY_MAX_SLEEP_SECONDS = 5.0
 DEFAULT_DISCOVERY_RETRY_JITTER_RATIO = 0.2
+DEFAULT_TOOL_CALL_RETRY_MAX_SLEEP_SECONDS = 5.0
+DEFAULT_TOOL_CALL_RETRY_JITTER_RATIO = 0.2
 DEFAULT_CACHE_TTL_SECONDS = 300.0
 MAX_ERROR_BODY_STRING_LENGTH = 512
 MAX_ERROR_BODY_ITEMS = 20
@@ -84,7 +87,9 @@ DEFAULT_MAX_PAYLOAD_BYTES = 1_000_000
 DEFAULT_MAX_RESPONSE_BYTES = 1_000_000
 DEFAULT_MAX_CACHE_ENTRIES = 256
 MAX_GATEWAY_TOKEN_LENGTH = 4096
+MAX_IDEMPOTENCY_KEY_LENGTH = 128
 RAW_GATEWAY_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9._~+/=-]+$")
+IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.:/@+-]+$")
 _CACHE_FINGERPRINT_KEY = secrets.token_bytes(32)
 _ToolCacheKey = tuple[str, str]
 _ListCacheKey = tuple[tuple[str, str], ...]
@@ -237,6 +242,10 @@ class ToolGatewayClientConfig:
     discovery_retry_backoff_seconds: float = 0.2
     discovery_retry_max_sleep_seconds: float = DEFAULT_DISCOVERY_RETRY_MAX_SLEEP_SECONDS
     discovery_retry_jitter_ratio: float = DEFAULT_DISCOVERY_RETRY_JITTER_RATIO
+    invocation_max_retries: int = 2
+    invocation_retry_backoff_seconds: float = 0.2
+    invocation_retry_max_sleep_seconds: float = DEFAULT_TOOL_CALL_RETRY_MAX_SLEEP_SECONDS
+    invocation_retry_jitter_ratio: float = DEFAULT_TOOL_CALL_RETRY_JITTER_RATIO
     allow_buffered_custom_http_client: bool = False
     raise_event_hook_errors: bool = False
 
@@ -318,6 +327,10 @@ class _ClientConfig:
     discovery_retry_backoff_seconds: float
     discovery_retry_max_sleep_seconds: float
     discovery_retry_jitter_ratio: float
+    invocation_max_retries: int
+    invocation_retry_backoff_seconds: float
+    invocation_retry_max_sleep_seconds: float
+    invocation_retry_jitter_ratio: float
     allow_buffered_custom_http_client: bool
 
 
@@ -354,6 +367,10 @@ class OphanixToolGatewayClient:
             discovery_retry_backoff_seconds=config.discovery_retry_backoff_seconds,
             discovery_retry_max_sleep_seconds=config.discovery_retry_max_sleep_seconds,
             discovery_retry_jitter_ratio=config.discovery_retry_jitter_ratio,
+            invocation_max_retries=config.invocation_max_retries,
+            invocation_retry_backoff_seconds=config.invocation_retry_backoff_seconds,
+            invocation_retry_max_sleep_seconds=config.invocation_retry_max_sleep_seconds,
+            invocation_retry_jitter_ratio=config.invocation_retry_jitter_ratio,
             allow_buffered_custom_http_client=config.allow_buffered_custom_http_client,
             raise_event_hook_errors=config.raise_event_hook_errors,
         )
@@ -377,6 +394,10 @@ class OphanixToolGatewayClient:
         discovery_retry_backoff_seconds: float = 0.2,
         discovery_retry_max_sleep_seconds: float = DEFAULT_DISCOVERY_RETRY_MAX_SLEEP_SECONDS,
         discovery_retry_jitter_ratio: float = DEFAULT_DISCOVERY_RETRY_JITTER_RATIO,
+        invocation_max_retries: int = 2,
+        invocation_retry_backoff_seconds: float = 0.2,
+        invocation_retry_max_sleep_seconds: float = DEFAULT_TOOL_CALL_RETRY_MAX_SLEEP_SECONDS,
+        invocation_retry_jitter_ratio: float = DEFAULT_TOOL_CALL_RETRY_JITTER_RATIO,
         allow_buffered_custom_http_client: bool = False,
         raise_event_hook_errors: bool = False,
     ) -> None:
@@ -398,6 +419,10 @@ class OphanixToolGatewayClient:
             discovery_retry_backoff_seconds=discovery_retry_backoff_seconds,
             discovery_retry_max_sleep_seconds=discovery_retry_max_sleep_seconds,
             discovery_retry_jitter_ratio=discovery_retry_jitter_ratio,
+            invocation_max_retries=invocation_max_retries,
+            invocation_retry_backoff_seconds=invocation_retry_backoff_seconds,
+            invocation_retry_max_sleep_seconds=invocation_retry_max_sleep_seconds,
+            invocation_retry_jitter_ratio=invocation_retry_jitter_ratio,
             allow_buffered_custom_http_client=allow_buffered_custom_http_client,
         )
         self.token_provider = token_provider
@@ -414,6 +439,10 @@ class OphanixToolGatewayClient:
         self.discovery_retry_backoff_seconds: float = config.discovery_retry_backoff_seconds
         self.discovery_retry_max_sleep_seconds: float = config.discovery_retry_max_sleep_seconds
         self.discovery_retry_jitter_ratio: float = config.discovery_retry_jitter_ratio
+        self.invocation_max_retries: int = config.invocation_max_retries
+        self.invocation_retry_backoff_seconds: float = config.invocation_retry_backoff_seconds
+        self.invocation_retry_max_sleep_seconds: float = config.invocation_retry_max_sleep_seconds
+        self.invocation_retry_jitter_ratio: float = config.invocation_retry_jitter_ratio
         self.allow_buffered_custom_http_client: bool = config.allow_buffered_custom_http_client
         self.event_hook = _optional_event_hook(event_hook)
         self.raise_event_hook_errors = _require_bool(raise_event_hook_errors, "raise_event_hook_errors")
@@ -446,6 +475,7 @@ class OphanixToolGatewayClient:
         tool_name: str,
         payload: dict[str, Any],
         correlation_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> ToolCallResult:
         """Invoke one registered gateway tool with bearer authentication."""
 
@@ -460,37 +490,78 @@ class OphanixToolGatewayClient:
         if normalized_correlation_id is not None:
             body["correlation_id"] = normalized_correlation_id
             headers["X-Correlation-ID"] = normalized_correlation_id
+        normalized_idempotency_key = _optional_idempotency_key(idempotency_key)
+        if normalized_idempotency_key is not None:
+            headers["Idempotency-Key"] = normalized_idempotency_key
         self._emit_event(
             {
                 "event": "tool_call.start",
                 "tool_name": normalized_tool_name,
                 "correlation_id": normalized_correlation_id,
+                "idempotent": normalized_idempotency_key is not None,
             }
         )
-        try:
-            response = _send_limited_sync_request(
-                self._http_client,
-                "POST",
-                (
-                    f"{self.base_url}{GATEWAY_TOOL_INVOKE_PATH_PREFIX}/"
-                    f"{quote(normalized_tool_name, safe='')}{GATEWAY_TOOL_INVOKE_PATH_SUFFIX}"
-                ),
-                max_response_bytes=self.max_response_bytes,
-                json=body,
-                headers=headers,
-                timeout=self.timeout_seconds,
-            )
-        except httpx.HTTPError as exc:
-            self._emit_event(
-                {
-                    "event": "tool_call.error",
-                    "tool_name": normalized_tool_name,
-                    "code": "transport_error",
-                    "elapsed_ms": _elapsed_ms(started_at),
-                }
-            )
-            raise ToolGatewayError("Tool Gateway transport error.", code="transport_error") from exc
-        response_body = _response_json(response, max_response_bytes=self.max_response_bytes)
+        attempts = 0
+        max_retries = self.invocation_max_retries if normalized_idempotency_key is not None else 0
+        while True:
+            try:
+                response = _send_limited_sync_request(
+                    self._http_client,
+                    "POST",
+                    (
+                        f"{self.base_url}{GATEWAY_TOOL_INVOKE_PATH_PREFIX}/"
+                        f"{quote(normalized_tool_name, safe='')}{GATEWAY_TOOL_INVOKE_PATH_SUFFIX}"
+                    ),
+                    max_response_bytes=self.max_response_bytes,
+                    json=body,
+                    headers=headers,
+                    timeout=self.timeout_seconds,
+                )
+            except httpx.TransportError as exc:
+                if attempts < max_retries:
+                    self._sleep_before_tool_call_retry(
+                        attempts,
+                        tool_name=normalized_tool_name,
+                        response=None,
+                        response_body=None,
+                    )
+                    attempts += 1
+                    continue
+                self._emit_event(
+                    {
+                        "event": "tool_call.error",
+                        "tool_name": normalized_tool_name,
+                        "code": "transport_error",
+                        "elapsed_ms": _elapsed_ms(started_at),
+                    }
+                )
+                raise ToolGatewayError("Tool Gateway transport error.", code="transport_error") from exc
+            except httpx.HTTPError as exc:
+                self._emit_event(
+                    {
+                        "event": "tool_call.error",
+                        "tool_name": normalized_tool_name,
+                        "code": "transport_error",
+                        "elapsed_ms": _elapsed_ms(started_at),
+                    }
+                )
+                raise ToolGatewayError("Tool Gateway transport error.", code="transport_error") from exc
+            response_body = _response_json(response, max_response_bytes=self.max_response_bytes)
+            if _should_retry_tool_call_response(
+                response,
+                response_body,
+                attempts=attempts,
+                max_retries=max_retries,
+            ):
+                self._sleep_before_tool_call_retry(
+                    attempts,
+                    tool_name=normalized_tool_name,
+                    response=response,
+                    response_body=response_body,
+                )
+                attempts += 1
+                continue
+            break
         if response.status_code == 403:
             self._emit_event(
                 {
@@ -774,6 +845,49 @@ class OphanixToolGatewayClient:
             return
         self._sleep(delay)
 
+    def _sleep_before_tool_call_retry(
+        self,
+        attempt: int,
+        *,
+        tool_name: str,
+        response: httpx.Response | None,
+        response_body: dict[str, Any] | None,
+    ) -> None:
+        delay = self._tool_call_retry_delay(attempt, response=response)
+        self._emit_event(
+            {
+                "event": "tool_call.retry",
+                "tool_name": tool_name,
+                "attempt": attempt + 1,
+                "delay_seconds": delay,
+                "status_code": response.status_code if response is not None else None,
+                "code": _gateway_error_code(response_body or {}),
+            }
+        )
+        if delay <= 0:
+            return
+        self._sleep(delay)
+
+    def _tool_call_retry_delay(
+        self,
+        attempt: int,
+        *,
+        response: httpx.Response | None,
+    ) -> float:
+        retry_after = _retry_after_seconds(response)
+        if retry_after is not None:
+            return min(retry_after, self.invocation_retry_max_sleep_seconds)
+        delay = float(
+            min(
+                self.invocation_retry_backoff_seconds * (2**attempt),
+                self.invocation_retry_max_sleep_seconds,
+            )
+        )
+        if delay <= 0 or self.invocation_retry_jitter_ratio <= 0:
+            return delay
+        jitter = float(1 + ((self._random() * 2 - 1) * self.invocation_retry_jitter_ratio))
+        return float(min(delay * jitter, self.invocation_retry_max_sleep_seconds))
+
     def _discovery_retry_delay(
         self,
         attempt: int,
@@ -883,6 +997,10 @@ class AsyncOphanixToolGatewayClient:
             discovery_retry_backoff_seconds=config.discovery_retry_backoff_seconds,
             discovery_retry_max_sleep_seconds=config.discovery_retry_max_sleep_seconds,
             discovery_retry_jitter_ratio=config.discovery_retry_jitter_ratio,
+            invocation_max_retries=config.invocation_max_retries,
+            invocation_retry_backoff_seconds=config.invocation_retry_backoff_seconds,
+            invocation_retry_max_sleep_seconds=config.invocation_retry_max_sleep_seconds,
+            invocation_retry_jitter_ratio=config.invocation_retry_jitter_ratio,
             allow_buffered_custom_http_client=config.allow_buffered_custom_http_client,
             raise_event_hook_errors=config.raise_event_hook_errors,
         )
@@ -906,6 +1024,10 @@ class AsyncOphanixToolGatewayClient:
         discovery_retry_backoff_seconds: float = 0.2,
         discovery_retry_max_sleep_seconds: float = DEFAULT_DISCOVERY_RETRY_MAX_SLEEP_SECONDS,
         discovery_retry_jitter_ratio: float = DEFAULT_DISCOVERY_RETRY_JITTER_RATIO,
+        invocation_max_retries: int = 2,
+        invocation_retry_backoff_seconds: float = 0.2,
+        invocation_retry_max_sleep_seconds: float = DEFAULT_TOOL_CALL_RETRY_MAX_SLEEP_SECONDS,
+        invocation_retry_jitter_ratio: float = DEFAULT_TOOL_CALL_RETRY_JITTER_RATIO,
         allow_buffered_custom_http_client: bool = False,
         raise_event_hook_errors: bool = False,
     ) -> None:
@@ -927,6 +1049,10 @@ class AsyncOphanixToolGatewayClient:
             discovery_retry_backoff_seconds=discovery_retry_backoff_seconds,
             discovery_retry_max_sleep_seconds=discovery_retry_max_sleep_seconds,
             discovery_retry_jitter_ratio=discovery_retry_jitter_ratio,
+            invocation_max_retries=invocation_max_retries,
+            invocation_retry_backoff_seconds=invocation_retry_backoff_seconds,
+            invocation_retry_max_sleep_seconds=invocation_retry_max_sleep_seconds,
+            invocation_retry_jitter_ratio=invocation_retry_jitter_ratio,
             allow_buffered_custom_http_client=allow_buffered_custom_http_client,
         )
         self.token_provider = token_provider
@@ -943,6 +1069,10 @@ class AsyncOphanixToolGatewayClient:
         self.discovery_retry_backoff_seconds: float = config.discovery_retry_backoff_seconds
         self.discovery_retry_max_sleep_seconds: float = config.discovery_retry_max_sleep_seconds
         self.discovery_retry_jitter_ratio: float = config.discovery_retry_jitter_ratio
+        self.invocation_max_retries: int = config.invocation_max_retries
+        self.invocation_retry_backoff_seconds: float = config.invocation_retry_backoff_seconds
+        self.invocation_retry_max_sleep_seconds: float = config.invocation_retry_max_sleep_seconds
+        self.invocation_retry_jitter_ratio: float = config.invocation_retry_jitter_ratio
         self.allow_buffered_custom_http_client: bool = config.allow_buffered_custom_http_client
         self.event_hook = _optional_event_hook(event_hook)
         self.raise_event_hook_errors = _require_bool(raise_event_hook_errors, "raise_event_hook_errors")
@@ -975,6 +1105,7 @@ class AsyncOphanixToolGatewayClient:
         tool_name: str,
         payload: dict[str, Any],
         correlation_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> ToolCallResult:
         """Invoke one registered gateway tool with bearer authentication."""
 
@@ -989,37 +1120,78 @@ class AsyncOphanixToolGatewayClient:
         if normalized_correlation_id is not None:
             body["correlation_id"] = normalized_correlation_id
             headers["X-Correlation-ID"] = normalized_correlation_id
+        normalized_idempotency_key = _optional_idempotency_key(idempotency_key)
+        if normalized_idempotency_key is not None:
+            headers["Idempotency-Key"] = normalized_idempotency_key
         self._emit_event(
             {
                 "event": "tool_call.start",
                 "tool_name": normalized_tool_name,
                 "correlation_id": normalized_correlation_id,
+                "idempotent": normalized_idempotency_key is not None,
             }
         )
-        try:
-            response = await _send_limited_async_request(
-                self._http_client,
-                "POST",
-                (
-                    f"{self.base_url}{GATEWAY_TOOL_INVOKE_PATH_PREFIX}/"
-                    f"{quote(normalized_tool_name, safe='')}{GATEWAY_TOOL_INVOKE_PATH_SUFFIX}"
-                ),
-                max_response_bytes=self.max_response_bytes,
-                json=body,
-                headers=headers,
-                timeout=self.timeout_seconds,
-            )
-        except httpx.HTTPError as exc:
-            self._emit_event(
-                {
-                    "event": "tool_call.error",
-                    "tool_name": normalized_tool_name,
-                    "code": "transport_error",
-                    "elapsed_ms": _elapsed_ms(started_at),
-                }
-            )
-            raise ToolGatewayError("Tool Gateway transport error.", code="transport_error") from exc
-        response_body = _response_json(response, max_response_bytes=self.max_response_bytes)
+        attempts = 0
+        max_retries = self.invocation_max_retries if normalized_idempotency_key is not None else 0
+        while True:
+            try:
+                response = await _send_limited_async_request(
+                    self._http_client,
+                    "POST",
+                    (
+                        f"{self.base_url}{GATEWAY_TOOL_INVOKE_PATH_PREFIX}/"
+                        f"{quote(normalized_tool_name, safe='')}{GATEWAY_TOOL_INVOKE_PATH_SUFFIX}"
+                    ),
+                    max_response_bytes=self.max_response_bytes,
+                    json=body,
+                    headers=headers,
+                    timeout=self.timeout_seconds,
+                )
+            except httpx.TransportError as exc:
+                if attempts < max_retries:
+                    await self._sleep_before_tool_call_retry(
+                        attempts,
+                        tool_name=normalized_tool_name,
+                        response=None,
+                        response_body=None,
+                    )
+                    attempts += 1
+                    continue
+                self._emit_event(
+                    {
+                        "event": "tool_call.error",
+                        "tool_name": normalized_tool_name,
+                        "code": "transport_error",
+                        "elapsed_ms": _elapsed_ms(started_at),
+                    }
+                )
+                raise ToolGatewayError("Tool Gateway transport error.", code="transport_error") from exc
+            except httpx.HTTPError as exc:
+                self._emit_event(
+                    {
+                        "event": "tool_call.error",
+                        "tool_name": normalized_tool_name,
+                        "code": "transport_error",
+                        "elapsed_ms": _elapsed_ms(started_at),
+                    }
+                )
+                raise ToolGatewayError("Tool Gateway transport error.", code="transport_error") from exc
+            response_body = _response_json(response, max_response_bytes=self.max_response_bytes)
+            if _should_retry_tool_call_response(
+                response,
+                response_body,
+                attempts=attempts,
+                max_retries=max_retries,
+            ):
+                await self._sleep_before_tool_call_retry(
+                    attempts,
+                    tool_name=normalized_tool_name,
+                    response=response,
+                    response_body=response_body,
+                )
+                attempts += 1
+                continue
+            break
         if response.status_code == 403:
             self._emit_event(
                 {
@@ -1299,6 +1471,49 @@ class AsyncOphanixToolGatewayClient:
             return
         await self._sleep(delay)
 
+    async def _sleep_before_tool_call_retry(
+        self,
+        attempt: int,
+        *,
+        tool_name: str,
+        response: httpx.Response | None,
+        response_body: dict[str, Any] | None,
+    ) -> None:
+        delay = self._tool_call_retry_delay(attempt, response=response)
+        self._emit_event(
+            {
+                "event": "tool_call.retry",
+                "tool_name": tool_name,
+                "attempt": attempt + 1,
+                "delay_seconds": delay,
+                "status_code": response.status_code if response is not None else None,
+                "code": _gateway_error_code(response_body or {}),
+            }
+        )
+        if delay <= 0:
+            return
+        await self._sleep(delay)
+
+    def _tool_call_retry_delay(
+        self,
+        attempt: int,
+        *,
+        response: httpx.Response | None,
+    ) -> float:
+        retry_after = _retry_after_seconds(response)
+        if retry_after is not None:
+            return min(retry_after, self.invocation_retry_max_sleep_seconds)
+        delay = float(
+            min(
+                self.invocation_retry_backoff_seconds * (2**attempt),
+                self.invocation_retry_max_sleep_seconds,
+            )
+        )
+        if delay <= 0 or self.invocation_retry_jitter_ratio <= 0:
+            return delay
+        jitter = float(1 + ((self._random() * 2 - 1) * self.invocation_retry_jitter_ratio))
+        return float(min(delay * jitter, self.invocation_retry_max_sleep_seconds))
+
     def _discovery_retry_delay(
         self,
         attempt: int,
@@ -1390,6 +1605,10 @@ def _client_config(
     discovery_retry_backoff_seconds: object,
     discovery_retry_max_sleep_seconds: object,
     discovery_retry_jitter_ratio: object,
+    invocation_max_retries: object,
+    invocation_retry_backoff_seconds: object,
+    invocation_retry_max_sleep_seconds: object,
+    invocation_retry_jitter_ratio: object,
     allow_buffered_custom_http_client: object,
 ) -> _ClientConfig:
     allow_insecure_http = _require_bool(allow_insecure_http, "allow_insecure_http")
@@ -1441,6 +1660,29 @@ def _client_config(
     )
     if discovery_retry_jitter_ratio > 1:
         raise ToolGatewayValidationError("discovery_retry_jitter_ratio must be less than or equal to 1")
+    invocation_max_retries = _require_integer(invocation_max_retries, "invocation_max_retries")
+    if invocation_max_retries < 0:
+        raise ToolGatewayValidationError("invocation_max_retries must be greater than or equal to zero")
+    invocation_retry_backoff_seconds = _require_finite_number(
+        invocation_retry_backoff_seconds,
+        "invocation_retry_backoff_seconds",
+        minimum=0,
+        include_minimum=True,
+    )
+    invocation_retry_max_sleep_seconds = _require_finite_number(
+        invocation_retry_max_sleep_seconds,
+        "invocation_retry_max_sleep_seconds",
+        minimum=0,
+        include_minimum=True,
+    )
+    invocation_retry_jitter_ratio = _require_finite_number(
+        invocation_retry_jitter_ratio,
+        "invocation_retry_jitter_ratio",
+        minimum=0,
+        include_minimum=True,
+    )
+    if invocation_retry_jitter_ratio > 1:
+        raise ToolGatewayValidationError("invocation_retry_jitter_ratio must be less than or equal to 1")
     return _ClientConfig(
         base_url=normalized_base_url,
         timeout_seconds=timeout_seconds,
@@ -1455,6 +1697,10 @@ def _client_config(
         discovery_retry_backoff_seconds=discovery_retry_backoff_seconds,
         discovery_retry_max_sleep_seconds=discovery_retry_max_sleep_seconds,
         discovery_retry_jitter_ratio=discovery_retry_jitter_ratio,
+        invocation_max_retries=invocation_max_retries,
+        invocation_retry_backoff_seconds=invocation_retry_backoff_seconds,
+        invocation_retry_max_sleep_seconds=invocation_retry_max_sleep_seconds,
+        invocation_retry_jitter_ratio=invocation_retry_jitter_ratio,
         allow_buffered_custom_http_client=_require_bool(
             allow_buffered_custom_http_client,
             "allow_buffered_custom_http_client",
@@ -1987,6 +2233,21 @@ def _optional_header_text(value: object | None, field_name: str) -> str | None:
     return stripped
 
 
+def _optional_idempotency_key(value: object | None) -> str | None:
+    if value is None:
+        return None
+    key = _optional_header_text(value, "idempotency_key")
+    if key is None:
+        return None
+    if len(key) > MAX_IDEMPOTENCY_KEY_LENGTH:
+        raise ToolGatewayValidationError(
+            f"idempotency_key must be {MAX_IDEMPOTENCY_KEY_LENGTH} characters or fewer"
+        )
+    if not IDEMPOTENCY_KEY_PATTERN.fullmatch(key):
+        raise ToolGatewayValidationError("idempotency_key contains unsupported characters")
+    return key
+
+
 def _require_gateway_token(value: object) -> str:
     token = _require_header_text(value, "token")
     if token.lower().startswith("bearer "):
@@ -2000,6 +2261,26 @@ def _require_gateway_token(value: object) -> str:
     if not RAW_GATEWAY_TOKEN_PATTERN.fullmatch(token):
         raise ToolGatewayValidationError("token contains unsupported characters")
     return token
+
+
+def _gateway_error_code(body: dict[str, Any]) -> str | None:
+    error = _optional_mapping(body.get("error")) or {}
+    code = error.get("code") or body.get("code") or body.get("reason_code")
+    return str(code) if code is not None else None
+
+
+def _should_retry_tool_call_response(
+    response: httpx.Response,
+    body: dict[str, Any],
+    *,
+    attempts: int,
+    max_retries: int,
+) -> bool:
+    if attempts >= max_retries:
+        return False
+    if response.status_code == 409:
+        return _gateway_error_code(body) == "idempotency_in_progress"
+    return response.status_code in RETRYABLE_TOOL_CALL_STATUS_CODES
 
 
 def _token_cache_fingerprint(token: str) -> str:

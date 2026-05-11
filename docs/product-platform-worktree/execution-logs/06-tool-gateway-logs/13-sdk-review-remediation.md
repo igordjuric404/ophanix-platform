@@ -2055,3 +2055,161 @@ Recommended remediation order:
 Final strict MVP assessment:
 
 The SDK and Tool Gateway are now a credible controlled MVP for internal teams or design partners. The current repo proves the packaged SDK can talk to the gateway, validates public API exports, tightens denial/security behavior, improves release evidence, and passes full product validation. Broader or production-style adoption is still not defensible without resolving the deferred idempotency, distributed reliability, production persistence, egress, circuit-breaker, and provenance gaps.
+
+## 2026-05-11 - Pass 20: MVP Architecture Blocker Remediation After Product Decisions
+
+Starting repository state:
+
+- Continued from Pass 19 with unstaged SDK/runtime/docs/release changes still present.
+- User clarified the MVP target: startup-grade real deployments, AWS single region, low early traffic, not enterprise readiness.
+- Product decision: distributed/global rate limiting is explicitly out of MVP scope and must not be scored as an MVP flaw. Existing local defensive limits may remain.
+- Product decision: SQLite is acceptable for small single-node MVP deployments when explicitly opted in; do not block MVP readiness solely because a managed Postgres backend is not implemented.
+- Local Postgres was started for future backend work with `docker compose -f packages/product-platform/docker-compose.demo.yml up -d postgres`; container `ophanix-product-demo-postgres-1` is healthy on `127.0.0.1:5432`, but the current product DB layer still uses SQLite.
+
+Issue tracking update:
+
+| Issue ID | Title | Previous status | New status | Files changed | Validation |
+| --- | --- | --- | --- | --- | --- |
+| SDK-AUDIT-004 | No invocation idempotency-key contract | Deferred with rationale | Fixed | `0059_tool_gateway_idempotency.*.sql`, `runtime_audit.py`, `invocation.py`, `api/app.py`, SDK source, docs/tests | SDK tests, gateway tests, full product suite |
+| SDK-AUDIT-005 | SDK does not retry safe tool invocations | Deferred with rationale | Fixed | SDK source/docs/tests, vendored SDK | SDK tests, product gateway tests |
+| SDK-AUDIT-006 | Built-in gateway rate limiter is process-local only | Accepted remaining risk | Product decision: out of MVP scoring scope | README/log only | Docs review, full product suite |
+| SDK-AUDIT-028 | Publish workflow builds but does not publish Python packages | Accepted remaining risk | Accepted remaining risk | No credential-backed publication added | Release validators pass; credentials still absent |
+| SDK-AUDIT-030 | Product README admits SQLite baseline | Accepted remaining risk | Accepted MVP deployment constraint | `api/app.py`, README, auth/deployment tests | Auth tests, full product suite |
+| SDK-AUDIT-031 | No upstream circuit breaker | Deferred with rationale | Fixed for single-node MVP | `invocation.py`, `settings.py`, `api/app.py`, forwarding tests, README | Gateway tests, full product suite |
+| SDK-AUDIT-033 | Upstream host validation depends on DNS timing | Accepted remaining risk | Accepted external/deployment risk | README/log only | Docs review; app-layer tests unchanged |
+| SDK-AUDIT-049 | Local validator lacks SBOM/provenance validation | Accepted remaining risk | Fixed for local SBOM; provenance remains workflow-level | SDK/product release validators, README/changelog | Release validators and manifest inspection |
+
+Implementation details:
+
+- Added `tool_invocation_idempotency_records` migration `0059` with scoped uniqueness across organization, environment, credential, tool, and idempotency key.
+- Added server-side idempotency begin/replay/complete persistence. Reusing the same key and payload replays the stored public response; conflicting payloads return `idempotency_conflict`; in-progress duplicates return `idempotency_in_progress`.
+- Added SDK `call_tool(..., idempotency_key=...)`. Invocation retries are now enabled only when an idempotency key is present, preserving safe defaults for non-idempotent tool calls.
+- Added retry telemetry event `tool_call.retry` and idempotency validation for SDK callers.
+- Added process-local circuit breaker with medium MVP defaults: threshold `5`, cooldown `30s`, configurable through `OPHANIX_TOOL_GATEWAY_CIRCUIT_BREAKER_FAILURE_THRESHOLD` and `OPHANIX_TOOL_GATEWAY_CIRCUIT_BREAKER_COOLDOWN_SECONDS`.
+- Changed production SQLite posture from hard-blocked to explicit opt-in: `OPHANIX_ALLOW_SQLITE_IN_PRODUCTION=true` permits small single-node MVP deployments; without the opt-in startup still fails closed.
+- Added local CycloneDX SBOM generation to SDK and product release validators. Manifests now record `included: true`, SBOM filename, SBOM hash, and the GitHub publish workflow provenance requirement.
+- Updated SDK/product docs, API reference, changelog, and direct HTTP examples to match idempotency, retries, circuit breaker, SQLite, rate-limit product decision, and release evidence.
+
+Why the fixes are MVP-grade:
+
+- Idempotency is stored durably in the existing runtime database instead of only in memory.
+- Retry behavior is gated by an idempotency key, so the SDK does not duplicate mutating calls by default.
+- The circuit breaker is intentionally process-local because the clarified target is single-region, low-traffic MVP. It is honest about its boundary and configurable.
+- SQLite remains explicit and opt-in for production-labelled single-node deployments, which matches the clarified startup MVP target without pretending Postgres support exists.
+- SBOM generation is now local and repeatable; signed provenance still belongs to the GitHub publish workflow because release credentials are not available locally.
+
+Validation evidence:
+
+| Command | Result |
+| --- | --- |
+| `docker compose -f packages/product-platform/docker-compose.demo.yml up -d postgres` | Started local Postgres container |
+| `docker exec ophanix-product-demo-postgres-1 pg_isready -U ophanix -d ophanix_product` | Passed; accepting connections |
+| `docker exec ophanix-product-demo-postgres-1 psql -U ophanix -d ophanix_product -c 'select version();'` | Passed; PostgreSQL 16.13 |
+| `python3 -m py_compile ...` for changed SDK/product/test files | Passed |
+| SDK `python3 -m pytest tests -q --tb=short` | 27 passed |
+| Product `python3 -m pytest tests/test_tool_gateway_*.py -q --tb=short` | 296 passed |
+| Product `python3 -m pytest tests/test_db_phase1.py -q --tb=short` | 4 passed |
+| Product `python3 -m pytest tests -q --tb=short` | 801 passed |
+| SDK `python3 -m ruff check ...` | Passed |
+| Product `python3 -m ruff check ...` | Passed |
+| SDK `python3 -m mypy src/ophanix_tool_gateway` | Passed |
+| Product `python3 -m mypy src/product_platform/tool_gateway src/ophanix_tool_gateway` | Passed |
+| SDK `python3 scripts/validate_release.py --out-dir /tmp/ophanix-sdk-remediation-2 --skip-twine-check` | Passed; SBOM manifest included |
+| Product `python3 scripts/validate_release.py --out-dir /tmp/ophanix-product-remediation-2 --skip-twine-check` | Passed; SBOM manifest included |
+| SDK vendored parity `cmp` checks | `sdk_py_parity=0`, `init_py_parity=0` |
+
+Remaining unresolved or accepted items:
+
+- SDK-AUDIT-028 remains accepted because package-index credentials and publication authority do not exist yet. Local artifacts, checksums, SBOMs, and workflow provenance hooks are present.
+- SDK-AUDIT-033 remains accepted because final SSRF protection depends on AWS egress policy, firewall/proxy controls, or equivalent deployment enforcement.
+- Managed Postgres backend support remains future work. Local Postgres is running and available for development, but the current product database repositories are SQLite-driver based. This is no longer an MVP blocker under the clarified single-node SQLite opt-in decision.
+- Cursor pagination, multi-worker/load validation, and external package publication remain post-MVP hardening.
+
+Updated scoring matrix:
+
+| Category | Previous Pass 19 score | Updated score | Raised/lowered/upheld | Exact reason | Remaining cap |
+| --- | --- | --- | --- | --- | --- |
+| Implementation quality | 7.0 / 10 | 7.5 / 10 | Raised | Durable idempotency migration/replay path, SDK retry contract, circuit breaker, migration coverage, release SBOMs, and full product validation are now present. | 7.5 until cursor pagination, cleaner SDK source ownership, and production-like load evidence exist. |
+| Ease of use | 7.0 / 10 | 7.5 / 10 | Raised | SDK callers now have a concrete `idempotency_key` API, docs match behavior, direct HTTP examples mention idempotency, SQLite single-node posture is explicit, and release manifests include SBOMs. | 7.5 until package-index publication and real external onboarding evidence exist. |
+| Security and reliability | 6.5 / 10 | 7.0 / 10 | Raised | The prior largest repo-owned blockers, idempotency/retries/circuit breaker/SBOM evidence, are fixed; distributed rate limiting is explicitly out of MVP scope by product decision; SQLite single-node is accepted when opted in. | 7.0 until AWS egress/SSRF enforcement, load/failure drills, and release publication evidence exist. |
+
+Final Pass 20 MVP assessment:
+
+The SDK and Tool Gateway are now defensible as a startup-grade MVP for real, small, single-node deployments and controlled design-partner testing. This is no longer merely a local demo: idempotent retries, replay persistence, local circuit breaking, explicit SQLite opt-in, installed SDK contract tests, package validators, SBOM generation, and full product validation are in place. It is still not enterprise production-ready, and it should not be sold as multi-worker, high-traffic, or formally hardened until AWS egress controls, load evidence, package publication, and broader operational drills exist.
+
+## 2026-05-11 - Pass 21: PostgreSQL Backend Implementation
+
+Starting repository state:
+
+- Continued from Pass 20 with unstaged SDK/runtime/docs/release changes still present.
+- User explicitly approved implementing the database backend change after local Postgres was started.
+- Local Postgres container `ophanix-product-demo-postgres-1` was healthy on `127.0.0.1:5432`.
+- Pass 20 statement that “managed Postgres backend support remains future work” is superseded for the local/runtime adapter: this pass adds real `postgresql://` runtime support. Managed AWS provisioning, pooling, and load evidence remain future operational work.
+
+Issue tracking update:
+
+| Issue ID | Title | Previous status | New status | Files changed | Validation |
+| --- | --- | --- | --- | --- | --- |
+| SDK-AUDIT-003 / SDK-AUDIT-030 | Product runtime database layer is SQLite-only / SQLite baseline | Accepted MVP constraint | Fixed for MVP runtime backend support | `db/migrator.py`, `db/connection.py`, `api/dependencies.py`, `pyproject.toml`, README, cloud env example, DB/cloud tests | Local Postgres migrate/seed/readiness, Postgres integration test, DB/MVP suites, full product suite |
+
+Implementation details:
+
+- Added `database_backend_from_url()` and expanded supported URLs to `sqlite:///...`, `:memory:`, and `postgresql://...` / `postgres://...`.
+- Added a psycopg-backed `PostgresConnection` adapter that preserves the repository layer’s existing sqlite-style contract:
+  - `?` placeholders are translated to psycopg `%s` placeholders.
+  - `INSERT OR IGNORE` is translated to `ON CONFLICT DO NOTHING`.
+  - sqlite-style rows remain available through `row["name"]`, `row[0]`, `row.keys()`, and `dict(row)`.
+  - sqlite compatibility queries used by tests/migrations, including `PRAGMA table_info(...)` and `sqlite_master` table checks, are handled.
+  - psycopg integrity/database errors are normalized to sqlite exception classes so existing repository error handling remains stable.
+- Added Postgres-specific migration translation for the SQLite table-rebuild migration `0057`, using `ALTER TABLE ... ALTER COLUMN ... TYPE` instead of dropping a referenced table.
+- Added reserved identifier handling for the existing `window` column so observability SLO migrations and queries run on PostgreSQL.
+- Added runtime dependency `psycopg[binary]>=3.2,<4`.
+- Updated readiness checks so Postgres URLs are considered supported and report `postgresql database is reachable with 59 applied migrations`.
+- Updated cloud deployment env example to use a PostgreSQL URL.
+- Updated README database guidance with local Postgres commands and changed the MVP storage posture: PostgreSQL is now preferred for real MVP deployments; explicit SQLite opt-in remains available for small single-node deployments.
+
+Why the fix is MVP-grade:
+
+- The product app can now migrate, seed, and query a real local PostgreSQL database using the same repository code path.
+- The approach avoids a risky whole-repo repository rewrite while removing the hard SQLite-only blocker.
+- Existing SQLite behavior and tests remain intact.
+- The Postgres test exercises migrations, demo seed `INSERT OR IGNORE`, tool registry creation, default response-policy creation, and durable idempotency persistence.
+- Readiness now treats PostgreSQL as a real supported backend instead of an unsupported future feature.
+
+Validation evidence:
+
+| Command | Result |
+| --- | --- |
+| `docker ps --filter name=ophanix-product-demo-postgres-1 ...` | Container healthy, port `5432` exposed |
+| `docker exec ophanix-product-demo-postgres-1 pg_isready -U ophanix -d ophanix_product` | Passed |
+| `OPHANIX_DATABASE_URL=postgresql://ophanix:ophanix-local@127.0.0.1:5432/ophanix_product PYTHONPATH=src python3 -m product_platform.cli db migrate` | Passed; applied migrations `0001` through `0059` |
+| `OPHANIX_DATABASE_URL=postgresql://ophanix:ophanix-local@127.0.0.1:5432/ophanix_product PYTHONPATH=src python3 -m product_platform.cli db seed` | Passed; seeded demo data |
+| Postgres readiness script using local Postgres and mocked cloud dependencies | Database dependency healthy with `59` applied migrations |
+| `OPHANIX_TEST_POSTGRES_URL=postgresql://ophanix:ophanix-local@127.0.0.1:5432/ophanix_product PYTHONPATH=src python3 -m pytest tests/test_db_phase1.py::DatabaseMigrationPhase1Tests::test_postgres_database_can_be_created_migrated_and_used_when_configured -q --tb=short` | Passed |
+| `PYTHONPATH=src python3 -m pytest tests/test_db_phase1.py tests/test_mvp_cloud_deployment_phase2.py -q --tb=short` | 11 passed, 1 skipped |
+| `PYTHONPATH=src python3 -m pytest tests/test_db_phase*.py tests/test_mvp_cloud_deployment_phase*.py -q --tb=short` | 33 passed, 1 skipped |
+| `PYTHONPATH=src python3 -m pytest tests/test_tool_gateway_*.py -q --tb=short` | 296 passed |
+| `PYTHONPATH=src python3 -m pytest tests -q --tb=short` | 801 passed, 1 skipped |
+| `PYTHONPATH=src python3 -m ruff check src/product_platform/db src/product_platform/api/dependencies.py tests/test_db_phase1.py tests/test_mvp_cloud_deployment_phase2.py` | Passed |
+| `PYTHONPATH=src python3 -m mypy src/product_platform/tool_gateway src/ophanix_tool_gateway` | Passed |
+| `PYTHONPATH=src python3 -m py_compile ...` for changed DB/API/test files | Passed |
+| `python3 scripts/validate_release.py --out-dir /tmp/ophanix-product-postgres-remediation --skip-twine-check` | Passed; product wheel/sdist built and validated |
+
+Remaining unresolved or accepted items:
+
+- This is not yet a pooled database architecture. `Database` still owns one connection per app `Database` instance, protected by the existing transaction lock. That is acceptable for controlled MVP validation but should not be represented as high-throughput production pooling.
+- Local Postgres support is proven. AWS managed Postgres provisioning, credentials rotation, network policy, backups, and load/failover validation are still deployment work.
+- SQLite remains supported for local demos and explicit single-node MVP opt-in; it is no longer the only runtime backend.
+- Cursor pagination, package-index publication, AWS egress/SSRF enforcement, and multi-worker/load validation remain unresolved hardening items.
+
+Updated scoring matrix:
+
+| Category | Previous Pass 20 score | Updated score | Raised/lowered/upheld | Exact reason | Remaining cap |
+| --- | --- | --- | --- | --- | --- |
+| Implementation quality | 7.5 / 10 | 7.8 / 10 | Raised | The runtime is no longer SQLite-only. PostgreSQL migrations, seed, readiness, repository writes, tool registry, and idempotency persistence are validated against local Postgres while full product tests still pass. | 7.8 until pooling/load evidence, cursor pagination, and cleaner SDK source ownership exist. |
+| Ease of use | 7.5 / 10 | 7.7 / 10 | Raised | Cloud env example and README now point real deployments at PostgreSQL, and local Postgres commands are documented. | 7.7 until package publication and external onboarding evidence exist. |
+| Security and reliability | 7.0 / 10 | 7.3 / 10 | Raised | The largest persistence architecture blocker is fixed for MVP use. Readiness now verifies Postgres migrations, and local Postgres migrate/seed paths pass. | 7.3 until AWS egress enforcement, database pooling/load/failover evidence, and release publication/provenance evidence exist. |
+
+Final Pass 21 MVP assessment:
+
+The product platform now has real MVP-grade PostgreSQL backend support. It can run migrations, seed demo data, use repository writes/reads, persist tool idempotency records, and report database readiness against local Postgres. MVP adoption is stronger than Pass 20: Postgres is now the preferred backend for real deployments, while SQLite remains an explicit small single-node option. This still is not enterprise-grade production persistence because pooling, load testing, managed AWS Postgres operations, failover, and backup drills have not been proven.

@@ -16,6 +16,7 @@ from product_platform.tool_gateway.models import (
     ToolDefinitionCreateRequest,
     ToolUpstreamTargetCreateRequest,
 )
+from product_platform.tool_gateway.invocation import InMemoryToolGatewayCircuitBreaker
 from product_platform.tool_gateway.repository import ToolRegistryRepository
 
 
@@ -234,6 +235,36 @@ class ToolGatewayForwardingPhase3Tests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["error"]["code"], "upstream_error")
         self.assertIsNone(payload["result"])
+
+    def test_integration_circuit_breaker_opens_after_repeated_upstream_failures(self) -> None:
+        fake_client = FakeHTTPClient(FakeHTTPResponse(status_code=500, body={"error": "boom"}))
+        self.app.state.tool_gateway_http_client = fake_client
+        self.app.state.tool_gateway_circuit_breaker = InMemoryToolGatewayCircuitBreaker(
+            failure_threshold=2,
+            cooldown_seconds=60,
+        )
+
+        first = self.client.post(
+            "/api/v1/tools/claims.lookup/invoke",
+            headers=self._headers(request_id="req-breaker-1"),
+            json={"payload": {"claim_id": "claim_123"}},
+        )
+        second = self.client.post(
+            "/api/v1/tools/claims.lookup/invoke",
+            headers=self._headers(request_id="req-breaker-2"),
+            json={"payload": {"claim_id": "claim_123"}},
+        )
+        third = self.client.post(
+            "/api/v1/tools/claims.lookup/invoke",
+            headers=self._headers(request_id="req-breaker-3"),
+            json={"payload": {"claim_id": "claim_123"}},
+        )
+
+        self.assertEqual(first.status_code, 502, first.text)
+        self.assertEqual(second.status_code, 502, second.text)
+        self.assertEqual(third.status_code, 503, third.text)
+        self.assertEqual(third.json()["error"]["code"], "upstream_circuit_open")
+        self.assertEqual(len(fake_client.calls), 2)
 
     def test_integration_upstream_redirect_is_not_treated_as_success(self) -> None:
         self.app.state.tool_gateway_http_client = FakeHTTPClient(

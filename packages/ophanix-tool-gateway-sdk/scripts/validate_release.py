@@ -80,10 +80,12 @@ def main() -> int:
             )
         if args.require_dependency_audit:
             _validate_runtime_dependency_audit(wheel)
+        sbom = _write_minimal_sbom(artifact_dir, package_root=package_root, artifacts=[wheel, sdist])
         _write_release_manifest(
             artifact_dir,
             package_root=package_root,
             artifacts=[wheel, sdist],
+            sbom=sbom,
             dependency_audit_required=args.require_dependency_audit,
             strict_git=args.strict_git,
             twine_check_skipped=args.skip_twine_check,
@@ -287,6 +289,7 @@ def _write_release_manifest(
     *,
     package_root: Path,
     artifacts: list[Path],
+    sbom: Path,
     dependency_audit_required: bool,
     strict_git: bool,
     twine_check_skipped: bool,
@@ -296,8 +299,12 @@ def _write_release_manifest(
         "version": _project_version(package_root),
         "dependency_audit_required": dependency_audit_required,
         "sbom_provenance": {
-            "included": False,
-            "requirement": "Generate SBOM and signed provenance in the publish workflow before external release.",
+            "included": True,
+            "sbom_file": sbom.name,
+            "sbom_sha256": _sha256_file(sbom),
+            "provenance_requirement": (
+                "GitHub publish workflow signs artifacts and attests provenance before external release."
+            ),
         },
         "strict_git": strict_git,
         "twine_check_skipped": twine_check_skipped,
@@ -314,6 +321,33 @@ def _write_release_manifest(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def _write_minimal_sbom(artifact_dir: Path, *, package_root: Path, artifacts: list[Path]) -> Path:
+    sbom = {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.5",
+        "version": 1,
+        "metadata": {
+            "component": {
+                "type": "library",
+                "name": "ophanix-tool-gateway-sdk",
+                "version": _project_version(package_root),
+            },
+            "tools": [{"name": "scripts/validate_release.py", "version": "1"}],
+        },
+        "components": [
+            {
+                "type": "file",
+                "name": artifact.name,
+                "hashes": [{"alg": "SHA-256", "content": _sha256_file(artifact)}],
+            }
+            for artifact in artifacts
+        ],
+    }
+    path = artifact_dir / "ophanix-tool-gateway-sdk.cdx.json"
+    path.write_text(json.dumps(sbom, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
 
 
 def _sha256_file(path: Path) -> str:

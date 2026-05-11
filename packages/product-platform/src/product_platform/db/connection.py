@@ -6,6 +6,7 @@ import sqlite3
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any
 
 from product_platform.db.migrator import MigrationRunner, connect_database
 
@@ -15,10 +16,10 @@ class Database:
 
     def __init__(self, database_url: str) -> None:
         self.database_url = database_url
-        self._connection: sqlite3.Connection | None = None
+        self._connection: sqlite3.Connection | Any | None = None
         self._transaction_lock = threading.RLock()
 
-    def connect(self) -> sqlite3.Connection:
+    def connect(self) -> Any:
         if self._connection is None:
             self._connection = connect_database(self.database_url)
         return self._connection
@@ -27,7 +28,7 @@ class Database:
         return MigrationRunner(self.connect()).apply_all()
 
     @contextmanager
-    def transaction(self) -> Iterator[sqlite3.Connection]:
+    def transaction(self) -> Iterator[Any]:
         with self._transaction_lock:
             connection = self.connect()
             try:

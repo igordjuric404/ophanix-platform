@@ -106,13 +106,24 @@ Common constructor options:
 - `discovery_retry_max_sleep_seconds`: cap for retry sleeps and `Retry-After`,
   default `5.0`.
 - `discovery_retry_jitter_ratio`: client-side retry jitter ratio, default `0.2`.
+- `invocation_max_retries`: retry count for idempotent tool invocations,
+  default `2`. The SDK only uses this when `call_tool(..., idempotency_key=...)`
+  is provided.
+- `invocation_retry_backoff_seconds`: base invocation retry backoff, default
+  `0.2`.
+- `invocation_retry_max_sleep_seconds`: cap for invocation retry sleeps and
+  `Retry-After`, default `5.0`.
+- `invocation_retry_jitter_ratio`: invocation retry jitter ratio, default `0.2`.
 - `allow_buffered_custom_http_client`: default `False`; set only for injected
   clients that enforce equivalent response-size limits without SDK streaming.
 
 Main methods:
 
-- `call_tool(tool_name, payload, correlation_id=None)`: invokes one tool. Payload
-  must be a JSON object with string keys and finite numeric values.
+- `call_tool(tool_name, payload, correlation_id=None, idempotency_key=None)`:
+  invokes one tool. Payload must be a JSON object with string keys and finite
+  numeric values. When `idempotency_key` is set, the SDK sends
+  `Idempotency-Key` and may retry transient invocation failures with the same
+  key.
 - `check_compatibility()`: calls authenticated
   `/api/v1/gateway/capabilities` and returns `GatewayCompatibility`.
 - `list_tools(owner_team=None, limit=50, offset=0)`: lists one page of callable
@@ -181,9 +192,10 @@ filter; use the owner-team value from the tool definition rather than display
 text.
 
 Discovery requests retry transient `408`, `429`, and `5xx` responses by default with
-bounded exponential backoff, `Retry-After` support, and jitter. Tool invocation requests
-are not retried automatically because mutating tools need an idempotency contract before
-automatic retries are safe.
+bounded exponential backoff, `Retry-After` support, and jitter. Tool invocation
+requests retry transient transport, `408`, `429`, and `5xx` failures only when
+the caller supplies `idempotency_key`; the same key is sent on every attempt so
+the gateway can replay a completed result or reject a conflicting payload.
 
 The SDK validates payloads as strict JSON objects, rejects non-finite numbers,
 non-string object keys, and cyclic Python payloads, rejects header control
@@ -210,9 +222,19 @@ Async calls follow normal `asyncio` cancellation semantics. If a task awaiting
 tool contract is idempotent or your application can reconcile by `request_id` or
 `correlation_id`.
 
-Tool invocations are not retried automatically because the current server
-contract does not yet include idempotency keys. Retry read-only or idempotent
-tools in application code only after the tool contract explicitly permits it.
+Use a unique idempotency key per logical invocation when retrying or when the
+caller cannot tolerate duplicate upstream side effects:
+
+```python
+result = client.call_tool(
+    "claims.lookup",
+    {"claim_id": "claim_123"},
+    idempotency_key="claim-123-refresh-2026-05-11T09:00Z",
+)
+```
+
+Reusing a key with a different payload returns `idempotency_conflict`. Reusing a
+key while the original call is still running returns `idempotency_in_progress`.
 
 `EnvironmentTokenProvider` reads the configured environment variable on each
 request. For high-throughput agents, prefer a custom provider backed by your
@@ -234,10 +256,11 @@ SDK event hooks receive immutable mappings with no bearer tokens:
 
 | Event | Fields |
 | --- | --- |
-| `tool_call.start` | `tool_name`, `correlation_id` |
+| `tool_call.start` | `tool_name`, `correlation_id`, `idempotent` |
 | `tool_call.success` | `tool_name`, `request_id`, `correlation_id`, `reason_code`, `elapsed_ms` |
 | `tool_call.denied` | `tool_name`, `status_code`, `elapsed_ms` |
 | `tool_call.error` | `tool_name`, `status_code` or `code`, `elapsed_ms` |
+| `tool_call.retry` | `tool_name`, `attempt`, `delay_seconds`, `status_code`, `code` |
 | `tool_discovery.retry` | `attempt`, `delay_seconds`, `status_code` |
 
 Sanitized exception `response_body` values redact common credential keys and
@@ -308,9 +331,9 @@ Compatibility matrix:
 MVP support boundary: the SDK is suitable for controlled internal or design
 partner pilots where gateway operators control tokens, upstream targets,
 ingress limits, and rollout scope. It is not an enterprise production
-certification. Durable idempotency, automatic invocation retries, distributed
-rate limiting, cursor pagination, circuit breaking, signed provenance, and SBOM
-publication remain roadmap items.
+certification. Idempotent invocation retries are implemented for callers that
+provide `Idempotency-Key`; cursor pagination, externally enforced ingress
+limits, and broader release-governance evidence remain post-MVP hardening.
 
 ## Troubleshooting
 
@@ -342,8 +365,8 @@ publication remain roadmap items.
   workflow, store them in a secret manager, and rotate them before expiry.
 - Scope credentials to the minimum tool resource and operation required.
 - Set `timeout_seconds` and `max_payload_bytes` for the caller's workload.
-- Keep automatic invocation retries disabled unless the specific tool contract
-  documents idempotency.
+- Use `idempotency_key` for any invocation that may be retried or reconciled
+  after an unknown outcome.
 - Enable discovery caching only when stale contract/permission data is acceptable
   for up to `cache_ttl_seconds`.
 - Capture `request_id`, `correlation_id`, `code`, and sanitized `response_body`
@@ -366,8 +389,9 @@ The release check builds a wheel and sdist, verifies that both artifacts contain
 `ophanix_tool_gateway/py.typed`, rejects local/generated files such as SQLite
 databases and `__pycache__`, verifies parity with the product-platform vendored
 SDK copy, installs the built wheel with runtime dependencies into a temporary
-target, and runs `twine check` over the generated artifacts. Dependency audit
-can be enforced in CI with:
+target, writes a local CycloneDX SBOM with artifact hashes, and runs
+`twine check` over the generated artifacts. Dependency audit can be enforced in
+CI with:
 
 ```bash
 python3 -m pip install '.[security]'

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import math
 import re
+import threading
 import time
 from typing import Any
 from urllib.parse import quote
@@ -22,7 +24,9 @@ MAX_UPSTREAM_RESPONSE_BYTES = 1_000_000
 MAX_UPSTREAM_URL_BYTES = 4096
 MAX_INVOCATION_PAYLOAD_DEPTH = 50
 MAX_CORRELATION_ID_LENGTH = 128
+MAX_IDEMPOTENCY_KEY_LENGTH = 128
 CORRELATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:/@+-]+$")
+IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.:/@+-]+$")
 SECRET_LIKE_QUERY_KEY_TOKENS = {
     "api_key",
     "apikey",
@@ -39,6 +43,7 @@ class ToolInvocationRequest(BaseModel):
 
     payload: dict[str, Any] = Field(default_factory=dict)
     correlation_id: str | None = None
+    idempotency_key: str | None = None
 
     @field_validator("correlation_id")
     @classmethod
@@ -52,6 +57,13 @@ class ToolInvocationRequest(BaseModel):
             raise ValueError("correlation_id contains unsupported characters.")
         return stripped or None
 
+    @field_validator("idempotency_key")
+    @classmethod
+    def _strip_idempotency_key(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return validate_idempotency_key(value)
+
     @field_validator("payload")
     @classmethod
     def _validate_payload(cls, value: dict[str, Any]) -> dict[str, Any]:
@@ -61,6 +73,31 @@ class ToolInvocationRequest(BaseModel):
         except (TypeError, ValueError) as exc:
             raise ValueError("payload must be JSON serializable with finite numbers.") from exc
         return value
+
+
+def validate_idempotency_key(value: str) -> str:
+    """Normalize and validate a caller-provided idempotency key."""
+
+    stripped = value.strip()
+    if not stripped:
+        raise ValueError("idempotency_key must not be blank.")
+    if len(stripped) > MAX_IDEMPOTENCY_KEY_LENGTH:
+        raise ValueError("idempotency_key must be 128 characters or fewer.")
+    if not IDEMPOTENCY_KEY_PATTERN.fullmatch(stripped):
+        raise ValueError("idempotency_key contains unsupported characters.")
+    return stripped
+
+
+def invocation_request_hash(*, tool_name: str, payload: dict[str, Any]) -> str:
+    """Build a stable hash for idempotency conflict detection."""
+
+    serialized = json.dumps(
+        {"payload": payload, "tool_name": tool_name},
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 class ToolInvocationResponse(BaseModel):
@@ -108,6 +145,60 @@ class ToolExecutionError(RuntimeError):
         self.status_code = status_code
 
 
+class InMemoryToolGatewayCircuitBreaker:
+    """Process-local circuit breaker for MVP single-node gateway deployments."""
+
+    def __init__(
+        self,
+        *,
+        failure_threshold: int = 5,
+        cooldown_seconds: float = 30.0,
+        clock: Any | None = None,
+    ) -> None:
+        if failure_threshold <= 0:
+            raise ValueError("failure_threshold must be greater than zero.")
+        if cooldown_seconds <= 0:
+            raise ValueError("cooldown_seconds must be greater than zero.")
+        self.failure_threshold = failure_threshold
+        self.cooldown_seconds = cooldown_seconds
+        self._clock = clock or time.monotonic
+        self._lock = threading.Lock()
+        self._state: dict[str, tuple[int, float]] = {}
+
+    def before_call(self, target_id: str) -> None:
+        """Raise when the target circuit is open."""
+
+        now = float(self._clock())
+        with self._lock:
+            failures, opened_until = self._state.get(target_id, (0, 0.0))
+            if opened_until > now:
+                raise ToolExecutionError(
+                    code="upstream_circuit_open",
+                    message="Configured upstream target is temporarily unavailable.",
+                    status_code=503,
+                )
+            if opened_until:
+                self._state[target_id] = (failures, 0.0)
+
+    def record_success(self, target_id: str) -> None:
+        """Reset the target circuit after a successful call."""
+
+        with self._lock:
+            self._state.pop(target_id, None)
+
+    def record_failure(self, target_id: str) -> None:
+        """Count a target failure and open the circuit when the threshold is reached."""
+
+        now = float(self._clock())
+        with self._lock:
+            failures, opened_until = self._state.get(target_id, (0, 0.0))
+            if opened_until > now:
+                return
+            failures += 1
+            opened_until = now + self.cooldown_seconds if failures >= self.failure_threshold else 0.0
+            self._state[target_id] = (failures, opened_until)
+
+
 class HttpToolInvocationExecutor:
     """Forward allowed tool calls to registered upstream HTTP targets."""
 
@@ -120,6 +211,7 @@ class HttpToolInvocationExecutor:
         fail_closed_unhealthy: bool = True,
         max_response_bytes: int = MAX_UPSTREAM_RESPONSE_BYTES,
         allowed_upstream_hosts: list[str] | tuple[str, ...] | set[str] | None = None,
+        circuit_breaker: InMemoryToolGatewayCircuitBreaker | None = None,
     ) -> None:
         self.repository = repository
         self._owns_http_client = http_client is None
@@ -128,6 +220,7 @@ class HttpToolInvocationExecutor:
         self.fail_closed_unhealthy = fail_closed_unhealthy
         self.max_response_bytes = max_response_bytes
         self.allowed_upstream_hosts = allowed_upstream_hosts
+        self.circuit_breaker = circuit_breaker
 
     def close(self) -> None:
         """Close the owned HTTP client when this executor created it."""
@@ -158,6 +251,9 @@ class HttpToolInvocationExecutor:
                 message="Configured upstream target is unhealthy.",
                 status_code=503,
             )
+        target_id = str(target["id"])
+        if self.circuit_breaker is not None:
+            self.circuit_breaker.before_call(target_id)
         url = build_upstream_url(target, payload, allowed_hosts=self.allowed_upstream_hosts)
         headers = {
             "X-Request-ID": decision.request_id,
@@ -186,12 +282,16 @@ class HttpToolInvocationExecutor:
         except ToolExecutionError:
             raise
         except httpx.TimeoutException as exc:
+            if self.circuit_breaker is not None:
+                self.circuit_breaker.record_failure(target_id)
             raise ToolExecutionError(
                 code="upstream_timeout",
                 message="Upstream request timed out.",
                 status_code=504,
             ) from exc
         except Exception as exc:
+            if self.circuit_breaker is not None:
+                self.circuit_breaker.record_failure(target_id)
             raise ToolExecutionError(
                 code="upstream_connection_error",
                 message="Upstream request failed.",
@@ -200,6 +300,11 @@ class HttpToolInvocationExecutor:
         latency_ms = round((time.perf_counter() - started) * 1000, 3)
         upstream_status_code = int(response.status_code)
         succeeded = 200 <= upstream_status_code < 300
+        if self.circuit_breaker is not None:
+            if succeeded:
+                self.circuit_breaker.record_success(target_id)
+            elif upstream_status_code >= 500:
+                self.circuit_breaker.record_failure(target_id)
         body = _response_body(response, max_response_bytes=self.max_response_bytes)
         return ToolExecutionResult(
             status="succeeded" if succeeded else "failed",
@@ -228,6 +333,7 @@ class AsyncHttpToolInvocationExecutor:
         fail_closed_unhealthy: bool = True,
         max_response_bytes: int = MAX_UPSTREAM_RESPONSE_BYTES,
         allowed_upstream_hosts: list[str] | tuple[str, ...] | set[str] | None = None,
+        circuit_breaker: InMemoryToolGatewayCircuitBreaker | None = None,
     ) -> None:
         self.repository = repository
         self._owns_http_client = http_client is None
@@ -236,6 +342,7 @@ class AsyncHttpToolInvocationExecutor:
         self.fail_closed_unhealthy = fail_closed_unhealthy
         self.max_response_bytes = max_response_bytes
         self.allowed_upstream_hosts = allowed_upstream_hosts
+        self.circuit_breaker = circuit_breaker
 
     async def close(self) -> None:
         """Close the owned async HTTP client when this executor created it."""
@@ -270,6 +377,9 @@ class AsyncHttpToolInvocationExecutor:
                 message="Configured upstream target is unhealthy.",
                 status_code=503,
             )
+        target_id = str(target["id"])
+        if self.circuit_breaker is not None:
+            self.circuit_breaker.before_call(target_id)
         url = build_upstream_url(target, payload, allowed_hosts=self.allowed_upstream_hosts)
         headers = {
             "X-Request-ID": decision.request_id,
@@ -299,12 +409,16 @@ class AsyncHttpToolInvocationExecutor:
         except ToolExecutionError:
             raise
         except httpx.TimeoutException as exc:
+            if self.circuit_breaker is not None:
+                self.circuit_breaker.record_failure(target_id)
             raise ToolExecutionError(
                 code="upstream_timeout",
                 message="Upstream request timed out.",
                 status_code=504,
             ) from exc
         except Exception as exc:
+            if self.circuit_breaker is not None:
+                self.circuit_breaker.record_failure(target_id)
             raise ToolExecutionError(
                 code="upstream_connection_error",
                 message="Upstream request failed.",
@@ -313,6 +427,11 @@ class AsyncHttpToolInvocationExecutor:
         latency_ms = round((time.perf_counter() - started) * 1000, 3)
         upstream_status_code = int(response.status_code)
         succeeded = 200 <= upstream_status_code < 300
+        if self.circuit_breaker is not None:
+            if succeeded:
+                self.circuit_breaker.record_success(target_id)
+            elif upstream_status_code >= 500:
+                self.circuit_breaker.record_failure(target_id)
         body = _response_body(response, max_response_bytes=self.max_response_bytes)
         return ToolExecutionResult(
             status="succeeded" if succeeded else "failed",
