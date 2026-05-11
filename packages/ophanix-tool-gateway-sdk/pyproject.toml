@@ -35,7 +35,7 @@ Issues = "https://github.com/ophanix/ophanix-platform/issues"
 [project.optional-dependencies]
 dev = [
     "mypy>=1.10,<2",
-    "pytest==8.4.1",
+    "pytest==9.0.3",
 ]
 release = [
     "build>=1.2.2,<2",
