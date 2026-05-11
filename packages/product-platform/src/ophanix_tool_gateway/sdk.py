@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import hmac
 import ipaddress
 import inspect
 import json
@@ -14,6 +15,7 @@ import math
 import os
 import random
 import re
+import secrets
 import threading
 import time
 import tomllib
@@ -79,6 +81,8 @@ MAX_NON_JSON_ERROR_EXCERPT_BYTES = 2048
 DEFAULT_MAX_PAYLOAD_BYTES = 1_000_000
 DEFAULT_MAX_RESPONSE_BYTES = 1_000_000
 DEFAULT_MAX_CACHE_ENTRIES = 256
+RAW_GATEWAY_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9._~+/=-]+$")
+_CACHE_FINGERPRINT_KEY = secrets.token_bytes(32)
 _ToolCacheKey = tuple[str, str]
 _ListCacheKey = tuple[tuple[str, str], ...]
 _ToolCacheValue = tuple[float, "ToolDefinition"]
@@ -159,7 +163,7 @@ class EnvironmentTokenProvider:
         env_var = _require_text(self.env_var, "env_var")
         token = os.environ.get(env_var)
         if token is None:
-            raise ValueError(f"{env_var} environment variable is required")
+            raise ToolGatewayValidationError(f"{env_var} environment variable is required")
         return _require_text(token, env_var)
 
 
@@ -244,6 +248,10 @@ class ToolAuthenticationError(ToolGatewayError):
     """Raised when gateway authentication fails before policy evaluation."""
 
 
+class ToolGatewayValidationError(ValueError):
+    """Raised when SDK configuration or caller input is invalid."""
+
+
 @dataclass(frozen=True)
 class _AuthContext:
     headers: dict[str, str]
@@ -265,6 +273,7 @@ class _ClientConfig:
     discovery_retry_backoff_seconds: float
     discovery_retry_max_sleep_seconds: float
     discovery_retry_jitter_ratio: float
+    allow_buffered_custom_http_client: bool
 
 
 class OphanixToolGatewayClient:
@@ -289,11 +298,13 @@ class OphanixToolGatewayClient:
         discovery_retry_backoff_seconds: float = 0.2,
         discovery_retry_max_sleep_seconds: float = DEFAULT_DISCOVERY_RETRY_MAX_SLEEP_SECONDS,
         discovery_retry_jitter_ratio: float = DEFAULT_DISCOVERY_RETRY_JITTER_RATIO,
+        allow_buffered_custom_http_client: bool = False,
+        raise_event_hook_errors: bool = False,
     ) -> None:
         if token_provider is None:
-            raise ValueError("token_provider is required")
+            raise ToolGatewayValidationError("token_provider is required")
         if not callable(getattr(token_provider, "get_token", None)):
-            raise ValueError("token_provider must provide get_token()")
+            raise ToolGatewayValidationError("token_provider must provide get_token()")
         config = _client_config(
             base_url=base_url,
             timeout_seconds=timeout_seconds,
@@ -308,6 +319,7 @@ class OphanixToolGatewayClient:
             discovery_retry_backoff_seconds=discovery_retry_backoff_seconds,
             discovery_retry_max_sleep_seconds=discovery_retry_max_sleep_seconds,
             discovery_retry_jitter_ratio=discovery_retry_jitter_ratio,
+            allow_buffered_custom_http_client=allow_buffered_custom_http_client,
         )
         self.token_provider = token_provider
         self.base_url = config.base_url
@@ -323,7 +335,9 @@ class OphanixToolGatewayClient:
         self.discovery_retry_backoff_seconds: float = config.discovery_retry_backoff_seconds
         self.discovery_retry_max_sleep_seconds: float = config.discovery_retry_max_sleep_seconds
         self.discovery_retry_jitter_ratio: float = config.discovery_retry_jitter_ratio
+        self.allow_buffered_custom_http_client: bool = config.allow_buffered_custom_http_client
         self.event_hook = _optional_event_hook(event_hook)
+        self.raise_event_hook_errors = _require_bool(raise_event_hook_errors, "raise_event_hook_errors")
         self._sleep: Callable[[float], None] = time.sleep
         self._random: Callable[[], float] = random.random
         self._cache_lock = threading.RLock()
@@ -334,7 +348,11 @@ class OphanixToolGatewayClient:
             {} if self.cache_tools else None
         )
         self._owns_http_client = http_client is None
-        _validate_sync_http_client(http_client)
+        self._closed = False
+        _validate_sync_http_client(
+            http_client,
+            allow_buffered_custom_http_client=config.allow_buffered_custom_http_client,
+        )
         self._http_client = http_client or httpx.Client(timeout=self.timeout_seconds)
 
     def close(self) -> None:
@@ -342,6 +360,7 @@ class OphanixToolGatewayClient:
 
         if self._owns_http_client:
             self._http_client.close()
+        self._closed = True
 
     def call_tool(
         self,
@@ -351,6 +370,7 @@ class OphanixToolGatewayClient:
     ) -> ToolCallResult:
         """Invoke one registered gateway tool with bearer authentication."""
 
+        self._ensure_open()
         normalized_tool_name = _require_text(tool_name, "tool_name")
         _require_json_object(payload, "payload", max_bytes=self.max_payload_bytes)
         body: dict[str, Any] = {"payload": payload}
@@ -434,6 +454,7 @@ class OphanixToolGatewayClient:
     ) -> list[ToolDefinition]:
         """List Tool Gateway contracts visible to the configured caller."""
 
+        self._ensure_open()
         auth_context = self._auth_context()
         if status is not None:
             warnings.warn(
@@ -455,22 +476,31 @@ class OphanixToolGatewayClient:
 
         page_size = _require_integer(page_size, "page_size")
         if page_size <= 0:
-            raise ValueError("page_size must be greater than zero")
+            raise ToolGatewayValidationError("page_size must be greater than zero")
         if page_size > 200:
-            raise ValueError("page_size must be less than or equal to 200")
+            raise ToolGatewayValidationError("page_size must be less than or equal to 200")
         max_total = _optional_positive_integer(max_total, "max_total")
+        self._ensure_open()
         auth_context = self._auth_context()
         tools: list[ToolDefinition] = []
+        seen: set[str] = set()
         offset = 0
         while True:
             params = _tool_list_params(None, owner_team, page_size, offset)
             page = self._list_tools_with_auth(params, auth_context)
-            if max_total is not None and len(tools) + len(page) > max_total:
+            new_tools: list[ToolDefinition] = []
+            for tool in page:
+                dedupe_key = tool.id or tool.name
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                new_tools.append(tool)
+            if max_total is not None and len(tools) + len(new_tools) > max_total:
                 raise ToolGatewayError(
                     "Tool discovery exceeded max_total.",
                     code="tool_discovery_too_large",
                 )
-            tools.extend(page)
+            tools.extend(new_tools)
             if len(page) < page_size:
                 return tools
             offset += page_size
@@ -487,6 +517,7 @@ class OphanixToolGatewayClient:
     def get_tool(self, tool_name: str) -> ToolDefinition:
         """Return one tool definition by name or id from the list contract."""
 
+        self._ensure_open()
         normalized_tool_name = _require_text(tool_name, "tool_name")
         auth_context = self._auth_context()
         cache_key = _tool_cache_key(auth_context.cache_key, normalized_tool_name)
@@ -505,7 +536,7 @@ class OphanixToolGatewayClient:
                 break
             offset += page_size
         raise ToolGatewayError(
-            f"Tool not found: {normalized_tool_name}",
+            f"Tool not found: {_safe_lookup_text(normalized_tool_name)}",
             status_code=404,
             code="tool_not_found",
         )
@@ -520,12 +551,12 @@ class OphanixToolGatewayClient:
         token_value = self.token_provider.get_token()
         if inspect.isawaitable(token_value):
             _close_awaitable(token_value)
-            raise ValueError(
+            raise ToolGatewayValidationError(
                 "sync token_provider.get_token() must return a string; "
                 "use AsyncOphanixToolGatewayClient for awaitable tokens"
             )
-        token = _require_header_text(token_value, "token")
-        token_fingerprint = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        token = _require_gateway_token(token_value)
+        token_fingerprint = _token_cache_fingerprint(token)
         return _AuthContext(
             headers={
                 "Authorization": f"Bearer {token}",
@@ -533,6 +564,10 @@ class OphanixToolGatewayClient:
             },
             cache_key=token_fingerprint,
         )
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise ToolGatewayError("Tool Gateway client is closed.", code="client_closed")
 
     def _list_tools_with_auth(
         self,
@@ -693,6 +728,8 @@ class OphanixToolGatewayClient:
         try:
             self.event_hook(MappingProxyType(dict(event)))
         except Exception:
+            if self.raise_event_hook_errors:
+                raise
             LOGGER.debug("Tool Gateway SDK event hook failed.", exc_info=True)
 
 
@@ -718,11 +755,13 @@ class AsyncOphanixToolGatewayClient:
         discovery_retry_backoff_seconds: float = 0.2,
         discovery_retry_max_sleep_seconds: float = DEFAULT_DISCOVERY_RETRY_MAX_SLEEP_SECONDS,
         discovery_retry_jitter_ratio: float = DEFAULT_DISCOVERY_RETRY_JITTER_RATIO,
+        allow_buffered_custom_http_client: bool = False,
+        raise_event_hook_errors: bool = False,
     ) -> None:
         if token_provider is None:
-            raise ValueError("token_provider is required")
+            raise ToolGatewayValidationError("token_provider is required")
         if not callable(getattr(token_provider, "get_token", None)):
-            raise ValueError("token_provider must provide get_token()")
+            raise ToolGatewayValidationError("token_provider must provide get_token()")
         config = _client_config(
             base_url=base_url,
             timeout_seconds=timeout_seconds,
@@ -737,6 +776,7 @@ class AsyncOphanixToolGatewayClient:
             discovery_retry_backoff_seconds=discovery_retry_backoff_seconds,
             discovery_retry_max_sleep_seconds=discovery_retry_max_sleep_seconds,
             discovery_retry_jitter_ratio=discovery_retry_jitter_ratio,
+            allow_buffered_custom_http_client=allow_buffered_custom_http_client,
         )
         self.token_provider = token_provider
         self.base_url = config.base_url
@@ -752,7 +792,9 @@ class AsyncOphanixToolGatewayClient:
         self.discovery_retry_backoff_seconds: float = config.discovery_retry_backoff_seconds
         self.discovery_retry_max_sleep_seconds: float = config.discovery_retry_max_sleep_seconds
         self.discovery_retry_jitter_ratio: float = config.discovery_retry_jitter_ratio
+        self.allow_buffered_custom_http_client: bool = config.allow_buffered_custom_http_client
         self.event_hook = _optional_event_hook(event_hook)
+        self.raise_event_hook_errors = _require_bool(raise_event_hook_errors, "raise_event_hook_errors")
         self._sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
         self._random: Callable[[], float] = random.random
         self._cache_lock = threading.RLock()
@@ -763,7 +805,11 @@ class AsyncOphanixToolGatewayClient:
             {} if self.cache_tools else None
         )
         self._owns_http_client = http_client is None
-        _validate_async_http_client(http_client)
+        self._closed = False
+        _validate_async_http_client(
+            http_client,
+            allow_buffered_custom_http_client=config.allow_buffered_custom_http_client,
+        )
         self._http_client = http_client or httpx.AsyncClient(timeout=self.timeout_seconds)
 
     async def close(self) -> None:
@@ -771,6 +817,7 @@ class AsyncOphanixToolGatewayClient:
 
         if self._owns_http_client:
             await self._http_client.aclose()
+        self._closed = True
 
     async def call_tool(
         self,
@@ -780,6 +827,7 @@ class AsyncOphanixToolGatewayClient:
     ) -> ToolCallResult:
         """Invoke one registered gateway tool with bearer authentication."""
 
+        self._ensure_open()
         normalized_tool_name = _require_text(tool_name, "tool_name")
         _require_json_object(payload, "payload", max_bytes=self.max_payload_bytes)
         body: dict[str, Any] = {"payload": payload}
@@ -863,6 +911,7 @@ class AsyncOphanixToolGatewayClient:
     ) -> list[ToolDefinition]:
         """List Tool Gateway contracts visible to the configured caller."""
 
+        self._ensure_open()
         auth_context = await self._auth_context()
         if status is not None:
             warnings.warn(
@@ -884,22 +933,31 @@ class AsyncOphanixToolGatewayClient:
 
         page_size = _require_integer(page_size, "page_size")
         if page_size <= 0:
-            raise ValueError("page_size must be greater than zero")
+            raise ToolGatewayValidationError("page_size must be greater than zero")
         if page_size > 200:
-            raise ValueError("page_size must be less than or equal to 200")
+            raise ToolGatewayValidationError("page_size must be less than or equal to 200")
         max_total = _optional_positive_integer(max_total, "max_total")
+        self._ensure_open()
         auth_context = await self._auth_context()
         tools: list[ToolDefinition] = []
+        seen: set[str] = set()
         offset = 0
         while True:
             params = _tool_list_params(None, owner_team, page_size, offset)
             page = await self._list_tools_with_auth(params, auth_context)
-            if max_total is not None and len(tools) + len(page) > max_total:
+            new_tools: list[ToolDefinition] = []
+            for tool in page:
+                dedupe_key = tool.id or tool.name
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                new_tools.append(tool)
+            if max_total is not None and len(tools) + len(new_tools) > max_total:
                 raise ToolGatewayError(
                     "Tool discovery exceeded max_total.",
                     code="tool_discovery_too_large",
                 )
-            tools.extend(page)
+            tools.extend(new_tools)
             if len(page) < page_size:
                 return tools
             offset += page_size
@@ -916,6 +974,7 @@ class AsyncOphanixToolGatewayClient:
     async def get_tool(self, tool_name: str) -> ToolDefinition:
         """Return one tool definition by name or id from the list contract."""
 
+        self._ensure_open()
         normalized_tool_name = _require_text(tool_name, "tool_name")
         auth_context = await self._auth_context()
         cache_key = _tool_cache_key(auth_context.cache_key, normalized_tool_name)
@@ -934,7 +993,7 @@ class AsyncOphanixToolGatewayClient:
                 break
             offset += page_size
         raise ToolGatewayError(
-            f"Tool not found: {normalized_tool_name}",
+            f"Tool not found: {_safe_lookup_text(normalized_tool_name)}",
             status_code=404,
             code="tool_not_found",
         )
@@ -949,8 +1008,8 @@ class AsyncOphanixToolGatewayClient:
         token_value = self.token_provider.get_token()
         if inspect.isawaitable(token_value):
             token_value = await token_value
-        token = _require_header_text(token_value, "token")
-        token_fingerprint = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        token = _require_gateway_token(token_value)
+        token_fingerprint = _token_cache_fingerprint(token)
         return _AuthContext(
             headers={
                 "Authorization": f"Bearer {token}",
@@ -958,6 +1017,10 @@ class AsyncOphanixToolGatewayClient:
             },
             cache_key=token_fingerprint,
         )
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise ToolGatewayError("Tool Gateway client is closed.", code="client_closed")
 
     async def _list_tools_with_auth(
         self,
@@ -1118,6 +1181,8 @@ class AsyncOphanixToolGatewayClient:
         try:
             self.event_hook(MappingProxyType(dict(event)))
         except Exception:
+            if self.raise_event_hook_errors:
+                raise
             LOGGER.debug("Tool Gateway SDK event hook failed.", exc_info=True)
 
 
@@ -1136,6 +1201,7 @@ def _client_config(
     discovery_retry_backoff_seconds: object,
     discovery_retry_max_sleep_seconds: object,
     discovery_retry_jitter_ratio: object,
+    allow_buffered_custom_http_client: object,
 ) -> _ClientConfig:
     allow_insecure_http = _require_bool(allow_insecure_http, "allow_insecure_http")
     normalized_base_url = _normalize_base_url(
@@ -1150,13 +1216,13 @@ def _client_config(
     )
     max_payload_bytes = _require_integer(max_payload_bytes, "max_payload_bytes")
     if max_payload_bytes <= 0:
-        raise ValueError("max_payload_bytes must be greater than zero")
+        raise ToolGatewayValidationError("max_payload_bytes must be greater than zero")
     max_response_bytes = _require_integer(max_response_bytes, "max_response_bytes")
     if max_response_bytes <= 0:
-        raise ValueError("max_response_bytes must be greater than zero")
+        raise ToolGatewayValidationError("max_response_bytes must be greater than zero")
     max_cache_entries = _require_integer(max_cache_entries, "max_cache_entries")
     if max_cache_entries <= 0:
-        raise ValueError("max_cache_entries must be greater than zero")
+        raise ToolGatewayValidationError("max_cache_entries must be greater than zero")
     cache_ttl_seconds = _require_finite_number(
         cache_ttl_seconds,
         "cache_ttl_seconds",
@@ -1165,7 +1231,7 @@ def _client_config(
     )
     discovery_max_retries = _require_integer(discovery_max_retries, "discovery_max_retries")
     if discovery_max_retries < 0:
-        raise ValueError("discovery_max_retries must be greater than or equal to zero")
+        raise ToolGatewayValidationError("discovery_max_retries must be greater than or equal to zero")
     discovery_retry_backoff_seconds = _require_finite_number(
         discovery_retry_backoff_seconds,
         "discovery_retry_backoff_seconds",
@@ -1185,7 +1251,7 @@ def _client_config(
         include_minimum=True,
     )
     if discovery_retry_jitter_ratio > 1:
-        raise ValueError("discovery_retry_jitter_ratio must be less than or equal to 1")
+        raise ToolGatewayValidationError("discovery_retry_jitter_ratio must be less than or equal to 1")
     return _ClientConfig(
         base_url=normalized_base_url,
         timeout_seconds=timeout_seconds,
@@ -1200,58 +1266,80 @@ def _client_config(
         discovery_retry_backoff_seconds=discovery_retry_backoff_seconds,
         discovery_retry_max_sleep_seconds=discovery_retry_max_sleep_seconds,
         discovery_retry_jitter_ratio=discovery_retry_jitter_ratio,
+        allow_buffered_custom_http_client=_require_bool(
+            allow_buffered_custom_http_client,
+            "allow_buffered_custom_http_client",
+        ),
     )
 
 
 def _normalize_base_url(base_url: object, *, allow_insecure_http: bool = False) -> str:
     normalized = _require_text(base_url, "base_url").rstrip("/")
     if not normalized:
-        raise ValueError("base_url is required")
+        raise ToolGatewayValidationError("base_url is required")
     if _has_control_character(normalized):
-        raise ValueError("base_url must not contain control characters")
+        raise ToolGatewayValidationError("base_url must not contain control characters")
     parsed = urlparse(normalized)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("base_url must be an absolute http or https URL")
+        raise ToolGatewayValidationError("base_url must be an absolute http or https URL")
     if parsed.username is not None or parsed.password is not None:
-        raise ValueError("base_url must not include credentials")
+        raise ToolGatewayValidationError("base_url must not include credentials")
     if parsed.query or parsed.fragment:
-        raise ValueError("base_url must not include a query string or fragment")
+        raise ToolGatewayValidationError("base_url must not include a query string or fragment")
     if (
         parsed.scheme == "http"
         and not allow_insecure_http
         and not _is_local_http_host(parsed.hostname)
     ):
-        raise ValueError(
+        raise ToolGatewayValidationError(
             "base_url must use https unless it targets localhost or allow_insecure_http=True"
         )
     return normalized
 
 
-def _validate_sync_http_client(http_client: object | None) -> None:
+def _validate_sync_http_client(
+    http_client: object | None,
+    *,
+    allow_buffered_custom_http_client: bool,
+) -> None:
     if http_client is None:
         return
     if isinstance(http_client, httpx.AsyncClient):
-        raise ValueError("http_client must be an httpx.Client-compatible sync client")
+        raise ToolGatewayValidationError("http_client must be an httpx.Client-compatible sync client")
+    if not allow_buffered_custom_http_client and not callable(getattr(http_client, "stream", None)):
+        raise ToolGatewayValidationError(
+            "http_client must provide stream(); pass allow_buffered_custom_http_client=True "
+            "only if the injected client enforces equivalent response-size limits."
+        )
     for method_name in ("get", "post", "close"):
         if not callable(getattr(http_client, method_name, None)):
-            raise ValueError("http_client must provide get(), post(), and close()")
+            raise ToolGatewayValidationError("http_client must provide get(), post(), and close()")
 
 
-def _validate_async_http_client(http_client: object | None) -> None:
+def _validate_async_http_client(
+    http_client: object | None,
+    *,
+    allow_buffered_custom_http_client: bool,
+) -> None:
     if http_client is None:
         return
     if isinstance(http_client, httpx.Client):
-        raise ValueError("http_client must be an httpx.AsyncClient-compatible async client")
+        raise ToolGatewayValidationError("http_client must be an httpx.AsyncClient-compatible async client")
+    if not allow_buffered_custom_http_client and not callable(getattr(http_client, "stream", None)):
+        raise ToolGatewayValidationError(
+            "http_client must provide async stream(); pass allow_buffered_custom_http_client=True "
+            "only if the injected client enforces equivalent response-size limits."
+        )
     for method_name in ("get", "post", "aclose"):
         if not callable(getattr(http_client, method_name, None)):
-            raise ValueError("http_client must provide async get(), post(), and aclose()")
+            raise ToolGatewayValidationError("http_client must provide async get(), post(), and aclose()")
 
 
 def _optional_event_hook(event_hook: object | None) -> TelemetryEventHook | None:
     if event_hook is None:
         return None
     if not callable(event_hook):
-        raise ValueError("event_hook must be callable")
+        raise ToolGatewayValidationError("event_hook must be callable")
     return event_hook
 
 
@@ -1264,16 +1352,16 @@ def _tool_list_params(
     limit = _require_integer(limit, "limit")
     offset = _require_integer(offset, "offset")
     if limit <= 0:
-        raise ValueError("limit must be greater than zero")
+        raise ToolGatewayValidationError("limit must be greater than zero")
     if limit > 200:
-        raise ValueError("limit must be less than or equal to 200")
+        raise ToolGatewayValidationError("limit must be less than or equal to 200")
     if offset < 0:
-        raise ValueError("offset must be greater than or equal to zero")
+        raise ToolGatewayValidationError("offset must be greater than or equal to zero")
     params: list[tuple[str, str]] = []
     normalized_status = _optional_text(status)
     normalized_owner_team = _optional_text(owner_team)
     if normalized_status is not None and normalized_status != "active":
-        raise ValueError("gateway discovery only supports active callable tools")
+        raise ToolGatewayValidationError("gateway discovery only supports active callable tools")
     if normalized_owner_team is not None:
         params.append(("owner_team", normalized_owner_team))
     params.append(("limit", str(limit)))
@@ -1619,10 +1707,10 @@ def _response_text_excerpt(response: httpx.Response) -> str:
 
 def _require_text(value: object, field_name: str) -> str:
     if not isinstance(value, str):
-        raise ValueError(f"{field_name} must be a string")
+        raise ToolGatewayValidationError(f"{field_name} must be a string")
     stripped = value.strip()
     if not stripped:
-        raise ValueError(f"{field_name} is required")
+        raise ToolGatewayValidationError(f"{field_name} is required")
     return stripped
 
 
@@ -1630,14 +1718,14 @@ def _optional_text(value: object | None) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ValueError("optional text values must be strings")
+        raise ToolGatewayValidationError("optional text values must be strings")
     stripped = value.strip()
     return stripped or None
 
 
 def _require_integer(value: object, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"{field_name} must be an integer")
+        raise ToolGatewayValidationError(f"{field_name} must be an integer")
     return value
 
 
@@ -1646,13 +1734,13 @@ def _optional_positive_integer(value: object | None, field_name: str) -> int | N
         return None
     integer = _require_integer(value, field_name)
     if integer <= 0:
-        raise ValueError(f"{field_name} must be greater than zero")
+        raise ToolGatewayValidationError(f"{field_name} must be greater than zero")
     return integer
 
 
 def _require_bool(value: object, field_name: str) -> bool:
     if not isinstance(value, bool):
-        raise ValueError(f"{field_name} must be a boolean")
+        raise ToolGatewayValidationError(f"{field_name} must be a boolean")
     return value
 
 
@@ -1664,22 +1752,22 @@ def _require_finite_number(
     include_minimum: bool,
 ) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{field_name} must be a number")
+        raise ToolGatewayValidationError(f"{field_name} must be a number")
     normalized = float(value)
     if not math.isfinite(normalized):
-        raise ValueError(f"{field_name} must be a finite number")
+        raise ToolGatewayValidationError(f"{field_name} must be a finite number")
     if include_minimum:
         if normalized < minimum:
-            raise ValueError(f"{field_name} must be greater than or equal to {minimum:g}")
+            raise ToolGatewayValidationError(f"{field_name} must be greater than or equal to {minimum:g}")
     elif normalized <= minimum:
-        raise ValueError(f"{field_name} must be greater than {minimum:g}")
+        raise ToolGatewayValidationError(f"{field_name} must be greater than {minimum:g}")
     return normalized
 
 
 def _require_header_text(value: object, field_name: str) -> str:
     stripped = _require_text(value, field_name)
     if _has_control_character(stripped):
-        raise ValueError(f"{field_name} must not contain header control characters")
+        raise ToolGatewayValidationError(f"{field_name} must not contain header control characters")
     return stripped
 
 
@@ -1688,8 +1776,30 @@ def _optional_header_text(value: object | None, field_name: str) -> str | None:
     if stripped is None:
         return None
     if _has_control_character(stripped):
-        raise ValueError(f"{field_name} must not contain header control characters")
+        raise ToolGatewayValidationError(f"{field_name} must not contain header control characters")
     return stripped
+
+
+def _require_gateway_token(value: object) -> str:
+    token = _require_header_text(value, "token")
+    if token.lower().startswith("bearer "):
+        raise ToolGatewayValidationError("token must be the raw gateway token without the Bearer prefix")
+    if any(character.isspace() for character in token):
+        raise ToolGatewayValidationError("token must not contain whitespace")
+    if not RAW_GATEWAY_TOKEN_PATTERN.fullmatch(token):
+        raise ToolGatewayValidationError("token contains unsupported characters")
+    return token
+
+
+def _token_cache_fingerprint(token: str) -> str:
+    return hmac.new(_CACHE_FINGERPRINT_KEY, token.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _safe_lookup_text(value: str, *, max_length: int = 80) -> str:
+    sanitized = _sanitize_text(value)
+    if len(sanitized) <= max_length:
+        return sanitized
+    return f"{sanitized[:max_length]}..."
 
 
 def _has_control_character(value: str) -> bool:
@@ -1703,42 +1813,42 @@ def _require_json_object(
     max_bytes: int | None = None,
 ) -> None:
     if not isinstance(value, dict):
-        raise ValueError(f"{field_name} must be a dictionary")
+        raise ToolGatewayValidationError(f"{field_name} must be a dictionary")
     _validate_json_value(value, field_name, seen=set())
     try:
         serialized = json.dumps(value, allow_nan=False)
     except (TypeError, ValueError) as exc:
-        raise ValueError(f"{field_name} must be JSON serializable") from exc
+        raise ToolGatewayValidationError(f"{field_name} must be JSON serializable") from exc
     if max_bytes is not None and len(serialized.encode("utf-8")) > max_bytes:
-        raise ValueError(f"{field_name} exceeds max_payload_bytes")
+        raise ToolGatewayValidationError(f"{field_name} exceeds max_payload_bytes")
 
 
 def _validate_json_value(value: object, field_name: str, *, seen: set[int]) -> None:
     if isinstance(value, dict):
         object_id = id(value)
         if object_id in seen:
-            raise ValueError(f"{field_name} must not contain cycles")
+            raise ToolGatewayValidationError(f"{field_name} must not contain cycles")
         seen.add(object_id)
         for key, child_value in value.items():
             if not isinstance(key, str):
-                raise ValueError(f"{field_name} keys must be strings")
+                raise ToolGatewayValidationError(f"{field_name} keys must be strings")
             _validate_json_value(child_value, field_name, seen=seen)
         seen.remove(object_id)
         return
     if isinstance(value, list):
         object_id = id(value)
         if object_id in seen:
-            raise ValueError(f"{field_name} must not contain cycles")
+            raise ToolGatewayValidationError(f"{field_name} must not contain cycles")
         seen.add(object_id)
         for child_value in value:
             _validate_json_value(child_value, field_name, seen=seen)
         seen.remove(object_id)
         return
     if isinstance(value, float) and not math.isfinite(value):
-        raise ValueError(f"{field_name} must contain only finite numbers")
+        raise ToolGatewayValidationError(f"{field_name} must contain only finite numbers")
     if isinstance(value, (str, int, float, bool)) or value is None:
         return
-    raise ValueError(f"{field_name} must be JSON serializable")
+    raise ToolGatewayValidationError(f"{field_name} must be JSON serializable")
 
 
 def _sanitize_error_body(value: Any) -> dict[str, Any]:

@@ -123,6 +123,20 @@ class ToolGatewayUpstreamPhase1Tests(unittest.TestCase):
 
         self.assertIn("opaque secret reference", str(context.exception))
 
+    def test_unit_auth_config_rejects_invalid_header_prefix(self) -> None:
+        with self.assertRaises(ValidationError) as context:
+            ToolUpstreamTargetCreateRequest(
+                base_url="https://claims.internal.example",
+                path_template="/claims",
+                auth_mode="api_key",
+                auth_config_json={
+                    "secret_ref": "secref_upstream_claims",
+                    "header_prefix": "Token value",
+                },
+            )
+
+        self.assertIn("authentication scheme token", str(context.exception))
+
     def test_unit_private_ip_upstream_url_is_rejected(self) -> None:
         with self.assertRaises(ValidationError) as context:
             ToolUpstreamTargetCreateRequest(
@@ -175,6 +189,54 @@ class ToolGatewayUpstreamPhase1Tests(unittest.TestCase):
                     )
 
         self.assertIn("private", str(context.exception))
+
+    def test_unit_unresolved_host_bypass_is_ignored_outside_local_envs(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OPHANIX_ENVIRONMENT": "production",
+                "OPHANIX_ALLOW_UNRESOLVED_UPSTREAM_HOSTS": "true",
+            },
+            clear=False,
+        ):
+            with patch(
+                "product_platform.tool_gateway.models.socket.getaddrinfo",
+                side_effect=socket.gaierror("unresolved"),
+            ):
+                with self.assertRaises(ValidationError) as context:
+                    ToolUpstreamTargetCreateRequest(
+                        base_url="https://unresolved.example.com",
+                        path_template="/claims",
+                    )
+
+        self.assertIn("private", str(context.exception))
+
+    def test_unit_upstream_host_allowlist_rejects_unapproved_host(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"OPHANIX_TOOL_GATEWAY_UPSTREAM_HOST_ALLOWLIST": "*.approved.example"},
+            clear=False,
+        ):
+            with self.assertRaises(ValidationError) as context:
+                ToolUpstreamTargetCreateRequest(
+                    base_url="https://claims.example.com",
+                    path_template="/claims",
+                )
+
+        self.assertIn("allowlist", str(context.exception))
+
+    def test_unit_upstream_host_allowlist_accepts_wildcard_match(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"OPHANIX_TOOL_GATEWAY_UPSTREAM_HOST_ALLOWLIST": "*.internal.example"},
+            clear=False,
+        ):
+            target = ToolUpstreamTargetCreateRequest(
+                base_url="https://claims.internal.example",
+                path_template="/claims",
+            )
+
+        self.assertEqual(target.base_url, "https://claims.internal.example")
 
     def test_unit_plain_http_upstream_url_is_rejected_even_for_localhost(self) -> None:
         with self.assertRaises(ValidationError) as context:

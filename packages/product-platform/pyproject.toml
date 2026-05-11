@@ -91,6 +91,7 @@ src = ["src", "tests"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
+pythonpath = ["src"]
 asyncio_default_fixture_loop_scope = "function"
 
 [tool.mypy]

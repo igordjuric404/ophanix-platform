@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import unittest
 from collections.abc import Callable
+from collections.abc import Mapping
+from typing import Any
+from typing import cast
 
 import httpx
 
@@ -10,6 +13,7 @@ from ophanix_tool_gateway import (
     StaticTokenProvider,
     ToolDeniedError,
     ToolGatewayError,
+    ToolGatewayValidationError,
 )
 
 
@@ -161,18 +165,96 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
         with self.assertWarns(DeprecationWarning):
             self.assertEqual(client.list_tools(status="active"), [])
 
+    def test_token_provider_rejects_bearer_prefixed_token_locally(self) -> None:
+        client = OphanixToolGatewayClient(
+            base_url="https://gateway.example.test",
+            token_provider=StaticTokenProvider("Bearer sdk-token"),
+            http_client=httpx.Client(transport=httpx.MockTransport(lambda _request: httpx.Response(200))),
+        )
+
+        with self.assertRaisesRegex(ToolGatewayValidationError, "without the Bearer prefix"):
+            client.list_tools()
+
+    def test_get_tool_not_found_sanitizes_lookup_text(self) -> None:
+        client = _client(lambda _request: httpx.Response(200, json=[]))
+
+        with self.assertRaises(ToolGatewayError) as raised:
+            client.get_tool("token=super-secret-value-that-should-not-be-logged")
+
+        self.assertEqual(raised.exception.code, "tool_not_found")
+        self.assertIn("token=[redacted]", raised.exception.message)
+        self.assertNotIn("super-secret-value", raised.exception.message)
+
+    def test_calls_after_close_raise_stable_sdk_error(self) -> None:
+        client = _client(lambda _request: httpx.Response(200, json=[]))
+        client.close()
+
+        with self.assertRaises(ToolGatewayError) as raised:
+            client.list_tools()
+
+        self.assertEqual(raised.exception.code, "client_closed")
+
+    def test_custom_http_client_without_stream_is_rejected_by_default(self) -> None:
+        with self.assertRaisesRegex(ToolGatewayValidationError, "must provide stream"):
+            OphanixToolGatewayClient(
+                base_url="https://gateway.example.test",
+                token_provider=StaticTokenProvider("sdk-token"),
+                http_client=cast(httpx.Client, _BufferedOnlyClient()),
+            )
+
+    def test_strict_event_hook_mode_surfaces_hook_failures(self) -> None:
+        def failing_hook(_event: Mapping[str, Any]) -> None:
+            raise RuntimeError("hook down")
+
+        client = _client(
+            lambda _request: httpx.Response(200, json=[]),
+            event_hook=failing_hook,
+            raise_event_hook_errors=True,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "hook down"):
+            client.call_tool("claims.lookup", {"claim_id": "claim_123"})
+
+    def test_list_all_tools_deduplicates_offset_page_overlap(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            offset = int(request.url.params.get("offset", "0"))
+            if offset < 2:
+                return httpx.Response(200, json=[TOOL_FIXTURE])
+            return httpx.Response(200, json=[])
+
+        client = _client(handler)
+
+        tools = client.list_all_tools(page_size=1)
+
+        self.assertEqual([tool.id for tool in tools], ["tool_claims_lookup"])
+
 
 def _client(
     handler: Callable[[httpx.Request], httpx.Response],
     *,
     cache_tools: bool = False,
+    event_hook: Callable[[Mapping[str, Any]], None] | None = None,
+    raise_event_hook_errors: bool = False,
 ) -> OphanixToolGatewayClient:
     return OphanixToolGatewayClient(
         base_url="https://gateway.example.test",
         token_provider=StaticTokenProvider("sdk-token"),
         http_client=httpx.Client(transport=httpx.MockTransport(handler)),
         cache_tools=cache_tools,
+        event_hook=event_hook,
+        raise_event_hook_errors=raise_event_hook_errors,
     )
+
+
+class _BufferedOnlyClient:
+    def get(self, *_args: Any, **_kwargs: Any) -> httpx.Response:
+        return httpx.Response(200, json=[])
+
+    def post(self, *_args: Any, **_kwargs: Any) -> httpx.Response:
+        return httpx.Response(200, json={})
+
+    def close(self) -> None:
+        return None
 
 
 if __name__ == "__main__":

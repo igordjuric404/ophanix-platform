@@ -6,6 +6,8 @@ import base64
 import hashlib
 import inspect
 import json
+import math
+import os
 import re
 import threading
 import time
@@ -231,7 +233,11 @@ from product_platform.integrations.repository import (
     provider_credential_response,
 )
 from product_platform.integrations.health import run_provider_health_test
-from product_platform.integrations.secrets import DEFAULT_SECRET_PROVIDER, SecretProvider
+from product_platform.integrations.secrets import (
+    SecretProvider,
+    build_secret_provider,
+    is_supported_secret_manager_ref,
+)
 from product_platform.mesh.models import (
     MeshHandoffCreateRequest,
     MeshHandoffResponse,
@@ -543,6 +549,7 @@ from product_platform.tool_gateway.models import (
     ToolUpstreamTargetResponse,
     ToolResponsePolicyPatchRequest,
     ToolResponsePolicyResponse,
+    validate_upstream_host_allowed,
 )
 from product_platform.tool_gateway.repository import (
     AgentToolPermissionNotFoundError,
@@ -567,6 +574,7 @@ from product_platform.tool_gateway.auth import (
     GatewayAuthenticationError,
     GatewayPrincipal,
     GatewayTokenVerifier,
+    parse_bearer_authorization,
 )
 from product_platform.tool_gateway.decision import ToolPolicyDecisionService
 from product_platform.tool_gateway.health import ToolUpstreamHealthChecker
@@ -654,8 +662,15 @@ def _error_response(
     code: str,
     message: str,
     details: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     context = _request_context_from_request(request)
+    response_headers = {
+        "X-Request-ID": context.request_id,
+        "X-Correlation-ID": context.correlation_id,
+    }
+    if headers:
+        response_headers.update(headers)
     return JSONResponse(
         status_code=status_code,
         content=ApiError(
@@ -664,10 +679,7 @@ def _error_response(
             request_id=context.request_id,
             details=details or {},
         ).model_dump(),
-        headers={
-            "X-Request-ID": context.request_id,
-            "X-Correlation-ID": context.correlation_id,
-        },
+        headers=response_headers,
     )
 
 
@@ -678,6 +690,7 @@ def _is_local_environment(environment: str) -> bool:
 def _validate_production_settings(settings: Settings) -> None:
     if _is_local_environment(settings.environment):
         return
+    is_production = settings.environment.strip().lower() == "production"
     if settings.session_secret == "dev-secret-change-me":
         raise ValueError("OPHANIX_SESSION_SECRET must be set to a non-default value in production.")
     enable_dev_login = (
@@ -687,11 +700,28 @@ def _validate_production_settings(settings: Settings) -> None:
     )
     if enable_dev_login:
         raise ValueError("Development login must be disabled in production.")
+    if is_production and settings.database_url.startswith("sqlite:///"):
+        raise ValueError(
+            "SQLite is not supported for production. Configure a managed production database."
+        )
     if settings.database_url.startswith("sqlite:///") and not settings.allow_sqlite_in_production:
         raise ValueError(
             "SQLite is not supported for production without "
             "OPHANIX_ALLOW_SQLITE_IN_PRODUCTION=true."
         )
+    if is_production:
+        if not is_supported_secret_manager_ref(settings.secret_manager_ref):
+            raise ValueError(
+                "OPHANIX_SECRET_MANAGER_REF must be set to 'env' or 'env:<ENV_VAR_PREFIX>' in production."
+            )
+        if _bool_env("OPHANIX_GATEWAY_TOKEN_HASH_ACCEPT_LEGACY", False):
+            raise ValueError("Legacy gateway token hash acceptance is not allowed in production.")
+        if _bool_env("OPHANIX_ALLOW_UNRESOLVED_UPSTREAM_HOSTS", False):
+            raise ValueError("Unresolved upstream hosts are not allowed in production.")
+        if not settings.tool_gateway_upstream_host_allowlist:
+            raise ValueError(
+                "OPHANIX_TOOL_GATEWAY_UPSTREAM_HOST_ALLOWLIST must be configured in production."
+            )
     if not settings.gateway_token_hash_pepper:
         raise ValueError("OPHANIX_GATEWAY_TOKEN_HASH_PEPPER must be set in production.")
     positive_gateway_limits = {
@@ -723,19 +753,23 @@ def _is_tool_gateway_runtime_path(path: str) -> bool:
 
 def _gateway_rate_limit_key(request: Request) -> str:
     authorization = request.headers.get("Authorization", "")
-    if authorization:
-        digest = hashlib.sha256(authorization.encode("utf-8")).hexdigest()
-        return f"authorization:{digest}"
     client_host = request.client.host if request.client else "unknown"
+    if authorization:
+        try:
+            token = parse_bearer_authorization(authorization)
+        except GatewayAuthenticationError:
+            return f"client:{client_host}:invalid_authorization"
+        digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        return f"authorization:{digest}"
     return f"client:{client_host}"
 
 
-def _tool_gateway_rate_limit_exceeded(app: FastAPI, request: Request) -> bool:
+def _tool_gateway_rate_limit_result(app: FastAPI, request: Request) -> tuple[bool, int]:
     settings = app.state.settings
     max_requests = int(settings.tool_gateway_rate_limit_max_requests)
     window_seconds = int(settings.tool_gateway_rate_limit_window_seconds)
     if max_requests <= 0 or window_seconds <= 0:
-        return False
+        return False, 0
     now = time.monotonic()
     key = _gateway_rate_limit_key(request)
     limits: dict[str, tuple[float, int]] = app.state.tool_gateway_rate_limits
@@ -746,9 +780,11 @@ def _tool_gateway_rate_limit_exceeded(app: FastAPI, request: Request) -> bool:
         app.state.tool_gateway_rate_limit_lock = lock
     with lock:
         window_started_at, count = limits.get(key, (now, 0))
-        if now - window_started_at >= window_seconds:
+        elapsed = now - window_started_at
+        retry_after = max(1, int(math.ceil(window_seconds - elapsed)))
+        if elapsed >= window_seconds:
             limits[key] = (now, 1)
-            return False
+            return False, 0
         if key not in limits and max_keys > 0 and len(limits) >= max_keys:
             expired_keys = [
                 existing_key
@@ -758,10 +794,32 @@ def _tool_gateway_rate_limit_exceeded(app: FastAPI, request: Request) -> bool:
             for expired_key in expired_keys:
                 limits.pop(expired_key, None)
             if len(limits) >= max_keys:
-                return True
+                # Do not let caller-controlled, previously unseen Authorization
+                # values exhaust the key budget and deny service to legitimate
+                # credentials. Existing keys remain rate-limited; overflow keys
+                # are allowed through to authentication without being stored.
+                return False, 0
         count += 1
         limits[key] = (window_started_at, count)
-        return count > max_requests
+        return count > max_requests, retry_after
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _validate_upstream_target_host_allowed(base_url: str, settings: Settings) -> None:
+    try:
+        validate_upstream_host_allowed(
+            base_url,
+            allowed_hosts=settings.tool_gateway_upstream_host_allowlist,
+            field="base_url",
+        )
+    except ValueError as exc:
+        raise ToolUpstreamTargetValidationError(str(exc)) from exc
 
 
 class ToolGatewayBodyLimitMiddleware:
@@ -922,7 +980,7 @@ def create_app(
     app.state.database = database
     app.state.denied_audit_events = []
     app.state.started_at = started_at
-    app.state.tool_gateway_http_client = httpx.AsyncClient()
+    app.state.tool_gateway_http_client = httpx.AsyncClient(follow_redirects=False, trust_env=False)
     app.state.tool_gateway_rate_limits = {}
     app.state.tool_gateway_rate_limit_lock = threading.Lock()
 
@@ -1023,12 +1081,14 @@ def create_app(
                         code="REQUEST_BODY_TOO_LARGE",
                         message="Tool Gateway request body exceeds the configured size limit.",
                     )
-            if _tool_gateway_rate_limit_exceeded(app, request):
+            rate_limited, retry_after_seconds = _tool_gateway_rate_limit_result(app, request)
+            if rate_limited:
                 return _error_response(
                     request,
                     status_code=429,
                     code="TOOL_GATEWAY_RATE_LIMITED",
                     message="Tool Gateway rate limit exceeded.",
+                    headers={"Retry-After": str(retry_after_seconds)},
                 )
         if (
             request.url.path.startswith("/api/v1")
@@ -1147,7 +1207,10 @@ def create_app(
     def _secret_provider() -> SecretProvider:
         provider = getattr(app.state, "secret_provider", None)
         if provider is None:
-            provider = DEFAULT_SECRET_PROVIDER
+            provider = build_secret_provider(
+                resolved_settings.secret_manager_ref,
+                environment=resolved_settings.environment,
+            )
             app.state.secret_provider = provider
         return provider
 
@@ -3429,6 +3492,7 @@ def create_app(
                     max_response_bytes=int(
                         resolved_settings.tool_gateway_max_upstream_response_bytes
                     ),
+                    allowed_upstream_hosts=resolved_settings.tool_gateway_upstream_host_allowlist,
                 )
             try:
                 maybe_execution = executor.execute(
@@ -6115,6 +6179,7 @@ def create_app(
         organization_id = _require_organization_id(current_user)
         context = _request_context_from_request(request)
         try:
+            _validate_upstream_target_host_allowed(body.base_url, resolved_settings)
             with _audit_database().transaction() as connection:
                 repository = ToolRegistryRepository(connection, organization_id, environment_id)
                 row = repository.create_upstream_target(tool_id, body)
@@ -6179,6 +6244,8 @@ def create_app(
         organization_id = _require_organization_id(current_user)
         context = _request_context_from_request(request)
         try:
+            if body.base_url is not None:
+                _validate_upstream_target_host_allowed(body.base_url, resolved_settings)
             with _audit_database().transaction() as connection:
                 repository = ToolRegistryRepository(connection, organization_id, environment_id)
                 row = repository.update_upstream_target(target_id, body)
@@ -6198,6 +6265,8 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except DuplicateToolUpstreamTargetError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ToolUpstreamTargetValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post(
         "/api/v1/tool-upstream-targets/{target_id}/check-health",

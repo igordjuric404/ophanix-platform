@@ -30,13 +30,15 @@ OphanixToolGatewayClient(
     discovery_retry_backoff_seconds: float = 0.2,
     discovery_retry_max_sleep_seconds: float = 5.0,
     discovery_retry_jitter_ratio: float = 0.2,
+    allow_buffered_custom_http_client: bool = False,
+    raise_event_hook_errors: bool = False,
 )
 ```
 
 Methods:
 
 - `call_tool(tool_name: str, payload: dict[str, Any], correlation_id: str | None = None) -> ToolCallResult`
-- `list_tools(owner_team: str | None = None, limit: int = 50, offset: int = 0) -> list[ToolDefinition]`
+- `list_tools(status: Literal["active"] | None = None, owner_team: str | None = None, limit: int = 50, offset: int = 0) -> list[ToolDefinition]`
 - `list_all_tools(owner_team: str | None = None, page_size: int = 200, max_total: int | None = None) -> list[ToolDefinition]`
 - `get_tool(tool_name: str) -> ToolDefinition`
 - `clear_tool_cache() -> None`
@@ -55,6 +57,9 @@ Async client with the same constructor options and method names. `call_tool`,
 Custom providers must expose `get_token()` and return the raw bearer token
 without the `Bearer` prefix.
 
+Token strings with the `Bearer ` prefix, whitespace, or unsupported characters
+raise `ToolGatewayValidationError` before a network request is sent.
+
 ## Data Classes
 
 - `ToolDefinition`: `id`, `name`, `display_name`, `description`, `owner_team`,
@@ -70,7 +75,16 @@ without the `Bearer` prefix.
 - `ToolDeniedError`: gateway policy denied the authenticated call.
 - `ToolGatewayError`: transport, gateway, upstream, response-size, malformed
   response, or other SDK-level failure.
+- `ToolGatewayValidationError`: local configuration or caller input was invalid.
+  This is a `ValueError` subclass.
 
 All SDK errors expose `message`, `status_code`, `code`, `request_id`,
 `correlation_id`, `retry_after_seconds`, and sanitized `response_body` where
 available.
+
+## Compatibility And Deprecations
+
+- `list_tools(status="active")` is accepted for compatibility and emits a
+  `DeprecationWarning`. Gateway discovery is always active-only.
+- `product_platform.tool_gateway` imports are compatibility shims for earlier
+  internal callers. Prefer `ophanix_tool_gateway` for new code.

@@ -20,6 +20,7 @@ SUPPORTED_UPSTREAM_AUTH_MODES = {"none", "api_key", "bearer"}
 SUPPORTED_UPSTREAM_STATUSES = {"configured", "healthy", "degraded", "unhealthy", "disabled"}
 SUPPORTED_AGENT_TOOL_PERMISSION_STATUSES = {"active", "paused", "revoked", "expired"}
 UPSTREAM_AUTH_HEADER_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,127}$")
+UPSTREAM_AUTH_HEADER_PREFIX_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]{0,63}$")
 UPSTREAM_QUERY_PARAMETER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 
 
@@ -509,7 +510,12 @@ class ToolResponsePolicyResponse(BaseModel):
     updated_at: str
 
 
-def validate_http_url(value: str, *, field: str) -> str:
+def validate_http_url(
+    value: str,
+    *,
+    field: str,
+    allowed_hosts: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> str:
     """Validate and normalize an HTTP(S) URL."""
 
     stripped = value.strip()
@@ -527,7 +533,27 @@ def validate_http_url(value: str, *, field: str) -> str:
         raise ValueError(f"{field} must use https for upstream targets.")
     if _is_forbidden_upstream_host(hostname):
         raise ValueError(f"{field} must not target private, loopback, link-local, or metadata hosts.")
+    validate_upstream_host_allowed(stripped, allowed_hosts=allowed_hosts, field=field)
     return stripped.rstrip("/")
+
+
+def validate_upstream_host_allowed(
+    value: str,
+    *,
+    allowed_hosts: list[str] | tuple[str, ...] | set[str] | None,
+    field: str,
+) -> None:
+    """Validate an upstream hostname against an optional exact/wildcard allowlist."""
+
+    effective_allowed_hosts = list(allowed_hosts or _env_upstream_host_allowlist())
+    if not effective_allowed_hosts:
+        return
+    parsed = urlparse(value.strip())
+    hostname = (parsed.hostname or "").strip().lower().rstrip(".")
+    if not hostname:
+        raise ValueError(f"{field} must include a hostname.")
+    if not any(_hostname_matches_allowed_pattern(hostname, pattern) for pattern in effective_allowed_hosts):
+        raise ValueError(f"{field} hostname is not in the Tool Gateway upstream host allowlist.")
 
 
 def normalize_upstream_auth_config(value: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -554,8 +580,10 @@ def normalize_upstream_auth_config(value: dict[str, Any] | None) -> dict[str, An
         normalized["header_name"] = header_name
     header_prefix = _optional_str(value.get("header_prefix"))
     if header_prefix is not None:
-        if any(char in header_prefix for char in "\r\n"):
-            raise ValueError("auth_config_json.header_prefix must not contain line breaks.")
+        if not UPSTREAM_AUTH_HEADER_PREFIX_PATTERN.fullmatch(header_prefix):
+            raise ValueError(
+                "auth_config_json.header_prefix must be a single HTTP authentication scheme token."
+            )
         normalized["header_prefix"] = header_prefix
     return normalized or None
 
@@ -704,14 +732,30 @@ def _hostname_resolves_to_forbidden_address(hostname: str) -> bool:
 
 
 def _allow_unresolved_upstream_hosts() -> bool:
+    environment = os.environ.get("OPHANIX_ENVIRONMENT", "development").strip().lower()
     if _bool_env("OPHANIX_ALLOW_UNRESOLVED_UPSTREAM_HOSTS", False):
-        return True
-    return os.environ.get("OPHANIX_ENVIRONMENT", "development").strip().lower() in {
+        return environment in {"development", "dev", "local", "test"}
+    return environment in {
         "development",
         "dev",
         "local",
         "test",
     }
+
+
+def _env_upstream_host_allowlist() -> list[str]:
+    raw = os.environ.get("OPHANIX_TOOL_GATEWAY_UPSTREAM_HOST_ALLOWLIST", "")
+    return [value.strip().lower().rstrip(".") for value in raw.split(",") if value.strip()]
+
+
+def _hostname_matches_allowed_pattern(hostname: str, pattern: str) -> bool:
+    normalized_pattern = pattern.strip().lower().rstrip(".")
+    if not normalized_pattern:
+        return False
+    if normalized_pattern.startswith("*."):
+        suffix = normalized_pattern[1:]
+        return hostname.endswith(suffix) and hostname != suffix.lstrip(".")
+    return hostname == normalized_pattern
 
 
 def _bool_env(name: str, default: bool) -> bool:

@@ -16,6 +16,7 @@ from ophanix_tool_gateway.sdk import (
     ToolDefinition,
     ToolDeniedError,
     ToolGatewayError,
+    ToolGatewayValidationError,
 )
 
 __version__ = SDK_VERSION
@@ -33,4 +34,5 @@ __all__ = [
     "ToolDefinition",
     "ToolDeniedError",
     "ToolGatewayError",
+    "ToolGatewayValidationError",
 ]

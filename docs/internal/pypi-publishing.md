@@ -15,9 +15,11 @@ Before any Python package artifact is uploaded to an index:
 3. Preserve the workflow logs, artifact checksums, provenance attestations, and
    package SBOM.
 4. Confirm that `twine check` passed for the wheel and source distribution.
-5. Confirm that the SDK vendored copy in product-platform matches the standalone
+5. Confirm that `release-manifest.json` is present in the artifact bundle and
+   its SHA-256 checksums match the files being uploaded.
+6. Confirm that the SDK vendored copy in product-platform matches the standalone
    SDK before publishing either package.
-6. Confirm security review approval for any release that changes authentication,
+7. Confirm security review approval for any release that changes authentication,
    credential storage, response redaction, package metadata, or release tooling.
 
 ## Upload Handoff
@@ -43,6 +45,7 @@ Record the following in the release ticket or release notes:
 - Package names and versions.
 - Wheel and source distribution filenames.
 - SHA-256 checksums for every uploaded artifact.
+- `release-manifest.json` contents or attachment.
 - Release workflow URL.
 - SBOM artifact name or attached SBOM file.
 - Approver for the final package-index upload.

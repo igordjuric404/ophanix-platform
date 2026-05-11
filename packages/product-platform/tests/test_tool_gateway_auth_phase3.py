@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 import unittest
+from typing import Any
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -84,6 +87,22 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
         if token is not None:
             headers["Authorization"] = f"Bearer {token}"
         return headers
+
+    def _production_settings(self, **overrides: Any) -> Settings:
+        values: dict[str, Any] = {
+            "app_name": "Ophanix Test Platform",
+            "environment": "production",
+            "build_sha": "test-sha",
+            "build_time": "2026-05-01T00:00:00Z",
+            "database_url": "postgresql://ophanix:secret@db.example.com:5432/ophanix",
+            "session_secret": "test-secret",
+            "secret_manager_ref": "env",
+            "gateway_token_hash_pepper": "test-pepper",
+            "tool_gateway_upstream_host_allowlist": ["*.example.com"],
+            "cors_origins": ["https://app.example.com"],
+        }
+        values.update(overrides)
+        return Settings(**values)
 
     def test_api_verified_request_can_access_gateway_discovery_without_probe_leak(self) -> None:
         response = self.client.get(
@@ -201,8 +220,9 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
         self.assertEqual(first.status_code, 200, first.text)
         self.assertEqual(second.status_code, 429)
         self.assertEqual(second.json()["code"], "TOOL_GATEWAY_RATE_LIMITED")
+        self.assertEqual(second.headers["Retry-After"], "60")
 
-    def test_api_gateway_rate_limit_bounds_distinct_key_growth(self) -> None:
+    def test_api_gateway_rate_limit_uses_one_invalid_authorization_bucket_per_client(self) -> None:
         app = create_app(
             Settings(
                 app_name="Ophanix Test Platform",
@@ -228,36 +248,20 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
         )
 
         self.assertEqual(first.status_code, 401)
-        self.assertEqual(second.status_code, 429)
+        self.assertEqual(second.status_code, 401)
+        self.assertEqual(len(app.state.tool_gateway_rate_limits), 1)
+        self.assertTrue(next(iter(app.state.tool_gateway_rate_limits)).startswith("authorization:"))
 
     def test_api_rejects_wildcard_cors_with_credentials_in_production(self) -> None:
         with self.assertRaisesRegex(ValueError, "CORS wildcard origins"):
             create_app(
-                Settings(
-                    app_name="Ophanix Test Platform",
-                    environment="production",
-                    build_sha="test-sha",
-                    build_time="2026-05-01T00:00:00Z",
-                    session_secret="test-secret",
-                    allow_sqlite_in_production=True,
-                    gateway_token_hash_pepper="test-pepper",
-                    cors_origins=["*"],
-                ),
+                self._production_settings(cors_origins=["*"]),
                 database=self.database,
             )
 
     def test_api_disables_openapi_docs_by_default_in_production(self) -> None:
         app = create_app(
-            Settings(
-                app_name="Ophanix Test Platform",
-                environment="production",
-                build_sha="test-sha",
-                build_time="2026-05-01T00:00:00Z",
-                session_secret="test-secret",
-                allow_sqlite_in_production=True,
-                gateway_token_hash_pepper="test-pepper",
-                cors_origins=["https://app.example.com"],
-            ),
+            self._production_settings(),
             database=self.database,
         )
         client = TestClient(app, raise_server_exceptions=False)
@@ -291,62 +295,53 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
     def test_api_rejects_default_session_secret_in_production(self) -> None:
         with self.assertRaisesRegex(ValueError, "OPHANIX_SESSION_SECRET"):
             create_app(
-                Settings(
-                    app_name="Ophanix Test Platform",
-                    environment="production",
-                    build_sha="test-sha",
-                    build_time="2026-05-01T00:00:00Z",
-                    session_secret="dev-secret-change-me",
-                    allow_sqlite_in_production=True,
-                    gateway_token_hash_pepper="test-pepper",
-                    cors_origins=["https://app.example.com"],
-                ),
+                self._production_settings(session_secret="dev-secret-change-me"),
                 database=self.database,
             )
 
-    def test_api_rejects_sqlite_database_outside_local_environments_by_default(self) -> None:
+    def test_api_rejects_sqlite_database_in_production_even_with_escape_hatch(self) -> None:
         with self.assertRaisesRegex(ValueError, "SQLite is not supported"):
             create_app(
-                Settings(
-                    app_name="Ophanix Test Platform",
-                    environment="production",
-                    build_sha="test-sha",
-                    build_time="2026-05-01T00:00:00Z",
-                    session_secret="test-secret",
-                    gateway_token_hash_pepper="test-pepper",
-                    cors_origins=["https://app.example.com"],
+                self._production_settings(
+                    database_url="sqlite:///prod.db",
+                    allow_sqlite_in_production=True,
                 )
+            )
+
+    def test_api_requires_supported_secret_provider_in_production(self) -> None:
+        with self.assertRaisesRegex(ValueError, "OPHANIX_SECRET_MANAGER_REF"):
+            create_app(
+                self._production_settings(secret_manager_ref=None),
+                database=self.database,
             )
 
     def test_api_requires_gateway_token_hash_pepper_in_production(self) -> None:
         with self.assertRaisesRegex(ValueError, "OPHANIX_GATEWAY_TOKEN_HASH_PEPPER"):
             create_app(
-                Settings(
-                    app_name="Ophanix Test Platform",
-                    environment="production",
-                    build_sha="test-sha",
-                    build_time="2026-05-01T00:00:00Z",
-                    session_secret="test-secret",
-                    allow_sqlite_in_production=True,
-                    cors_origins=["https://app.example.com"],
-                ),
+                self._production_settings(gateway_token_hash_pepper=None),
                 database=self.database,
             )
+
+    def test_api_rejects_legacy_gateway_token_hash_acceptance_in_production(self) -> None:
+        with patch.dict(os.environ, {"OPHANIX_GATEWAY_TOKEN_HASH_ACCEPT_LEGACY": "true"}, clear=False):
+            with self.assertRaisesRegex(ValueError, "Legacy gateway token hash acceptance"):
+                create_app(
+                    self._production_settings(),
+                    database=self.database,
+                )
+
+    def test_api_rejects_unresolved_upstream_host_bypass_in_production(self) -> None:
+        with patch.dict(os.environ, {"OPHANIX_ALLOW_UNRESOLVED_UPSTREAM_HOSTS": "true"}, clear=False):
+            with self.assertRaisesRegex(ValueError, "Unresolved upstream hosts"):
+                create_app(
+                    self._production_settings(),
+                    database=self.database,
+                )
 
     def test_api_rejects_disabled_gateway_safety_limits_in_production(self) -> None:
         with self.assertRaisesRegex(ValueError, "production safety limits"):
             create_app(
-                Settings(
-                    app_name="Ophanix Test Platform",
-                    environment="production",
-                    build_sha="test-sha",
-                    build_time="2026-05-01T00:00:00Z",
-                    session_secret="test-secret",
-                    allow_sqlite_in_production=True,
-                    gateway_token_hash_pepper="test-pepper",
-                    tool_gateway_rate_limit_max_requests=0,
-                    cors_origins=["https://app.example.com"],
-                ),
+                self._production_settings(tool_gateway_rate_limit_max_requests=0),
                 database=self.database,
             )
 

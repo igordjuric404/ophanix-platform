@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import shutil
 import subprocess
 import sys
@@ -76,6 +78,13 @@ def main() -> int:
             )
         if args.require_dependency_audit:
             _validate_runtime_dependency_audit(wheel)
+        _write_release_manifest(
+            artifact_dir,
+            package_root=package_root,
+            artifacts=[wheel, sdist],
+            dependency_audit_required=args.require_dependency_audit,
+            strict_git=args.strict_git,
+        )
         print(f"Release artifacts validated in {artifact_dir}")
     return 0
 
@@ -188,7 +197,7 @@ def _validate_sdist(sdist: Path) -> None:
     if missing:
         raise SystemExit(f"Sdist is missing expected files: {', '.join(missing)}")
     _validate_archive_names(names, artifact="Sdist")
-    for required in ["LICENSE", "CHANGELOG.md", "SECURITY.md"]:
+    for required in ["LICENSE", "CHANGELOG.md", "SECURITY.md", "MIGRATION.md"]:
         if not any(name.endswith(f"/{required}") for name in names):
             raise SystemExit(f"Sdist is missing {required}")
 
@@ -268,6 +277,42 @@ def _validate_runtime_dependency_audit(wheel: Path) -> None:
             wheel.parent,
             missing_hint="Install security extras first: python3 -m pip install '.[security]'",
         )
+
+
+def _write_release_manifest(
+    artifact_dir: Path,
+    *,
+    package_root: Path,
+    artifacts: list[Path],
+    dependency_audit_required: bool,
+    strict_git: bool,
+) -> None:
+    manifest = {
+        "package": "ophanix-tool-gateway-sdk",
+        "version": _project_version(package_root),
+        "dependency_audit_required": dependency_audit_required,
+        "strict_git": strict_git,
+        "artifacts": [
+            {
+                "filename": artifact.name,
+                "sha256": _sha256_file(artifact),
+                "size_bytes": artifact.stat().st_size,
+            }
+            for artifact in artifacts
+        ],
+    }
+    (artifact_dir / "release-manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _run(command: list[str], *, cwd: Path) -> None:

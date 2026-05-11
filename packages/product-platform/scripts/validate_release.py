@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import shutil
 import subprocess
 import sys
@@ -65,6 +67,7 @@ def main() -> int:
                 package_root,
                 missing_hint="Install release extras first: python3 -m pip install '.[release]'",
             )
+        _write_release_manifest(artifact_dir, package_root=package_root, artifacts=[wheel, sdist])
         print(f"Product release artifacts validated in {artifact_dir}")
     return 0
 
@@ -183,6 +186,49 @@ def _run_module(module: str, args: list[str], cwd: Path, *, missing_hint: str) -
     if f"No module named {module}" in output:
         raise SystemExit(missing_hint)
     raise SystemExit(output.strip() or f"{' '.join(command)} failed")
+
+
+def _write_release_manifest(
+    artifact_dir: Path,
+    *,
+    package_root: Path,
+    artifacts: list[Path],
+) -> None:
+    manifest = {
+        "package": "ophanix-product-platform",
+        "version": _project_version(package_root),
+        "artifacts": [
+            {
+                "filename": artifact.name,
+                "sha256": _sha256_file(artifact),
+                "size_bytes": artifact.stat().st_size,
+            }
+            for artifact in artifacts
+        ],
+    }
+    (artifact_dir / "release-manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _project_version(package_root: Path) -> str:
+    with (package_root / "pyproject.toml").open("rb") as handle:
+        import tomllib
+
+        metadata = tomllib.load(handle)
+    version_value = metadata.get("project", {}).get("version")
+    if not isinstance(version_value, str) or not version_value:
+        raise SystemExit("pyproject.toml is missing project.version")
+    return version_value
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _run(command: list[str], *, cwd: Path) -> None:

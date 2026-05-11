@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from typing import Any, cast
 
 import httpx
 
@@ -38,7 +39,7 @@ class FakeHTTPResponse:
 
 class RecordingHTTPClient:
     def __init__(self) -> None:
-        self.calls: list[dict[str, object]] = []
+        self.calls: list[dict[str, Any]] = []
 
     def request(self, method: str, url: str, **kwargs):
         self.calls.append({"method": method, "url": url, **kwargs})
@@ -153,6 +154,31 @@ class ToolGatewayForwardingPhase2Tests(unittest.TestCase):
             )
 
         self.assertEqual(context.exception.code, "unsafe_upstream_url")
+
+    def test_unit_target_url_rejects_disallowed_runtime_host(self) -> None:
+        with self.assertRaises(ToolExecutionError) as context:
+            build_upstream_url(
+                {
+                    "base_url": "https://claims.internal.example",
+                    "path_template": "/v1/claims/{claim_id}",
+                },
+                {"claim_id": "claim_123"},
+                allowed_hosts=["*.approved.example"],
+            )
+
+        self.assertEqual(context.exception.code, "unsafe_upstream_url")
+
+    def test_unit_target_url_rejects_excessive_constructed_url(self) -> None:
+        with self.assertRaises(ToolExecutionError) as context:
+            build_upstream_url(
+                {
+                    "base_url": "https://claims.internal.example",
+                    "path_template": "/v1/claims/{claim_id}",
+                },
+                {"claim_id": "x" * 5000},
+            )
+
+        self.assertEqual(context.exception.code, "upstream_url_too_large")
 
     def test_unit_missing_target_returns_controlled_error(self) -> None:
         with self.database.transaction():
@@ -350,7 +376,8 @@ class ToolGatewayForwardingPhase2Tests(unittest.TestCase):
                 principal=self._principal(),
             )
 
-        self.assertEqual(http_client.calls[0]["headers"]["Authorization"], "Bearer upstream-token")
+        call_headers = cast(dict[str, str], http_client.calls[0]["headers"])
+        self.assertEqual(call_headers["Authorization"], "Bearer upstream-token")
 
     def test_unit_upstream_auth_fails_closed_when_secret_is_missing(self) -> None:
         with self.database.transaction():

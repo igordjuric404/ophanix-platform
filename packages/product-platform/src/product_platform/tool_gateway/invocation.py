@@ -19,6 +19,7 @@ from product_platform.tool_gateway.models import validate_http_url
 
 MAX_UPSTREAM_TEXT_BODY_CHARS = 8192
 MAX_UPSTREAM_RESPONSE_BYTES = 1_000_000
+MAX_UPSTREAM_URL_BYTES = 4096
 MAX_INVOCATION_PAYLOAD_DEPTH = 50
 MAX_CORRELATION_ID_LENGTH = 128
 CORRELATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:/@+-]+$")
@@ -118,6 +119,7 @@ class HttpToolInvocationExecutor:
         secret_provider: Any | None = None,
         fail_closed_unhealthy: bool = True,
         max_response_bytes: int = MAX_UPSTREAM_RESPONSE_BYTES,
+        allowed_upstream_hosts: list[str] | tuple[str, ...] | set[str] | None = None,
     ) -> None:
         self.repository = repository
         self._owns_http_client = http_client is None
@@ -125,6 +127,7 @@ class HttpToolInvocationExecutor:
         self.secret_provider = secret_provider
         self.fail_closed_unhealthy = fail_closed_unhealthy
         self.max_response_bytes = max_response_bytes
+        self.allowed_upstream_hosts = allowed_upstream_hosts
 
     def close(self) -> None:
         """Close the owned HTTP client when this executor created it."""
@@ -155,7 +158,7 @@ class HttpToolInvocationExecutor:
                 message="Configured upstream target is unhealthy.",
                 status_code=503,
             )
-        url = build_upstream_url(target, payload)
+        url = build_upstream_url(target, payload, allowed_hosts=self.allowed_upstream_hosts)
         headers = {
             "X-Request-ID": decision.request_id,
             "X-Correlation-ID": decision.correlation_id or decision.request_id,
@@ -224,6 +227,7 @@ class AsyncHttpToolInvocationExecutor:
         secret_provider: Any | None = None,
         fail_closed_unhealthy: bool = True,
         max_response_bytes: int = MAX_UPSTREAM_RESPONSE_BYTES,
+        allowed_upstream_hosts: list[str] | tuple[str, ...] | set[str] | None = None,
     ) -> None:
         self.repository = repository
         self._owns_http_client = http_client is None
@@ -231,6 +235,7 @@ class AsyncHttpToolInvocationExecutor:
         self.secret_provider = secret_provider
         self.fail_closed_unhealthy = fail_closed_unhealthy
         self.max_response_bytes = max_response_bytes
+        self.allowed_upstream_hosts = allowed_upstream_hosts
 
     async def close(self) -> None:
         """Close the owned async HTTP client when this executor created it."""
@@ -265,7 +270,7 @@ class AsyncHttpToolInvocationExecutor:
                 message="Configured upstream target is unhealthy.",
                 status_code=503,
             )
-        url = build_upstream_url(target, payload)
+        url = build_upstream_url(target, payload, allowed_hosts=self.allowed_upstream_hosts)
         headers = {
             "X-Request-ID": decision.request_id,
             "X-Correlation-ID": decision.correlation_id or decision.request_id,
@@ -348,11 +353,20 @@ class InMemoryToolInvocationExecutor:
         )
 
 
-def build_upstream_url(target: Any, payload: dict[str, Any]) -> str:
+def build_upstream_url(
+    target: Any,
+    payload: dict[str, Any],
+    *,
+    allowed_hosts: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> str:
     """Build an upstream URL from a target row and path-template payload values."""
 
     try:
-        base_url = validate_http_url(str(target["base_url"]), field="base_url")
+        base_url = validate_http_url(
+            str(target["base_url"]),
+            field="base_url",
+            allowed_hosts=allowed_hosts,
+        )
     except ValueError as exc:
         raise ToolExecutionError(
             code="unsafe_upstream_url",
@@ -374,7 +388,14 @@ def build_upstream_url(target: Any, payload: dict[str, Any]) -> str:
     path = re.sub(r"\{([^{}]+)\}", replace, path_template)
     if not path.startswith("/"):
         path = f"/{path}"
-    return f"{base_url}{path}"
+    url = f"{base_url}{path}"
+    if len(url.encode("utf-8")) > MAX_UPSTREAM_URL_BYTES:
+        raise ToolExecutionError(
+            code="upstream_url_too_large",
+            message="Constructed upstream URL exceeds the configured safety limit.",
+            status_code=422,
+        )
+    return url
 
 
 def _send_limited_request(

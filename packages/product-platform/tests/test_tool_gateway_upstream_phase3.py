@@ -156,6 +156,39 @@ class ToolGatewayUpstreamPhase3Tests(unittest.TestCase):
         self.assertEqual(payload["query_parameter_allowlist"], ["include_notes"])
         self.assertNotIn("secret_ref", created.text)
 
+    def test_api_rejects_upstream_target_outside_configured_host_allowlist(self) -> None:
+        app = create_app(
+            Settings(
+                app_name="Ophanix Test Platform",
+                environment="test",
+                build_sha="test-sha",
+                build_time="2026-05-01T00:00:00Z",
+                dev_login_allowed_emails=["admin@example.com"],
+                session_secret="test-secret",
+                tool_gateway_upstream_host_allowlist=["*.approved.example"],
+            ),
+            database=self.database,
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+        login = client.post(
+            "/api/v1/auth/dev-login",
+            json={"email": "admin@example.com", "roles": ["Security Admin"]},
+        )
+        self.assertEqual(login.status_code, 200, login.text)
+        tool = self._create_tool(name="claims.allowlist")
+
+        response = client.post(
+            f"/api/v1/tools/{tool['id']}/upstream-target",
+            headers={
+                "Authorization": f"Bearer {login.json()['access_token']}",
+                "X-Environment-ID": "env_default",
+            },
+            json=self._target_body(),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("allowlist", response.json()["message"])
+
     def test_api_cannot_create_target_for_disabled_tool(self) -> None:
         tool = self._create_tool(name="claims.disabled")
         disabled = self.client.post(
