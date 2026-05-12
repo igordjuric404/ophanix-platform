@@ -3,12 +3,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from typing import Any, Callable
+from urllib.parse import quote, urlparse
 
 try:
     import requests
 except ImportError:  # pragma: no cover - exercised only when users run without requests installed.
     requests = None
+
+MAX_RESPONSE_BYTES = 1_000_000
+MAX_TOKEN_LENGTH = 4096
+TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]+$")
 
 
 class ToolGatewayDirectHttpError(RuntimeError):
@@ -40,10 +46,14 @@ def invoke_tool_direct_http(
     correlation_id: str | None = None,
     idempotency_key: str | None = None,
     timeout: float = 10.0,
+    max_response_bytes: int = MAX_RESPONSE_BYTES,
     post: PostCallable | None = None,
 ) -> dict[str, Any]:
     post_callable = post or _requests_post()
-    normalized_base_url = base_url.rstrip("/")
+    normalized_base_url = _normalize_base_url(base_url)
+    token = _validate_token(token)
+    tool_name = _validate_tool_name(tool_name)
+    _validate_payload(payload)
     request_body: dict[str, Any] = {"payload": payload}
     headers = {
         "Authorization": f"Bearer {token}",
@@ -55,16 +65,20 @@ def invoke_tool_direct_http(
     if idempotency_key:
         headers["Idempotency-Key"] = idempotency_key
     response = post_callable(
-        f"{normalized_base_url}/api/v1/tools/{tool_name}/invoke",
+        f"{normalized_base_url}/api/v1/tools/{quote(tool_name, safe='')}/invoke",
         headers=headers,
         json=request_body,
         timeout=timeout,
     )
-    response_json = response.json()
+    response_json = _response_json(response, max_response_bytes=max_response_bytes)
     if response.status_code == 403:
         raise ToolGatewayDirectHttpDenied(response_json)
     if response.status_code >= 400:
-        response.raise_for_status()
+        raise ToolGatewayDirectHttpError(
+            f"Tool Gateway returned HTTP {response.status_code}.",
+            status_code=response.status_code,
+            response=response_json,
+        )
     return response_json
 
 
@@ -74,10 +88,12 @@ def list_runtime_actions_by_correlation_id(
     user_token: str,
     correlation_id: str,
     timeout: float = 10.0,
+    max_response_bytes: int = MAX_RESPONSE_BYTES,
     get: GetCallable | None = None,
 ) -> list[dict[str, Any]]:
     get_callable = get or _requests_get()
-    normalized_base_url = base_url.rstrip("/")
+    normalized_base_url = _normalize_base_url(base_url)
+    user_token = _validate_token(user_token)
     response = get_callable(
         f"{normalized_base_url}/api/v1/tool-runtime/actions",
         headers={
@@ -87,8 +103,14 @@ def list_runtime_actions_by_correlation_id(
         params={"correlation_id": correlation_id},
         timeout=timeout,
     )
-    response.raise_for_status()
-    actions = response.json()
+    actions_body = _response_json(response, max_response_bytes=max_response_bytes)
+    if response.status_code >= 400:
+        raise ToolGatewayDirectHttpError(
+            f"Tool Gateway returned HTTP {response.status_code}.",
+            status_code=response.status_code,
+            response=actions_body,
+        )
+    actions = actions_body
     if not isinstance(actions, list):
         raise ToolGatewayDirectHttpError(
             "Tool Gateway returned an invalid runtime action response.",
@@ -96,6 +118,71 @@ def list_runtime_actions_by_correlation_id(
             response={"result": actions},
         )
     return actions
+
+
+def _normalize_base_url(value: str) -> str:
+    normalized = value.strip().rstrip("/")
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("base_url must be an absolute http or https URL.")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("base_url must not include credentials, query string, or fragment.")
+    if parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        raise ValueError("plain http is allowed only for local demo hosts.")
+    return normalized
+
+
+def _validate_token(value: str) -> str:
+    token = value.strip()
+    if not token:
+        raise ValueError("token is required.")
+    if token.lower().startswith("bearer "):
+        raise ValueError("token must be the raw token without the Bearer prefix.")
+    if any(character.isspace() for character in token) or len(token) > MAX_TOKEN_LENGTH:
+        raise ValueError("token contains unsupported whitespace or exceeds the maximum length.")
+    return token
+
+
+def _validate_tool_name(value: str) -> str:
+    tool_name = value.strip()
+    if not tool_name or not TOOL_NAME_PATTERN.fullmatch(tool_name):
+        raise ValueError("tool_name contains unsupported characters.")
+    return tool_name
+
+
+def _validate_payload(value: dict[str, Any]) -> None:
+    if not isinstance(value, dict):
+        raise ValueError("payload must be a dictionary.")
+    json.dumps(value, allow_nan=False)
+
+
+def _response_json(response: Any, *, max_response_bytes: int) -> Any:
+    content_length = getattr(response, "headers", {}).get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > max_response_bytes:
+                raise ToolGatewayDirectHttpError(
+                    "Tool Gateway response exceeds max_response_bytes.",
+                    status_code=response.status_code,
+                    response={"error": {"code": "response_too_large"}},
+                )
+        except ValueError:
+            pass
+    raw_text = getattr(response, "text", "")
+    if isinstance(raw_text, str) and len(raw_text.encode("utf-8")) > max_response_bytes:
+        raise ToolGatewayDirectHttpError(
+            "Tool Gateway response exceeds max_response_bytes.",
+            status_code=response.status_code,
+            response={"error": {"code": "response_too_large"}},
+        )
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise ToolGatewayDirectHttpError(
+            "Tool Gateway returned a non-JSON response.",
+            status_code=response.status_code,
+            response={"error": {"code": "non_json_response"}},
+        ) from exc
 
 
 def _requests_post() -> PostCallable:

@@ -3,6 +3,11 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+import httpx
+
+from product_platform.agents.credentials import AgentCredentialIssuer
+from product_platform.agents.models import CredentialScopeRequest
+from product_platform.tool_gateway import OphanixToolGatewayClient, StaticTokenProvider
 from product_platform.tool_gateway.auth import (
     GatewayAuthenticationError,
     hash_gateway_token,
@@ -52,6 +57,30 @@ class ToolGatewayAuthPhase1Tests(unittest.TestCase):
         self.assertNotEqual(token_hash, token)
         self.assertEqual(len(token_hash), 64)
         self.assertEqual(parse_bearer_authorization(f"Bearer {token}"), token)
+
+    def test_unit_issued_gateway_token_passes_server_and_sdk_grammar(self) -> None:
+        issued = AgentCredentialIssuer().issue(
+            agent_did="did:example:agent",
+            scopes=[
+                CredentialScopeRequest(
+                    scope="claims.lookup:read",
+                    resource_type="tool",
+                    resource_id="claims.lookup",
+                )
+            ],
+            ttl_seconds=900,
+        )
+
+        raw_token = parse_bearer_authorization(issued.bearer_token)
+        client = OphanixToolGatewayClient(
+            base_url="https://gateway.example.test",
+            token_provider=StaticTokenProvider(raw_token),
+            http_client=httpx.Client(
+                transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=[]))
+            ),
+        )
+
+        self.assertEqual(client.list_tools(), [])
 
     def test_unit_token_hash_uses_pepper_when_configured(self) -> None:
         with patch.dict("os.environ", {"OPHANIX_GATEWAY_TOKEN_HASH_PEPPER": "pepper"}, clear=False):

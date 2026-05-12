@@ -266,6 +266,48 @@ class ToolGatewayForwardingPhase3Tests(unittest.TestCase):
         self.assertEqual(third.json()["error"]["code"], "upstream_circuit_open")
         self.assertEqual(len(fake_client.calls), 2)
 
+    def test_integration_database_circuit_breaker_is_shared_across_app_instances(self) -> None:
+        settings = Settings(
+            app_name="Ophanix Test Platform",
+            environment="test",
+            build_sha="test-sha",
+            build_time="2026-05-01T00:00:00Z",
+            session_secret="test-secret",
+            tool_gateway_circuit_breaker_failure_threshold=2,
+            tool_gateway_circuit_breaker_cooldown_seconds=60,
+        )
+        app_one = create_app(settings, database=self.database)
+        app_two = create_app(settings, database=self.database)
+        first_client = FakeHTTPClient(FakeHTTPResponse(status_code=500, body={"error": "boom"}))
+        second_client = FakeHTTPClient(FakeHTTPResponse(status_code=200, body={"claim_status": "open"}))
+        app_one.state.tool_gateway_http_client = first_client
+        app_two.state.tool_gateway_http_client = second_client
+        test_client_one = TestClient(app_one, raise_server_exceptions=False)
+        test_client_two = TestClient(app_two, raise_server_exceptions=False)
+
+        first = test_client_one.post(
+            "/api/v1/tools/claims.lookup/invoke",
+            headers=self._headers(request_id="req-db-breaker-1"),
+            json={"payload": {"claim_id": "claim_123"}},
+        )
+        second = test_client_one.post(
+            "/api/v1/tools/claims.lookup/invoke",
+            headers=self._headers(request_id="req-db-breaker-2"),
+            json={"payload": {"claim_id": "claim_123"}},
+        )
+        third = test_client_two.post(
+            "/api/v1/tools/claims.lookup/invoke",
+            headers=self._headers(request_id="req-db-breaker-3"),
+            json={"payload": {"claim_id": "claim_123"}},
+        )
+
+        self.assertEqual(first.status_code, 502, first.text)
+        self.assertEqual(second.status_code, 502, second.text)
+        self.assertEqual(third.status_code, 503, third.text)
+        self.assertEqual(third.json()["error"]["code"], "upstream_circuit_open")
+        self.assertEqual(len(first_client.calls), 2)
+        self.assertEqual(len(second_client.calls), 0)
+
     def test_integration_upstream_redirect_is_not_treated_as_success(self) -> None:
         self.app.state.tool_gateway_http_client = FakeHTTPClient(
             FakeHTTPResponse(status_code=302, body={"location": "https://elsewhere.example"})

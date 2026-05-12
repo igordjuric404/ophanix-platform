@@ -40,7 +40,24 @@ constructor option. Existing constructor calls remain supported.
 
 ## Custom HTTP Clients
 
-Custom injected HTTP clients must expose `stream()` by default so the SDK can
-enforce response-size limits before materializing a body. Use
-`allow_buffered_custom_http_client=True` only when the injected client already
-enforces equivalent limits.
+Custom injected HTTP clients must expose `stream()` so the SDK can enforce
+response-size limits before materializing a body. Buffered injected clients are
+now rejected even if `allow_buffered_custom_http_client=True` is supplied; that
+field remains only for constructor compatibility.
+
+The SDK now exports `SyncGatewayHttpClient` and `AsyncGatewayHttpClient`
+Protocols. Existing adapters do not need code changes if they already provide
+the required methods, but type-checking integrations should prefer those
+Protocols over ad hoc `Any` annotations.
+
+## Discovery And Compatibility
+
+`list_all_tools()` now defaults to `max_total=10000` to avoid accidental
+unbounded scans and prefers signed cursor pagination when the gateway supports
+it. Pass `max_total=None` only when an integration intentionally accepts an
+unbounded catalog scan.
+
+`check_compatibility()` now marks the SDK incompatible when the gateway
+advertises a `min_sdk_version` higher than the installed SDK version. Check
+`GatewayCompatibility.incompatibility_reason` before starting long-running
+workers.

@@ -13,6 +13,12 @@ timeouts, response-size caps, retry policy, redaction, compatibility probing,
 idempotency-key generation, and typed error handling before using this pattern
 outside a local demo.
 
+The bundled Python helper is still a local-demo helper. It validates local demo
+URLs, raw token shape, tool-name path characters, JSON payload serializability,
+response-size limits, and non-JSON responses, but it does not replace the SDK's
+typed compatibility checks, retry model, discovery helpers, or diagnostic
+redaction.
+
 ```bash
 export OPHANIX_BASE_URL="http://127.0.0.1:8000"
 export OPHANIX_TOOL_GATEWAY_ALLOWED_TOKEN="ophanix-local-only-tool-gateway-allowed-token"
@@ -49,6 +55,10 @@ Expected shape: see `expected-denied-response.json`.
 Denied responses intentionally expose only the coarse `tool_call_denied` code to
 the agent. Operators can inspect policy decision and runtime action records for
 the detailed internal reason.
+
+Allowed responses intentionally expose only a coarse decision summary. Internal
+policy decision IDs, permission IDs, and matched policy details remain in
+operator-facing audit and runtime records.
 
 Compatibility probe:
 

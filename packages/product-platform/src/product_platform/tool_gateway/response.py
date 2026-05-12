@@ -7,6 +7,8 @@ import re
 from functools import lru_cache
 from typing import Any
 
+import regex as safe_regex
+
 from product_platform.tool_gateway.invocation import ToolExecutionError, ToolExecutionResult
 from product_platform.tool_gateway.schemas import ToolSchemaValidationError, validate_payload
 
@@ -14,6 +16,7 @@ REDACTED_VALUE = "[redacted]"
 MAX_REDACTION_DEPTH = 20
 MAX_REDACTION_PATTERN_LENGTH = 300
 MAX_REDACTION_STRING_CHARS = 16_384
+REDACTION_REGEX_TIMEOUT_SECONDS = 0.01
 
 
 def process_tool_execution_response(
@@ -93,7 +96,7 @@ def _cached_compiled_redaction_rules(
 ) -> dict[str, Any]:
     return {
         "redact_keys": list(redact_keys),
-        "redact_patterns": [re.compile(pattern) for pattern in redact_patterns],
+        "redact_patterns": [safe_regex.compile(pattern) for pattern in redact_patterns],
     }
 
 
@@ -143,7 +146,14 @@ def _redact_value_at_depth(
         truncated = len(value) > MAX_REDACTION_STRING_CHARS
         changed = False
         for pattern in redact_patterns:
-            redacted, count = pattern.subn(REDACTED_VALUE, redacted)
+            try:
+                redacted, count = pattern.subn(
+                    REDACTED_VALUE,
+                    redacted,
+                    timeout=REDACTION_REGEX_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                return REDACTED_VALUE, True
             changed = changed or count > 0
         if truncated:
             redacted = f"{redacted}..."
@@ -179,8 +189,8 @@ def validate_redaction_rules(rules: dict[str, Any]) -> dict[str, Any]:
 
 def _validate_redaction_pattern(pattern: str) -> str:
     try:
-        re.compile(pattern)
-    except re.error as exc:
+        safe_regex.compile(pattern)
+    except safe_regex.error as exc:
         raise ValueError(f"invalid redaction regex pattern: {exc}") from exc
     if len(pattern) > MAX_REDACTION_PATTERN_LENGTH:
         raise ValueError(

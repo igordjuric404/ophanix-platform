@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -19,6 +20,7 @@ from product_platform.tool_gateway.models import (
     ToolUpstreamTargetCreateRequest,
 )
 from product_platform.tool_gateway.repository import ToolRegistryRepository
+from product_platform.tool_gateway import response as response_module
 from product_platform.tool_gateway.response import process_tool_execution_response
 
 
@@ -134,6 +136,26 @@ class ToolGatewayResponsePhase3Tests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             ToolResponsePolicyPatchRequest(redaction_rules_json={"redact_patterns": [".*token.*secret"]})
+
+    def test_unit_redaction_regex_timeout_redacts_whole_value(self) -> None:
+        with patch.object(response_module, "REDACTION_REGEX_TIMEOUT_SECONDS", 0.000001):
+            result = process_tool_execution_response(
+                {"output_schema_json": None},
+                {
+                    "max_response_bytes": 32768,
+                    "redaction_rules_json": {
+                        "redact_keys": [],
+                        "redact_patterns": ["(?:a|aa)+$"],
+                    },
+                    "expose_to_agent": 1,
+                    "store_full_response": 1,
+                    "strict_output_validation": 1,
+                },
+                ToolExecutionResult(status="succeeded", body={"note": ("a" * 10_000) + "b"}),
+            )
+
+        self.assertEqual(result.body["note"], "[redacted]")
+        self.assertTrue(result.redaction_applied)
 
     def test_unit_oversized_response_is_blocked(self) -> None:
         with self.assertRaises(ToolExecutionError) as context:
@@ -264,6 +286,27 @@ class ToolGatewayResponsePhase3Tests(unittest.TestCase):
         self.assertIsNone(summary["body"])
         self.assertFalse(summary["body_stored"])
         self.assertNotIn("secret-token", json.dumps(summary))
+
+    def test_api_blocks_disabling_response_policy_outside_local_environment(self) -> None:
+        client, app, tool_id = self._client_with_tool(FakeHTTPClient({"claim_status": "open"}))
+        object.__setattr__(app.state.settings, "environment", "production")
+        login = client.post(
+            "/api/v1/auth/dev-login",
+            json={"email": "admin@example.com", "roles": ["Security Admin"]},
+        )
+        headers = {
+            "Authorization": f"Bearer {login.json()['access_token']}",
+            "X-Environment-ID": DEMO_ENV_ID,
+        }
+
+        response = client.patch(
+            f"/api/v1/tools/{tool_id}/response-policy",
+            headers=headers,
+            json={"status": "disabled"},
+        )
+
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("Disabling Tool Gateway response policy is blocked", response.text)
 
     def _gateway_headers(self) -> dict[str, str]:
         return {

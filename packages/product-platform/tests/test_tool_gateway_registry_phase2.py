@@ -107,8 +107,9 @@ class ToolGatewayRegistryPhase2Tests(unittest.TestCase):
                     now,
                 ),
             )
+            repository = ToolRegistryRepository(connection, DEMO_ORG_ID, DEMO_ENV_ID)
             with self.assertRaises(ToolSchemaValidationError) as context:
-                self.repository.activate_tool(tool_id, actor_id=DEMO_ADMIN_USER_ID)
+                repository.activate_tool(tool_id, actor_id=DEMO_ADMIN_USER_ID)
 
         self.assertEqual(context.exception.field, "input_schema_json")
 

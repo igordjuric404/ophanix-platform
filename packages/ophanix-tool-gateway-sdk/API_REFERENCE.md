@@ -20,10 +20,10 @@ OphanixToolGatewayClient(
     max_payload_bytes: int = 1_000_000,
     max_response_bytes: int = 1_000_000,
     max_cache_entries: int = 256,
-    http_client: httpx.Client | None = None,
+    http_client: SyncGatewayHttpClient | httpx.Client | None = None,
     cache_tools: bool = False,
     cache_ttl_seconds: float = 300.0,
-    event_hook: Callable[[Mapping[str, Any]], None] | None = None,
+    event_hook: TelemetryEventHook | None = None,
     allow_insecure_http: bool = False,
     user_agent: str | None = None,
     discovery_max_retries: int = 2,
@@ -39,12 +39,15 @@ OphanixToolGatewayClient(
 )
 ```
 
+Payloads must be JSON objects, fit within `max_payload_bytes`, and stay within
+the SDK's fixed nesting-depth cap of 50 levels.
+
 Methods:
 
 - `call_tool(tool_name: str, payload: dict[str, Any], correlation_id: str | None = None, idempotency_key: str | None = None) -> ToolCallResult`
 - `check_compatibility() -> GatewayCompatibility`
 - `list_tools(status: Literal["active"] | None = None, owner_team: str | None = None, limit: int = 50, offset: int = 0) -> list[ToolDefinition]`
-- `list_all_tools(owner_team: str | None = None, page_size: int = 200, max_total: int | None = None) -> list[ToolDefinition]`
+- `list_all_tools(owner_team: str | None = None, page_size: int = 200, max_total: int | None = 10000) -> list[ToolDefinition]`
 - `get_tool(tool_name: str) -> ToolDefinition`
 - `clear_tool_cache() -> None`
 - `close() -> None`
@@ -63,6 +66,29 @@ payload/response caps, cache settings, discovery retry settings, idempotent
 invocation retry settings, custom client streaming policy, user agent, and
 event-hook failure mode. `base_url`,
 `token_provider`, `http_client`, and `event_hook` remain constructor inputs.
+
+Recommended profile starting points:
+
+- Controlled pilot: use defaults, keep discovery caching disabled, and pass
+  `idempotency_key` for any invocation that may need retries.
+- Stable internal worker: tune timeout and payload/response caps for the
+  workload, enable short-lived discovery caching only when permission and tool
+  contract churn is low, and keep `max_cache_entries` bounded.
+- Strict tests: set discovery and invocation retry counts to `0`,
+  `cache_tools=False`, and `raise_event_hook_errors=True`.
+
+## Adapter Protocols
+
+- `TokenProvider`: sync `get_token() -> str`.
+- `AsyncTokenProvider`: sync or awaitable `get_token() -> str | Awaitable[str]`.
+- `SyncGatewayHttpClient`: custom sync HTTP adapter with `stream()`, `get()`,
+  `post()`, and `close()`.
+- `AsyncGatewayHttpClient`: custom async HTTP adapter with `stream()`, `get()`,
+  `post()`, and `aclose()`.
+
+Buffered custom HTTP clients are rejected. `allow_buffered_custom_http_client`
+is retained only as a constructor-compatibility field; response-size caps
+require streaming support.
 
 ## Token Providers
 
@@ -85,7 +111,12 @@ be 4096 characters or fewer.
   `reason_code`, optional `decision`, and immutable raw response metadata.
 - `GatewayCompatibility`: `compatible`, `sdk_version`,
   `expected_gateway_contract_version`, `gateway_contract_version`,
-  `min_sdk_version`, and immutable raw response metadata.
+  `min_sdk_version`, `min_sdk_version_satisfied`, `incompatibility_reason`,
+  and immutable raw response metadata.
+
+`raw` fields are diagnostic snapshots rather than stable extension contracts.
+`ToolCallResult.decision` is a coarse agent-facing summary and does not include
+internal policy IDs.
 
 ## Errors
 
@@ -119,6 +150,10 @@ Sanitized `response_body` values redact common credential and PII-like keys:
 Invocation retries are gated by `idempotency_key`. Without a key, `call_tool`
 does not retry transient failures because the SDK cannot prove that the upstream
 operation is safe to repeat.
+
+`check_compatibility()` reports incompatible when the gateway contract version
+does not match or when the gateway `min_sdk_version` is higher than the installed
+SDK version.
 
 ## Compatibility And Deprecations
 

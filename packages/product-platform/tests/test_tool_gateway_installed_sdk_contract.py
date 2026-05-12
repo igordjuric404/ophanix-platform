@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -11,6 +14,7 @@ from types import ModuleType
 from urllib.parse import parse_qs, urlparse
 
 import httpx
+import uvicorn
 from fastapi.testclient import TestClient
 
 from product_platform import create_app
@@ -98,7 +102,8 @@ class ToolGatewayInstalledSdkContractTests(unittest.TestCase):
             ),
             database=self.database,
         )
-        self.app.state.tool_gateway_executor = _FakeToolExecutor()
+        self.executor = _FakeToolExecutor()
+        self.app.state.tool_gateway_executor = self.executor
         self.client = TestClient(self.app, raise_server_exceptions=False)
         self.standalone_root = Path(__file__).resolve().parents[2] / "ophanix-tool-gateway-sdk"
 
@@ -150,9 +155,43 @@ class ToolGatewayInstalledSdkContractTests(unittest.TestCase):
                 sdk_client.call_tool("claims.hidden", {"claim_id": "claim_123"})
             self.assertEqual(raised.exception.reason_code, "tool_call_denied")
 
+    def test_installed_wheel_sdk_calls_running_network_gateway_with_real_http(self) -> None:
+        with _installed_sdk_module(self.standalone_root) as installed_sdk:
+            with _running_uvicorn(self.app) as base_url:
+                sdk_client = installed_sdk.OphanixToolGatewayClient(
+                    base_url=base_url,
+                    token_provider=installed_sdk.StaticTokenProvider("wheel-contract-token"),
+                    allow_insecure_http=True,
+                    invocation_retry_backoff_seconds=0.0,
+                    invocation_retry_jitter_ratio=0.0,
+                )
+
+                compatibility = sdk_client.check_compatibility()
+                tools = sdk_client.list_all_tools()
+                first = sdk_client.call_tool(
+                    "claims.lookup",
+                    {"claim_id": "claim_123"},
+                    idempotency_key="wheel-network-idem-1",
+                )
+                replay = sdk_client.call_tool(
+                    "claims.lookup",
+                    {"claim_id": "claim_123"},
+                    idempotency_key="wheel-network-idem-1",
+                )
+
+                self.assertTrue(compatibility.compatible)
+                self.assertEqual([tool.name for tool in tools], ["claims.lookup"])
+                self.assertEqual(first.result["body"], {"ok": True})
+                self.assertEqual(replay.request_id, first.request_id)
+                self.assertEqual(len(self.executor.calls), 1)
+
 
 class _FakeToolExecutor:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
     def execute(self, *, tool, payload, decision, principal) -> ToolExecutionResult:
+        self.calls.append({"tool": tool["name"], "payload": payload, "agent_id": principal.agent_id})
         return ToolExecutionResult(
             status="succeeded",
             body={"ok": True},
@@ -266,6 +305,40 @@ def _installed_sdk_module(package_root: Path):
                     sys.modules.pop(name)
             sys.modules.update(saved_modules)
             sys.path = saved_path
+
+
+@contextmanager
+def _running_uvicorn(app):
+    port = _free_local_port()
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=port,
+            log_level="critical",
+            lifespan="off",
+        )
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 10
+    while not server.started:
+        if not thread.is_alive():
+            raise AssertionError("uvicorn server exited before startup")
+        if time.monotonic() > deadline:
+            raise AssertionError("uvicorn server did not start")
+        time.sleep(0.01)
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
+def _free_local_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 if __name__ == "__main__":

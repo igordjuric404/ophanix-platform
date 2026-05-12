@@ -87,6 +87,7 @@ FEATURE_MIGRATIONS = [
     "0057",
     "0058",
     "0059",
+    "0060",
 ]
 
 ALL_EXPECTED_MIGRATIONS = [*EXPECTED_MIGRATIONS, *FEATURE_MIGRATIONS]
@@ -230,6 +231,8 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertIn("tool_runtime_actions", tables)
             self.assertIn("tool_runtime_action_events", tables)
             self.assertIn("tool_invocation_idempotency_records", tables)
+            self.assertIn("tool_gateway_rate_limit_windows", tables)
+            self.assertIn("tool_gateway_circuit_breaker_state", tables)
             upstream_columns = column_names(connection, "tool_upstream_targets")
             self.assertIn("auth_config_json", upstream_columns)
             self.assertIn("query_parameter_allowlist_json", upstream_columns)
@@ -259,6 +262,9 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
                     self.assertNotIn("query_parameter_allowlist_json", upstream_columns)
                 if migration == "0059":
                     self.assertNotIn("tool_invocation_idempotency_records", tables)
+                if migration == "0060":
+                    self.assertNotIn("tool_gateway_rate_limit_windows", tables)
+                    self.assertNotIn("tool_gateway_circuit_breaker_state", tables)
                 if migration == "0051":
                     self.assertNotIn("tool_upstream_targets", tables)
                     self.assertNotIn("tool_upstream_health_checks", tables)

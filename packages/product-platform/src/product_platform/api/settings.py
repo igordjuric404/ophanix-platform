@@ -62,6 +62,9 @@ class Settings:
     database_url: str = field(
         default_factory=lambda: os.environ.get("OPHANIX_DATABASE_URL", DEFAULT_POSTGRES_URL)
     )
+    database_max_pool_size: int = field(
+        default_factory=lambda: _int_env("OPHANIX_DATABASE_MAX_POOL_SIZE", 5)
+    )
     dev_login_allowed_emails: list[str] = field(
         default_factory=_dev_login_allowed_emails
     )
@@ -138,6 +141,18 @@ class Settings:
     )
     tool_gateway_circuit_breaker_cooldown_seconds: int = field(
         default_factory=lambda: _int_env("OPHANIX_TOOL_GATEWAY_CIRCUIT_BREAKER_COOLDOWN_SECONDS", 30)
+    )
+    tool_gateway_idempotency_in_progress_ttl_seconds: int = field(
+        default_factory=lambda: _int_env(
+            "OPHANIX_TOOL_GATEWAY_IDEMPOTENCY_IN_PROGRESS_TTL_SECONDS",
+            600,
+        )
+    )
+    tool_gateway_idempotency_replay_retention_seconds: int = field(
+        default_factory=lambda: _int_env(
+            "OPHANIX_TOOL_GATEWAY_IDEMPOTENCY_REPLAY_RETENTION_SECONDS",
+            7 * 24 * 60 * 60,
+        )
     )
     tool_gateway_upstream_host_allowlist: list[str] = field(
         default_factory=lambda: _csv_env("OPHANIX_TOOL_GATEWAY_UPSTREAM_HOST_ALLOWLIST", "")

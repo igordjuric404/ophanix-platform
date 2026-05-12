@@ -14,6 +14,7 @@ from product_platform.tool_gateway.models import (
     AgentToolPermissionGrantRequest,
     ToolDefinitionCreateRequest,
 )
+from product_platform.tool_gateway.invocation import ToolExecutionError, ToolExecutionResult, invocation_request_hash
 from product_platform.tool_gateway.repository import ToolRegistryRepository
 
 
@@ -40,6 +41,26 @@ class FakeInvocationExecutor:
             }
         )
         return self.result
+
+
+class SecretLeakingErrorExecutor:
+    def execute(self, *, tool, payload, decision, principal):
+        raise ToolExecutionError(
+            code="custom_executor_failed",
+            message="upstream failed Authorization: Bearer secret-token-123 token=raw-secret",
+            status_code=502,
+        )
+
+
+class SecretLeakingResultExecutor:
+    def execute(self, *, tool, payload, decision, principal):
+        return ToolExecutionResult(
+            status="failed",
+            error={
+                "code": "custom_result_failed",
+                "message": "password=hunter2 and Bearer secret-token-456",
+            },
+        )
 
 
 class ToolGatewayInvocationPhase3Tests(unittest.TestCase):
@@ -154,9 +175,17 @@ class ToolGatewayInvocationPhase3Tests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["result"], {"claim_status": "open"})
         self.assertEqual(payload["decision"]["decision"], "allow")
-        self.assertEqual(payload["decision"]["permission_id"], permission_id)
+        self.assertEqual(payload["decision"]["reason_code"], "allowed")
+        self.assertNotIn("permission_id", payload["decision"])
+        self.assertNotIn("id", payload["decision"])
         self.assertEqual(len(executor.calls), 1)
         self.assertEqual(executor.calls[0]["payload"], {"claim_id": "claim_123"})
+        row = self.database.connect().execute(
+            "SELECT permission_id FROM tool_policy_decisions WHERE request_id = ?",
+            ("req-allowed-exec",),
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["permission_id"], permission_id)
 
     def test_api_idempotency_key_replays_completed_response_without_reexecuting(self) -> None:
         self._grant_permission()
@@ -202,6 +231,65 @@ class ToolGatewayInvocationPhase3Tests(unittest.TestCase):
         self.assertEqual(second.json()["error"]["code"], "idempotency_conflict")
         self.assertEqual(len(executor.calls), 1)
 
+    def test_api_stale_idempotency_record_returns_terminal_unknown_without_executing(self) -> None:
+        self._grant_permission()
+        executor = FakeInvocationExecutor(result={"claim_status": "open"})
+        self.app.state.tool_gateway_executor = executor
+        credential = self.database.connect().execute(
+            "SELECT id FROM agent_credentials WHERE agent_id = ?",
+            ("agent_invoke_phase3",),
+        ).fetchone()
+        self.assertIsNotNone(credential)
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO tool_invocation_idempotency_records (
+                    id, organization_id, environment_id, credential_id, tool_id,
+                    idempotency_key, request_hash, request_id, correlation_id,
+                    status, response_status_code, response_body_json, error_code,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "toolidem_stale_fixture",
+                    DEMO_ORG_ID,
+                    DEMO_ENV_ID,
+                    credential["id"],
+                    self.tool["id"],
+                    "idem-stale-1",
+                    invocation_request_hash(
+                        tool_name="claims.lookup",
+                        payload={"claim_id": "claim_123"},
+                    ),
+                    "req-old-stale",
+                    "corr-old-stale",
+                    "in_progress",
+                    None,
+                    None,
+                    None,
+                    "2026-05-01T00:00:00+00:00",
+                    "2026-05-01T00:00:00+00:00",
+                ),
+            )
+
+        response = self.client.post(
+            "/api/v1/tools/claims.lookup/invoke",
+            headers={**self._headers(request_id="req-idem-stale"), "Idempotency-Key": "idem-stale-1"},
+            json={"payload": {"claim_id": "claim_123"}},
+        )
+
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], "idempotency_stale")
+        self.assertIn("unknown", response.json()["error"]["message"])
+        self.assertEqual(executor.calls, [])
+        row = self.database.connect().execute(
+            "SELECT status, error_code FROM tool_invocation_idempotency_records WHERE id = ?",
+            ("toolidem_stale_fixture",),
+        ).fetchone()
+        self.assertEqual(row["status"], "failed_unknown")
+        self.assertEqual(row["error_code"], "idempotency_outcome_unknown")
+
     def test_api_rejects_mismatched_header_and_body_idempotency_keys(self) -> None:
         self._grant_permission()
         self.app.state.tool_gateway_executor = FakeInvocationExecutor(result={"ok": True})
@@ -244,8 +332,40 @@ class ToolGatewayInvocationPhase3Tests(unittest.TestCase):
         self.assertEqual(payload["error"]["message"], "Tool call denied by gateway policy.")
         self.assertIsNone(payload["decision"])
 
-    def test_integration_decision_record_created_for_allowed_and_denied_calls(self) -> None:
+    def test_api_sanitizes_custom_executor_error_messages_before_returning_to_agent(self) -> None:
         self._grant_permission()
+        self.app.state.tool_gateway_executor = SecretLeakingErrorExecutor()
+
+        response = self.client.post(
+            "/api/v1/tools/claims.lookup/invoke",
+            headers=self._headers(request_id="req-secret-exc"),
+            json={"payload": {"claim_id": "claim_123"}},
+        )
+
+        self.assertEqual(response.status_code, 502, response.text)
+        text = response.text
+        self.assertIn("[redacted]", text)
+        self.assertNotIn("secret-token-123", text)
+        self.assertNotIn("raw-secret", text)
+
+    def test_api_sanitizes_custom_failed_result_error_messages_before_returning_to_agent(self) -> None:
+        self._grant_permission()
+        self.app.state.tool_gateway_executor = SecretLeakingResultExecutor()
+
+        response = self.client.post(
+            "/api/v1/tools/claims.lookup/invoke",
+            headers=self._headers(request_id="req-secret-result"),
+            json={"payload": {"claim_id": "claim_123"}},
+        )
+
+        self.assertEqual(response.status_code, 502, response.text)
+        text = response.text
+        self.assertIn("[redacted]", text)
+        self.assertNotIn("hunter2", text)
+        self.assertNotIn("secret-token-456", text)
+
+    def test_integration_decision_record_created_for_allowed_and_denied_calls(self) -> None:
+        permission_id = self._grant_permission()
         self.app.state.tool_gateway_executor = FakeInvocationExecutor(result={"ok": True})
         allowed = self.client.post(
             "/api/v1/tools/claims.lookup/invoke",
@@ -255,7 +375,7 @@ class ToolGatewayInvocationPhase3Tests(unittest.TestCase):
         self.assertEqual(allowed.status_code, 200, allowed.text)
         with self.database.transaction() as connection:
             ToolRegistryRepository(connection, DEMO_ORG_ID, DEMO_ENV_ID).revoke_agent_tool_permission(
-                allowed.json()["decision"]["permission_id"],
+                permission_id,
                 actor_id=DEMO_ADMIN_USER_ID,
                 reason="switch to denied fixture",
             )

@@ -335,6 +335,83 @@ class ToolRegistryRepository:
             values,
         ).fetchall()
 
+    def list_tools_for_gateway_principal_cursor(
+        self,
+        *,
+        agent_id: str,
+        credential_id: str,
+        owner_team: str | None = None,
+        limit: int = 50,
+        snapshot_before: str,
+        last_updated_at: str | None = None,
+        last_id: str | None = None,
+        now: str | None = None,
+    ) -> list[Row]:
+        """List active callable tools using stable snapshot/keyset pagination."""
+
+        normalized_agent_id = agent_id.strip()
+        normalized_credential_id = credential_id.strip()
+        if not normalized_agent_id or not normalized_credential_id:
+            return []
+        if limit <= 0:
+            raise ValueError("limit must be greater than zero")
+        if (last_updated_at is None) != (last_id is None):
+            raise ValueError("last_updated_at and last_id must be provided together")
+        comparison_time = now or utc_now_iso()
+        clauses = [
+            "d.organization_id = ?",
+            "d.environment_id = ?",
+            "d.status = 'active'",
+            "d.updated_at <= ?",
+            "p.agent_id = ?",
+            "p.status = 'active'",
+            "(p.expires_at IS NULL OR p.expires_at > ?)",
+            "p.scope = d.required_scope",
+            """
+            EXISTS (
+                SELECT 1
+                FROM credential_scopes s
+                WHERE s.credential_id = ?
+                  AND s.scope = d.required_scope
+                  AND s.resource_type = 'tool'
+                  AND (
+                    s.resource_id IS NULL
+                    OR s.resource_id = d.id
+                    OR lower(s.resource_id) = lower(d.name)
+                  )
+            )
+            """,
+        ]
+        values: list[object] = [
+            self.organization_id,
+            self.environment_id,
+            snapshot_before,
+            normalized_agent_id,
+            comparison_time,
+            normalized_credential_id,
+        ]
+        if owner_team:
+            clauses.append("d.owner_team = ?")
+            values.append(owner_team.strip())
+        if last_updated_at is not None and last_id is not None:
+            clauses.append("(d.updated_at < ? OR (d.updated_at = ? AND d.id < ?))")
+            values.extend([last_updated_at, last_updated_at, last_id])
+        values.append(limit)
+        return self.connection.execute(
+            f"""
+            SELECT d.*
+            FROM tool_definitions d
+            JOIN agent_tool_permissions p
+              ON p.organization_id = d.organization_id
+             AND p.environment_id = d.environment_id
+             AND p.tool_id = d.id
+            WHERE {' AND '.join(clauses)}
+            ORDER BY d.updated_at DESC, d.id DESC
+            LIMIT ?
+            """,
+            values,
+        ).fetchall()
+
     def update_tool(
         self,
         tool_id: str,

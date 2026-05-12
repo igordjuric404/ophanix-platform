@@ -3,7 +3,6 @@
   "correlation_id": "demo-direct-http-allowed",
   "tool_name": "claims.lookup",
   "decision": {
-    "id": "decision-demo-direct-http-allowed",
     "decision": "allow",
     "reason_code": "allowed"
   },

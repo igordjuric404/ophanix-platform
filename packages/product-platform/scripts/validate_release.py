@@ -6,11 +6,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 import zipfile
 from pathlib import Path
 
@@ -19,6 +21,8 @@ EXPECTED_PACKAGE_FILES = (
     "product_platform/__init__.py",
     "product_platform/cli.py",
     "product_platform/py.typed",
+)
+FORBIDDEN_PACKAGE_FILES = (
     "ophanix_tool_gateway/__init__.py",
     "ophanix_tool_gateway/sdk.py",
     "ophanix_tool_gateway/py.typed",
@@ -29,6 +33,11 @@ FORBIDDEN_ARTIFACT_MARKERS = (
     ".pyc",
     "node_modules/",
     "frontend/dist/",
+)
+INTERNAL_AUDIT_EXCLUDED_DEPENDENCIES = (
+    "agent-discovery",
+    "agentmesh-platform",
+    "ophanix-tool-gateway-sdk",
 )
 
 
@@ -44,9 +53,25 @@ def main() -> int:
         action="store_true",
         help="Skip metadata validation with twine.",
     )
+    parser.add_argument(
+        "--require-dependency-audit",
+        action="store_true",
+        help="Run pip-audit after artifact validation. Install .[security] first.",
+    )
+    parser.add_argument(
+        "--strict-git",
+        action="store_true",
+        help="Require a clean product-platform package worktree and a tag matching the package version.",
+    )
+    parser.add_argument(
+        "--expected-tag",
+        help="Expected release tag. Defaults to v<project.version> when --strict-git is used.",
+    )
     args = parser.parse_args()
 
     package_root = Path(__file__).resolve().parents[1]
+    if args.strict_git:
+        _validate_git_state(package_root, expected_tag=args.expected_tag)
     if args.skip_twine_check:
         print("WARNING: twine metadata validation skipped; release-manifest.json records this.")
     with _artifact_directory(args.out_dir) as artifact_dir:
@@ -68,12 +93,16 @@ def main() -> int:
                 package_root,
                 missing_hint="Install release extras first: python3 -m pip install '.[release]'",
             )
-        sbom = _write_minimal_sbom(artifact_dir, package_root=package_root, artifacts=[wheel, sdist])
+        if args.require_dependency_audit:
+            _validate_runtime_dependency_audit(wheel)
+        sbom = _write_minimal_sbom(artifact_dir, package_root=package_root, wheel=wheel, artifacts=[wheel, sdist])
         _write_release_manifest(
             artifact_dir,
             package_root=package_root,
             artifacts=[wheel, sdist],
             sbom=sbom,
+            dependency_audit_required=args.require_dependency_audit,
+            strict_git=args.strict_git,
             twine_check_skipped=args.skip_twine_check,
         )
         print(f"Product release artifacts validated in {artifact_dir}")
@@ -115,11 +144,16 @@ def _validate_wheel(wheel: Path) -> None:
     missing = [path for path in EXPECTED_PACKAGE_FILES if path not in names]
     if missing:
         raise SystemExit(f"Wheel is missing expected files: {', '.join(missing)}")
+    forbidden = [path for path in FORBIDDEN_PACKAGE_FILES if path in names]
+    if forbidden:
+        raise SystemExit(f"Wheel must not ship standalone SDK package files: {', '.join(forbidden)}")
     _validate_archive_names(names, artifact="Wheel")
     if not any(name.endswith("LICENSE") for name in names):
         raise SystemExit("Wheel is missing a LICENSE file")
     if not any(name.endswith(".dist-info/METADATA") for name in names):
         raise SystemExit("Wheel is missing METADATA")
+    if "ophanix-tool-gateway-sdk" not in _wheel_requires_dist(wheel):
+        raise SystemExit("Wheel METADATA must require ophanix-tool-gateway-sdk")
 
 
 def _validate_sdist(sdist: Path) -> None:
@@ -132,6 +166,13 @@ def _validate_sdist(sdist: Path) -> None:
     ]
     if missing:
         raise SystemExit(f"Sdist is missing expected files: {', '.join(missing)}")
+    forbidden = [
+        f"src/{path}"
+        for path in FORBIDDEN_PACKAGE_FILES
+        if any(name.endswith(f"/src/{path}") for name in names)
+    ]
+    if forbidden:
+        raise SystemExit(f"Sdist must not ship standalone SDK package files: {', '.join(forbidden)}")
     _validate_archive_names(names, artifact="Sdist")
     for required in ["LICENSE", "README.md", "pyproject.toml"]:
         if not any(name.endswith(f"/{required}") for name in names):
@@ -153,6 +194,20 @@ def _validate_archive_names(names: set[str], *, artifact: str) -> None:
 
 def _validate_installed_wheel_import(wheel: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="ophanix-product-install-") as target:
+        sdk_package_root = Path(__file__).resolve().parents[2] / "ophanix-tool-gateway-sdk"
+        _run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--no-deps",
+                "--target",
+                target,
+                str(sdk_package_root),
+            ],
+            cwd=wheel.parent,
+        )
         _run(
             [
                 sys.executable,
@@ -174,13 +229,77 @@ def _validate_installed_wheel_import(wheel: Path) -> None:
                     "import sys; "
                     f"sys.path.insert(0, {target!r}); "
                     "import product_platform; "
-                    "import ophanix_tool_gateway; "
+                    "from product_platform.tool_gateway import OphanixToolGatewayClient; "
                     "assert product_platform.__version__; "
-                    "assert ophanix_tool_gateway.OphanixToolGatewayClient"
+                    "assert OphanixToolGatewayClient"
                 ),
             ],
             cwd=wheel.parent,
         )
+
+
+def _validate_runtime_dependency_audit(wheel: Path) -> None:
+    audit_requirements = _wheel_requires_dist_specs(
+        wheel,
+        exclude_names=set(INTERNAL_AUDIT_EXCLUDED_DEPENDENCIES),
+    )
+    with tempfile.TemporaryDirectory(prefix="ophanix-product-audit-") as target:
+        _run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--no-deps",
+                "--target",
+                target,
+                str(wheel),
+            ],
+            cwd=wheel.parent,
+        )
+        if audit_requirements:
+            _run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--target",
+                    target,
+                    *audit_requirements,
+                ],
+                cwd=wheel.parent,
+            )
+        _run_module(
+            "pip_audit",
+            ["--progress-spinner", "off", "--path", target],
+            wheel.parent,
+            missing_hint="Install security extras first: python3 -m pip install '.[security]'",
+        )
+
+
+def _validate_git_state(package_root: Path, *, expected_tag: str | None) -> None:
+    repo_root = package_root.parents[1]
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--", str(package_root.relative_to(repo_root))],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+    )
+    if status.returncode != 0:
+        raise SystemExit((status.stdout + status.stderr).strip() or "git status failed")
+    if status.stdout.strip():
+        raise SystemExit("Product release validation requires a clean product-platform worktree.")
+    version_value = _project_version(package_root)
+    expected = expected_tag or f"v{version_value}"
+    tag = subprocess.run(
+        ["git", "describe", "--tags", "--exact-match"],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+    )
+    if tag.returncode != 0 or tag.stdout.strip() != expected:
+        raise SystemExit(f"Product release must be built from tag {expected}.")
 
 
 def _run_module(module: str, args: list[str], cwd: Path, *, missing_hint: str) -> None:
@@ -202,11 +321,14 @@ def _write_release_manifest(
     package_root: Path,
     artifacts: list[Path],
     sbom: Path,
+    dependency_audit_required: bool,
+    strict_git: bool,
     twine_check_skipped: bool,
 ) -> None:
     manifest = {
         "package": "ophanix-product-platform",
         "version": _project_version(package_root),
+        "dependency_audit_required": dependency_audit_required,
         "sbom_provenance": {
             "included": True,
             "sbom_file": sbom.name,
@@ -215,7 +337,13 @@ def _write_release_manifest(
                 "GitHub publish workflow signs artifacts and attests provenance before external release."
             ),
         },
+        "strict_git": strict_git,
         "twine_check_skipped": twine_check_skipped,
+        "dependency_audit_scope": (
+            "Audits the product wheel plus public runtime dependencies resolvable from wheel metadata. "
+            "Internal Ophanix dependencies are excluded here and must be audited in their own release pipelines."
+        ),
+        "dependency_audit_excluded_dependencies": list(INTERNAL_AUDIT_EXCLUDED_DEPENDENCIES),
         "artifacts": [
             {
                 "filename": artifact.name,
@@ -231,7 +359,14 @@ def _write_release_manifest(
     )
 
 
-def _write_minimal_sbom(artifact_dir: Path, *, package_root: Path, artifacts: list[Path]) -> Path:
+def _write_minimal_sbom(
+    artifact_dir: Path,
+    *,
+    package_root: Path,
+    wheel: Path,
+    artifacts: list[Path],
+) -> Path:
+    dependencies = _wheel_requires_dist(wheel)
     sbom = {
         "bomFormat": "CycloneDX",
         "specVersion": "1.5",
@@ -251,6 +386,13 @@ def _write_minimal_sbom(artifact_dir: Path, *, package_root: Path, artifacts: li
                 "hashes": [{"alg": "SHA-256", "content": _sha256_file(artifact)}],
             }
             for artifact in artifacts
+        ]
+        + [
+            {
+                "type": "library",
+                "name": dependency,
+            }
+            for dependency in dependencies
         ],
     }
     path = artifact_dir / "ophanix-product-platform.cdx.json"
@@ -260,13 +402,53 @@ def _write_minimal_sbom(artifact_dir: Path, *, package_root: Path, artifacts: li
 
 def _project_version(package_root: Path) -> str:
     with (package_root / "pyproject.toml").open("rb") as handle:
-        import tomllib
-
         metadata = tomllib.load(handle)
     version_value = metadata.get("project", {}).get("version")
     if not isinstance(version_value, str) or not version_value:
         raise SystemExit("pyproject.toml is missing project.version")
     return version_value
+
+
+def _wheel_requires_dist(wheel: Path) -> list[str]:
+    return sorted(
+        {name for name, _spec in _wheel_requires_dist_entries(wheel)},
+        key=str.lower,
+    )
+
+
+def _wheel_requires_dist_specs(wheel: Path, *, exclude_names: set[str]) -> list[str]:
+    excluded = {_normalize_dependency_name(name) for name in exclude_names}
+    return [
+        spec
+        for name, spec in _wheel_requires_dist_entries(wheel)
+        if _normalize_dependency_name(name) not in excluded
+    ]
+
+
+def _wheel_requires_dist_entries(wheel: Path) -> list[tuple[str, str]]:
+    with zipfile.ZipFile(wheel) as archive:
+        metadata_name = next(
+            (name for name in archive.namelist() if name.endswith(".dist-info/METADATA")),
+            None,
+        )
+        if metadata_name is None:
+            raise SystemExit("Wheel is missing METADATA")
+        metadata = archive.read(metadata_name).decode("utf-8", errors="replace")
+    dependencies: list[tuple[str, str]] = []
+    for line in metadata.splitlines():
+        if not line.startswith("Requires-Dist:"):
+            continue
+        raw = line.partition(":")[2].strip()
+        if ";" in raw and "extra ==" in raw.split(";", 1)[1].lower():
+            continue
+        match = re.match(r"^([A-Za-z0-9_.-]+)", raw)
+        if match:
+            dependencies.append((match.group(1), raw))
+    return sorted(set(dependencies), key=lambda item: item[0].lower())
+
+
+def _normalize_dependency_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
 
 
 def _sha256_file(path: Path) -> str:

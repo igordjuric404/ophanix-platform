@@ -1,0 +1,4 @@
+DROP INDEX IF EXISTS idx_tool_gateway_circuit_breaker_state_opened;
+DROP TABLE IF EXISTS tool_gateway_circuit_breaker_state;
+DROP INDEX IF EXISTS idx_tool_gateway_rate_limit_windows_updated;
+DROP TABLE IF EXISTS tool_gateway_rate_limit_windows;

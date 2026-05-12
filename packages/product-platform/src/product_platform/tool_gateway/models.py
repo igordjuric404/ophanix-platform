@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
+import regex as safe_regex
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 SUPPORTED_TOOL_STATUSES = {"draft", "active", "disabled", "retired"}
@@ -159,6 +160,13 @@ class GatewayToolDefinitionResponse(BaseModel):
     required_scope: str
     input_schema_json: dict[str, Any] | None = None
     output_schema_json: dict[str, Any] | None = None
+
+
+class GatewayToolListPageResponse(BaseModel):
+    """Cursor-paginated Tool Gateway discovery page."""
+
+    tools: list[GatewayToolDefinitionResponse]
+    next_cursor: str | None = None
 
 
 class GatewayCapabilitiesResponse(BaseModel):
@@ -540,9 +548,9 @@ def validate_http_url(
         raise ValueError(f"{field} must not include a query string or fragment.")
     if parsed.scheme == "http":
         raise ValueError(f"{field} must use https for upstream targets.")
+    validate_upstream_host_allowed(stripped, allowed_hosts=allowed_hosts, field=field)
     if _is_forbidden_upstream_host(hostname):
         raise ValueError(f"{field} must not target private, loopback, link-local, or metadata hosts.")
-    validate_upstream_host_allowed(stripped, allowed_hosts=allowed_hosts, field=field)
     return stripped.rstrip("/")
 
 
@@ -698,8 +706,8 @@ def _looks_like_inline_secret_key(key: str, value: str) -> bool:
 
 def _validate_redaction_pattern(pattern: str) -> None:
     try:
-        re.compile(pattern)
-    except re.error as exc:
+        safe_regex.compile(pattern)
+    except safe_regex.error as exc:
         raise ValueError(f"invalid redaction regex pattern: {exc}") from exc
     if len(pattern) > 300:
         raise ValueError("redact_patterns entries must be 300 characters or fewer.")
@@ -744,12 +752,7 @@ def _allow_unresolved_upstream_hosts() -> bool:
     environment = os.environ.get("OPHANIX_ENVIRONMENT", "development").strip().lower()
     if _bool_env("OPHANIX_ALLOW_UNRESOLVED_UPSTREAM_HOSTS", False):
         return environment in {"development", "dev", "local", "test"}
-    return environment in {
-        "development",
-        "dev",
-        "local",
-        "test",
-    }
+    return False
 
 
 def _env_upstream_host_allowlist() -> list[str]:

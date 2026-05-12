@@ -85,6 +85,8 @@ MAX_ERROR_BODY_DEPTH = 20
 MAX_NON_JSON_ERROR_EXCERPT_BYTES = 2048
 DEFAULT_MAX_PAYLOAD_BYTES = 1_000_000
 DEFAULT_MAX_RESPONSE_BYTES = 1_000_000
+DEFAULT_MAX_PAYLOAD_DEPTH = 50
+DEFAULT_LIST_ALL_TOOLS_MAX_TOTAL = 10_000
 DEFAULT_MAX_CACHE_ENTRIES = 256
 MAX_GATEWAY_TOKEN_LENGTH = 4096
 MAX_IDEMPOTENCY_KEY_LENGTH = 128
@@ -95,7 +97,25 @@ _ToolCacheKey = tuple[str, str]
 _ListCacheKey = tuple[tuple[str, str], ...]
 _ToolCacheValue = tuple[float, "ToolDefinition"]
 _ListCacheValue = tuple[float, list["ToolDefinition"]]
-TelemetryEventHook = Callable[[Mapping[str, Any]], None]
+
+
+@dataclass(frozen=True)
+class _ToolListPage:
+    tools: list["ToolDefinition"]
+    next_cursor: str | None
+    cursor_supported: bool
+
+
+TelemetryEventName = Literal[
+    "tool_call.start",
+    "tool_call.retry",
+    "tool_call.denied",
+    "tool_call.error",
+    "tool_call.success",
+    "tool_discovery.retry",
+]
+TelemetryEvent = Mapping[str, Any]
+TelemetryEventHook = Callable[[TelemetryEvent], None]
 SENSITIVE_KEY_NAMES = frozenset(
     {
         "authorization",
@@ -161,6 +181,46 @@ class AsyncTokenProvider(Protocol):
         """Return, or awaitably return, the raw bearer token."""
 
 
+class SyncGatewayHttpClient(Protocol):
+    """Minimum sync HTTP adapter contract accepted by the SDK."""
+
+    def stream(self, method: str, url: str, **kwargs: Any) -> Any:
+        """Return a context manager yielding an HTTP response."""
+        ...
+
+    def get(self, url: str, **kwargs: Any) -> httpx.Response:
+        """Send a GET request."""
+        ...
+
+    def post(self, url: str, **kwargs: Any) -> httpx.Response:
+        """Send a POST request."""
+        ...
+
+    def close(self) -> None:
+        """Close the adapter."""
+        ...
+
+
+class AsyncGatewayHttpClient(Protocol):
+    """Minimum async HTTP adapter contract accepted by the async SDK."""
+
+    def stream(self, method: str, url: str, **kwargs: Any) -> Any:
+        """Return an async context manager yielding an HTTP response."""
+        ...
+
+    def get(self, url: str, **kwargs: Any) -> Awaitable[httpx.Response] | httpx.Response:
+        """Send a GET request."""
+        ...
+
+    def post(self, url: str, **kwargs: Any) -> Awaitable[httpx.Response] | httpx.Response:
+        """Send a POST request."""
+        ...
+
+    def aclose(self) -> Awaitable[None] | None:
+        """Close the adapter."""
+        ...
+
+
 @dataclass(frozen=True)
 class StaticTokenProvider:
     """Token provider for callers that already have a long-lived gateway token."""
@@ -224,6 +284,8 @@ class GatewayCompatibility:
     gateway_contract_version: str | None
     min_sdk_version: str | None = None
     raw: Mapping[str, Any] = field(default_factory=dict)
+    min_sdk_version_satisfied: bool = True
+    incompatibility_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -344,7 +406,7 @@ class OphanixToolGatewayClient:
         base_url: str,
         token_provider: TokenProvider,
         config: ToolGatewayClientConfig,
-        http_client: httpx.Client | None = None,
+        http_client: SyncGatewayHttpClient | httpx.Client | None = None,
         event_hook: TelemetryEventHook | None = None,
     ) -> "OphanixToolGatewayClient":
         """Construct a sync client from a reusable configuration object."""
@@ -384,7 +446,7 @@ class OphanixToolGatewayClient:
         max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
         max_cache_entries: int = DEFAULT_MAX_CACHE_ENTRIES,
-        http_client: httpx.Client | None = None,
+        http_client: SyncGatewayHttpClient | httpx.Client | None = None,
         cache_tools: bool = False,
         cache_ttl_seconds: float = DEFAULT_CACHE_TTL_SECONDS,
         event_hook: TelemetryEventHook | None = None,
@@ -461,7 +523,7 @@ class OphanixToolGatewayClient:
             http_client,
             allow_buffered_custom_http_client=config.allow_buffered_custom_http_client,
         )
-        self._http_client = http_client or httpx.Client(timeout=self.timeout_seconds)
+        self._http_client: Any = http_client or httpx.Client(timeout=self.timeout_seconds)
 
     def close(self) -> None:
         """Close the underlying HTTP client if this SDK instance created it."""
@@ -625,7 +687,7 @@ class OphanixToolGatewayClient:
         *,
         owner_team: str | None = None,
         page_size: int = 200,
-        max_total: int | None = None,
+        max_total: int | None = DEFAULT_LIST_ALL_TOOLS_MAX_TOTAL,
     ) -> list[ToolDefinition]:
         """List every callable tool by following gateway discovery pagination."""
 
@@ -639,26 +701,52 @@ class OphanixToolGatewayClient:
         auth_context = self._auth_context()
         tools: list[ToolDefinition] = []
         seen: set[str] = set()
+        cursor: str | None = None
+        cursor_supported = True
         offset = 0
+        while cursor_supported:
+            params = _tool_cursor_list_params(owner_team, page_size, cursor)
+            page = self._list_tools_page_with_auth(params, auth_context)
+            cursor_supported = page.cursor_supported
+            if not cursor_supported:
+                self._append_unique_tools(tools, seen, page.tools, max_total=max_total)
+                if len(page.tools) < page_size:
+                    return tools
+                offset = page_size
+                break
+            self._append_unique_tools(tools, seen, page.tools, max_total=max_total)
+            if page.next_cursor is None:
+                return tools
+            cursor = page.next_cursor
         while True:
             params = _tool_list_params(None, owner_team, page_size, offset)
-            page = self._list_tools_with_auth(params, auth_context)
-            new_tools: list[ToolDefinition] = []
-            for tool in page:
-                dedupe_key = tool.id or tool.name
-                if dedupe_key in seen:
-                    continue
-                seen.add(dedupe_key)
-                new_tools.append(tool)
-            if max_total is not None and len(tools) + len(new_tools) > max_total:
-                raise ToolGatewayError(
-                    "Tool discovery exceeded max_total.",
-                    code="tool_discovery_too_large",
-                )
-            tools.extend(new_tools)
-            if len(page) < page_size:
+            offset_page = self._list_tools_with_auth(params, auth_context)
+            self._append_unique_tools(tools, seen, offset_page, max_total=max_total)
+            if len(offset_page) < page_size:
                 return tools
             offset += page_size
+
+    def _append_unique_tools(
+        self,
+        tools: list[ToolDefinition],
+        seen: set[str],
+        page: list[ToolDefinition],
+        *,
+        max_total: int | None,
+    ) -> None:
+        new_tools: list[ToolDefinition] = []
+        for tool in page:
+            dedupe_key = tool.id or tool.name
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            new_tools.append(tool)
+        if max_total is not None and len(tools) + len(new_tools) > max_total:
+            raise ToolGatewayError(
+                "Tool discovery exceeded max_total.",
+                code="tool_discovery_too_large",
+            )
+        tools.extend(new_tools)
 
     def clear_tool_cache(self) -> None:
         """Clear cached discovery results when permissions or tool contracts change."""
@@ -705,6 +793,25 @@ class OphanixToolGatewayClient:
         if cached is not None:
             return cached
         page_size = 200
+        cursor: str | None = None
+        cursor_supported = True
+        while cursor_supported:
+            params = _tool_cursor_list_params(None, page_size, cursor)
+            page = self._list_tools_page_with_auth(params, auth_context)
+            cursor_supported = page.cursor_supported
+            if not cursor_supported:
+                break
+            for tool in page.tools:
+                if tool.name == normalized_tool_name or tool.id == normalized_tool_name:
+                    return tool
+            if page.next_cursor is None:
+                raise ToolGatewayError(
+                    f"Tool is not visible through gateway discovery: "
+                    f"{_safe_lookup_text(normalized_tool_name)}",
+                    status_code=404,
+                    code="tool_not_visible",
+                )
+            cursor = page.next_cursor
         offset = 0
         while True:
             params = _tool_list_params(None, None, page_size, offset)
@@ -784,6 +891,40 @@ class OphanixToolGatewayClient:
                 )
                 _trim_cache(self._list_cache, self.max_cache_entries)
         return tools
+
+    def _list_tools_page_with_auth(
+        self,
+        params: list[tuple[str, str]],
+        auth_context: _AuthContext,
+    ) -> _ToolListPage:
+        response = self._get_discovery_response(params, headers=auth_context.headers)
+        response_data = _response_data(response, max_response_bytes=self.max_response_bytes)
+        if response.status_code >= 400:
+            _raise_gateway_error(
+                _mapping_response(response_data),
+                response.status_code,
+                retry_after_seconds=_retry_after_seconds(response),
+            )
+        if isinstance(response_data, list):
+            tools = [
+                _tool_definition(_require_mapping(item, "tool definition"))
+                for item in response_data
+            ]
+            return _ToolListPage(tools=tools, next_cursor=None, cursor_supported=False)
+        page = _require_mapping(response_data, "tool discovery page")
+        tools_value = page.get("tools")
+        if not isinstance(tools_value, list):
+            raise ToolGatewayError(
+                "Tool Gateway returned an invalid tools page.",
+                code="invalid_response",
+            )
+        next_cursor = _optional_response_string_field(page, "next_cursor")
+        tools = [
+            _tool_definition(_require_mapping(item, "tool definition"))
+            for item in tools_value
+        ]
+        self._remember_tools(tools, credential_cache_key=auth_context.cache_key)
+        return _ToolListPage(tools=tools, next_cursor=next_cursor, cursor_supported=True)
 
     def _get_discovery_response(
         self,
@@ -974,7 +1115,7 @@ class AsyncOphanixToolGatewayClient:
         base_url: str,
         token_provider: TokenProvider | AsyncTokenProvider,
         config: ToolGatewayClientConfig,
-        http_client: httpx.AsyncClient | None = None,
+        http_client: AsyncGatewayHttpClient | httpx.AsyncClient | None = None,
         event_hook: TelemetryEventHook | None = None,
     ) -> "AsyncOphanixToolGatewayClient":
         """Construct an async client from a reusable configuration object."""
@@ -1014,7 +1155,7 @@ class AsyncOphanixToolGatewayClient:
         max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
         max_cache_entries: int = DEFAULT_MAX_CACHE_ENTRIES,
-        http_client: httpx.AsyncClient | None = None,
+        http_client: AsyncGatewayHttpClient | httpx.AsyncClient | None = None,
         cache_tools: bool = False,
         cache_ttl_seconds: float = DEFAULT_CACHE_TTL_SECONDS,
         event_hook: TelemetryEventHook | None = None,
@@ -1078,7 +1219,7 @@ class AsyncOphanixToolGatewayClient:
         self.raise_event_hook_errors = _require_bool(raise_event_hook_errors, "raise_event_hook_errors")
         self._sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
         self._random: Callable[[], float] = random.random
-        self._cache_lock = threading.RLock()
+        self._cache_lock = asyncio.Lock()
         self._tool_cache: dict[_ToolCacheKey, _ToolCacheValue] | None = (
             {} if self.cache_tools else None
         )
@@ -1091,7 +1232,7 @@ class AsyncOphanixToolGatewayClient:
             http_client,
             allow_buffered_custom_http_client=config.allow_buffered_custom_http_client,
         )
-        self._http_client = http_client or httpx.AsyncClient(timeout=self.timeout_seconds)
+        self._http_client: Any = http_client or httpx.AsyncClient(timeout=self.timeout_seconds)
 
     async def close(self) -> None:
         """Close the underlying HTTP client if this SDK instance created it."""
@@ -1255,7 +1396,7 @@ class AsyncOphanixToolGatewayClient:
         *,
         owner_team: str | None = None,
         page_size: int = 200,
-        max_total: int | None = None,
+        max_total: int | None = DEFAULT_LIST_ALL_TOOLS_MAX_TOTAL,
     ) -> list[ToolDefinition]:
         """List every callable tool by following gateway discovery pagination."""
 
@@ -1269,31 +1410,65 @@ class AsyncOphanixToolGatewayClient:
         auth_context = await self._auth_context()
         tools: list[ToolDefinition] = []
         seen: set[str] = set()
+        cursor: str | None = None
+        cursor_supported = True
         offset = 0
+        while cursor_supported:
+            params = _tool_cursor_list_params(owner_team, page_size, cursor)
+            page = await self._list_tools_page_with_auth(params, auth_context)
+            cursor_supported = page.cursor_supported
+            if not cursor_supported:
+                self._append_unique_tools(tools, seen, page.tools, max_total=max_total)
+                if len(page.tools) < page_size:
+                    return tools
+                offset = page_size
+                break
+            self._append_unique_tools(tools, seen, page.tools, max_total=max_total)
+            if page.next_cursor is None:
+                return tools
+            cursor = page.next_cursor
         while True:
             params = _tool_list_params(None, owner_team, page_size, offset)
-            page = await self._list_tools_with_auth(params, auth_context)
-            new_tools: list[ToolDefinition] = []
-            for tool in page:
-                dedupe_key = tool.id or tool.name
-                if dedupe_key in seen:
-                    continue
-                seen.add(dedupe_key)
-                new_tools.append(tool)
-            if max_total is not None and len(tools) + len(new_tools) > max_total:
-                raise ToolGatewayError(
-                    "Tool discovery exceeded max_total.",
-                    code="tool_discovery_too_large",
-                )
-            tools.extend(new_tools)
-            if len(page) < page_size:
+            offset_page = await self._list_tools_with_auth(params, auth_context)
+            self._append_unique_tools(tools, seen, offset_page, max_total=max_total)
+            if len(offset_page) < page_size:
                 return tools
             offset += page_size
+
+    def _append_unique_tools(
+        self,
+        tools: list[ToolDefinition],
+        seen: set[str],
+        page: list[ToolDefinition],
+        *,
+        max_total: int | None,
+    ) -> None:
+        new_tools: list[ToolDefinition] = []
+        for tool in page:
+            dedupe_key = tool.id or tool.name
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            new_tools.append(tool)
+        if max_total is not None and len(tools) + len(new_tools) > max_total:
+            raise ToolGatewayError(
+                "Tool discovery exceeded max_total.",
+                code="tool_discovery_too_large",
+            )
+        tools.extend(new_tools)
 
     def clear_tool_cache(self) -> None:
         """Clear cached discovery results when permissions or tool contracts change."""
 
-        with self._cache_lock:
+        if self._tool_cache is not None:
+            self._tool_cache.clear()
+        if self._list_cache is not None:
+            self._list_cache.clear()
+
+    async def aclear_tool_cache(self) -> None:
+        """Asynchronously clear cached discovery results."""
+
+        async with self._cache_lock:
             if self._tool_cache is not None:
                 self._tool_cache.clear()
             if self._list_cache is not None:
@@ -1331,10 +1506,29 @@ class AsyncOphanixToolGatewayClient:
         normalized_tool_name = _require_text(tool_name, "tool_name")
         auth_context = await self._auth_context()
         cache_key = _tool_cache_key(auth_context.cache_key, normalized_tool_name)
-        cached = self._cached_tool(cache_key)
+        cached = await self._cached_tool(cache_key)
         if cached is not None:
             return cached
         page_size = 200
+        cursor: str | None = None
+        cursor_supported = True
+        while cursor_supported:
+            params = _tool_cursor_list_params(None, page_size, cursor)
+            page = await self._list_tools_page_with_auth(params, auth_context)
+            cursor_supported = page.cursor_supported
+            if not cursor_supported:
+                break
+            for tool in page.tools:
+                if tool.name == normalized_tool_name or tool.id == normalized_tool_name:
+                    return tool
+            if page.next_cursor is None:
+                raise ToolGatewayError(
+                    f"Tool is not visible through gateway discovery: "
+                    f"{_safe_lookup_text(normalized_tool_name)}",
+                    status_code=404,
+                    code="tool_not_visible",
+                )
+            cursor = page.next_cursor
         offset = 0
         while True:
             params = _tool_list_params(None, None, page_size, offset)
@@ -1381,7 +1575,7 @@ class AsyncOphanixToolGatewayClient:
         auth_context: _AuthContext,
     ) -> list[ToolDefinition]:
         cache_key = _list_cache_key(auth_context.cache_key, params)
-        cached = self._cached_list(cache_key)
+        cached = await self._cached_list(cache_key)
         if cached is not None:
             return cached
         response = await self._get_discovery_response(params, headers=auth_context.headers)
@@ -1401,15 +1595,49 @@ class AsyncOphanixToolGatewayClient:
             _tool_definition(_require_mapping(item, "tool definition"))
             for item in response_data
         ]
-        self._remember_tools(tools, credential_cache_key=auth_context.cache_key)
+        await self._remember_tools(tools, credential_cache_key=auth_context.cache_key)
         if self._list_cache is not None:
-            with self._cache_lock:
+            async with self._cache_lock:
                 self._list_cache[cache_key] = (
                     self._cache_deadline(),
                     [_clone_tool_definition(tool) for tool in tools],
                 )
                 _trim_cache(self._list_cache, self.max_cache_entries)
         return tools
+
+    async def _list_tools_page_with_auth(
+        self,
+        params: list[tuple[str, str]],
+        auth_context: _AuthContext,
+    ) -> _ToolListPage:
+        response = await self._get_discovery_response(params, headers=auth_context.headers)
+        response_data = _response_data(response, max_response_bytes=self.max_response_bytes)
+        if response.status_code >= 400:
+            _raise_gateway_error(
+                _mapping_response(response_data),
+                response.status_code,
+                retry_after_seconds=_retry_after_seconds(response),
+            )
+        if isinstance(response_data, list):
+            tools = [
+                _tool_definition(_require_mapping(item, "tool definition"))
+                for item in response_data
+            ]
+            return _ToolListPage(tools=tools, next_cursor=None, cursor_supported=False)
+        page = _require_mapping(response_data, "tool discovery page")
+        tools_value = page.get("tools")
+        if not isinstance(tools_value, list):
+            raise ToolGatewayError(
+                "Tool Gateway returned an invalid tools page.",
+                code="invalid_response",
+            )
+        next_cursor = _optional_response_string_field(page, "next_cursor")
+        tools = [
+            _tool_definition(_require_mapping(item, "tool definition"))
+            for item in tools_value
+        ]
+        await self._remember_tools(tools, credential_cache_key=auth_context.cache_key)
+        return _ToolListPage(tools=tools, next_cursor=next_cursor, cursor_supported=True)
 
     async def _get_discovery_response(
         self,
@@ -1534,11 +1762,11 @@ class AsyncOphanixToolGatewayClient:
         jitter = float(1 + ((self._random() * 2 - 1) * self.discovery_retry_jitter_ratio))
         return float(min(delay * jitter, self.discovery_retry_max_sleep_seconds))
 
-    def _remember_tools(self, tools: list[ToolDefinition], *, credential_cache_key: str) -> None:
+    async def _remember_tools(self, tools: list[ToolDefinition], *, credential_cache_key: str) -> None:
         if self._tool_cache is None:
             return
         deadline = self._cache_deadline()
-        with self._cache_lock:
+        async with self._cache_lock:
             for tool in tools:
                 self._tool_cache[_tool_cache_key(credential_cache_key, tool.name)] = (
                     deadline,
@@ -1550,10 +1778,10 @@ class AsyncOphanixToolGatewayClient:
                 )
             _trim_cache(self._tool_cache, self.max_cache_entries)
 
-    def _cached_tool(self, cache_key: _ToolCacheKey) -> ToolDefinition | None:
+    async def _cached_tool(self, cache_key: _ToolCacheKey) -> ToolDefinition | None:
         if self._tool_cache is None:
             return None
-        with self._cache_lock:
+        async with self._cache_lock:
             cached = self._tool_cache.get(cache_key)
             if cached is None:
                 return None
@@ -1563,10 +1791,10 @@ class AsyncOphanixToolGatewayClient:
                 return None
             return _clone_tool_definition(tool)
 
-    def _cached_list(self, cache_key: _ListCacheKey) -> list[ToolDefinition] | None:
+    async def _cached_list(self, cache_key: _ListCacheKey) -> list[ToolDefinition] | None:
         if self._list_cache is None:
             return None
-        with self._cache_lock:
+        async with self._cache_lock:
             cached = self._list_cache.get(cache_key)
             if cached is None:
                 return None
@@ -1743,14 +1971,15 @@ def _validate_sync_http_client(
     *,
     allow_buffered_custom_http_client: bool,
 ) -> None:
+    _ = allow_buffered_custom_http_client
     if http_client is None:
         return
     if isinstance(http_client, httpx.AsyncClient):
         raise ToolGatewayValidationError("http_client must be an httpx.Client-compatible sync client")
-    if not allow_buffered_custom_http_client and not callable(getattr(http_client, "stream", None)):
+    if not callable(getattr(http_client, "stream", None)):
         raise ToolGatewayValidationError(
-            "http_client must provide stream(); pass allow_buffered_custom_http_client=True "
-            "only if the injected client enforces equivalent response-size limits."
+            "http_client must provide stream(); buffered custom HTTP clients are not supported "
+            "because SDK response-size caps require streaming."
         )
     for method_name in ("get", "post", "close"):
         if not callable(getattr(http_client, method_name, None)):
@@ -1762,14 +1991,15 @@ def _validate_async_http_client(
     *,
     allow_buffered_custom_http_client: bool,
 ) -> None:
+    _ = allow_buffered_custom_http_client
     if http_client is None:
         return
     if isinstance(http_client, httpx.Client):
         raise ToolGatewayValidationError("http_client must be an httpx.AsyncClient-compatible async client")
-    if not allow_buffered_custom_http_client and not callable(getattr(http_client, "stream", None)):
+    if not callable(getattr(http_client, "stream", None)):
         raise ToolGatewayValidationError(
-            "http_client must provide async stream(); pass allow_buffered_custom_http_client=True "
-            "only if the injected client enforces equivalent response-size limits."
+            "http_client must provide async stream(); buffered custom HTTP clients are not supported "
+            "because SDK response-size caps require streaming."
         )
     for method_name in ("get", "post", "aclose"):
         if not callable(getattr(http_client, method_name, None)):
@@ -1807,6 +2037,26 @@ def _tool_list_params(
         params.append(("owner_team", normalized_owner_team))
     params.append(("limit", str(limit)))
     params.append(("offset", str(offset)))
+    return params
+
+
+def _tool_cursor_list_params(
+    owner_team: str | None,
+    limit: int,
+    cursor: str | None,
+) -> list[tuple[str, str]]:
+    limit = _require_integer(limit, "limit")
+    if limit <= 0:
+        raise ToolGatewayValidationError("limit must be greater than zero")
+    if limit > 200:
+        raise ToolGatewayValidationError("limit must be less than or equal to 200")
+    params: list[tuple[str, str]] = [("pagination", "cursor"), ("limit", str(limit))]
+    normalized_owner_team = _optional_text(owner_team)
+    if normalized_owner_team is not None:
+        params.append(("owner_team", normalized_owner_team))
+    normalized_cursor = _optional_text(cursor)
+    if normalized_cursor is not None:
+        params.append(("cursor", normalized_cursor))
     return params
 
 
@@ -1871,14 +2121,43 @@ def _tool_definition(body: dict[str, Any]) -> ToolDefinition:
 def _gateway_compatibility(body: dict[str, Any]) -> GatewayCompatibility:
     gateway_contract_version = _optional_response_string_field(body, "gateway_contract_version")
     min_sdk_version = _optional_response_string_field(body, "min_sdk_version")
+    contract_compatible = gateway_contract_version == SDK_GATEWAY_CONTRACT_VERSION
+    min_sdk_version_satisfied = _version_at_least(SDK_VERSION, min_sdk_version)
+    incompatibility_reason: str | None = None
+    if not contract_compatible:
+        incompatibility_reason = "gateway_contract_version_mismatch"
+    elif not min_sdk_version_satisfied:
+        incompatibility_reason = "sdk_version_below_gateway_minimum"
     return GatewayCompatibility(
-        compatible=gateway_contract_version == SDK_GATEWAY_CONTRACT_VERSION,
+        compatible=contract_compatible and min_sdk_version_satisfied,
         sdk_version=SDK_VERSION,
         expected_gateway_contract_version=SDK_GATEWAY_CONTRACT_VERSION,
         gateway_contract_version=gateway_contract_version,
         min_sdk_version=min_sdk_version,
         raw=_immutable_mapping(body),
+        min_sdk_version_satisfied=min_sdk_version_satisfied,
+        incompatibility_reason=incompatibility_reason,
     )
+
+
+def _version_at_least(current: str, minimum: str | None) -> bool:
+    if minimum is None:
+        return True
+    current_parts = _version_parts(current)
+    minimum_parts = _version_parts(minimum)
+    if current_parts is None or minimum_parts is None:
+        return False
+    max_length = max(len(current_parts), len(minimum_parts))
+    padded_current = current_parts + (0,) * (max_length - len(current_parts))
+    padded_minimum = minimum_parts + (0,) * (max_length - len(minimum_parts))
+    return padded_current >= padded_minimum
+
+
+def _version_parts(value: str) -> tuple[int, ...] | None:
+    match = re.match(r"^\s*(\d+(?:\.\d+)*)", value)
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.group(1).split("."))
 
 
 def _clone_tool_definition(tool: ToolDefinition) -> ToolDefinition:
@@ -2307,10 +2586,13 @@ def _require_json_object(
     field_name: str,
     *,
     max_bytes: int | None = None,
+    max_depth: int = DEFAULT_MAX_PAYLOAD_DEPTH,
 ) -> None:
     if not isinstance(value, dict):
         raise ToolGatewayValidationError(f"{field_name} must be a dictionary")
-    _validate_json_value(value, field_name, seen=set())
+    if max_depth <= 0:
+        raise ToolGatewayValidationError("max_depth must be greater than zero")
+    _validate_json_value(value, field_name, seen=set(), depth=0, max_depth=max_depth)
     try:
         serialized = json.dumps(value, allow_nan=False)
     except (TypeError, ValueError) as exc:
@@ -2319,7 +2601,16 @@ def _require_json_object(
         raise ToolGatewayValidationError(f"{field_name} exceeds max_payload_bytes")
 
 
-def _validate_json_value(value: object, field_name: str, *, seen: set[int]) -> None:
+def _validate_json_value(
+    value: object,
+    field_name: str,
+    *,
+    seen: set[int],
+    depth: int,
+    max_depth: int,
+) -> None:
+    if depth > max_depth:
+        raise ToolGatewayValidationError(f"{field_name} exceeds maximum nesting depth")
     if isinstance(value, dict):
         object_id = id(value)
         if object_id in seen:
@@ -2328,7 +2619,13 @@ def _validate_json_value(value: object, field_name: str, *, seen: set[int]) -> N
         for key, child_value in value.items():
             if not isinstance(key, str):
                 raise ToolGatewayValidationError(f"{field_name} keys must be strings")
-            _validate_json_value(child_value, field_name, seen=seen)
+            _validate_json_value(
+                child_value,
+                field_name,
+                seen=seen,
+                depth=depth + 1,
+                max_depth=max_depth,
+            )
         seen.remove(object_id)
         return
     if isinstance(value, list):
@@ -2337,7 +2634,13 @@ def _validate_json_value(value: object, field_name: str, *, seen: set[int]) -> N
             raise ToolGatewayValidationError(f"{field_name} must not contain cycles")
         seen.add(object_id)
         for child_value in value:
-            _validate_json_value(child_value, field_name, seen=seen)
+            _validate_json_value(
+                child_value,
+                field_name,
+                seen=seen,
+                depth=depth + 1,
+                max_depth=max_depth,
+            )
         seen.remove(object_id)
         return
     if isinstance(value, float) and not math.isfinite(value):

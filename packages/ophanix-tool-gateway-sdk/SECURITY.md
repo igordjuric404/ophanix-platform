@@ -55,3 +55,12 @@ and correlation IDs when possible.
   for production agents.
 - Do not implement automatic retries for mutating tool calls unless the gateway
   and tool contract provide idempotency semantics.
+- Treat SDK diagnostic redaction as best-effort. It covers common structured
+  credential and PII keys plus common token-like text, but it is not a substitute
+  for avoiding sensitive free text in application logs.
+- Use the SDK instead of direct HTTP examples for production agents unless the
+  direct caller implements equivalent URL validation, token handling, response
+  caps, timeout, retry, error-redaction, and idempotency controls.
+- Response redaction regexes are operator-authored policy. Keep patterns short,
+  simple, and reviewed; do not use untrusted user-provided regexes as Tool
+  Gateway redaction policy.

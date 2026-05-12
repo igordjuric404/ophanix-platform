@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -32,6 +33,17 @@ class ToolGatewaySdkPackageTests(unittest.TestCase):
                 (standalone_package / relative_path).read_bytes(),
                 relative_path,
             )
+
+    def test_product_wheel_depends_on_sdk_instead_of_shipping_duplicate_top_level_package(self) -> None:
+        metadata = tomllib.loads((self.product_platform_root / "pyproject.toml").read_text())
+        dependencies = metadata["project"]["dependencies"]
+        wheel_packages = metadata["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"]
+
+        self.assertIn("src/product_platform", wheel_packages)
+        self.assertNotIn("src/ophanix_tool_gateway", wheel_packages)
+        self.assertTrue(
+            any(dependency.startswith("ophanix-tool-gateway-sdk") for dependency in dependencies)
+        )
 
     def test_standalone_package_imports_from_its_src_layout(self) -> None:
         env = {**os.environ, "PYTHONPATH": str(self.standalone_src)}

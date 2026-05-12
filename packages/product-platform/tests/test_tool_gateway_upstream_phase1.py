@@ -190,6 +190,40 @@ class ToolGatewayUpstreamPhase1Tests(unittest.TestCase):
 
         self.assertIn("private", str(context.exception))
 
+    def test_unit_unresolved_dns_upstream_url_fails_closed_in_local_env_without_explicit_opt_in(self) -> None:
+        with patch.dict(os.environ, {"OPHANIX_ENVIRONMENT": "test"}, clear=True):
+            with patch(
+                "product_platform.tool_gateway.models.socket.getaddrinfo",
+                side_effect=socket.gaierror("unresolved"),
+            ):
+                with self.assertRaises(ValidationError) as context:
+                    ToolUpstreamTargetCreateRequest(
+                        base_url="https://unresolved.example.com",
+                        path_template="/claims",
+                    )
+
+        self.assertIn("private", str(context.exception))
+
+    def test_unit_unresolved_dns_upstream_url_requires_explicit_local_opt_in(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OPHANIX_ENVIRONMENT": "test",
+                "OPHANIX_ALLOW_UNRESOLVED_UPSTREAM_HOSTS": "true",
+            },
+            clear=True,
+        ):
+            with patch(
+                "product_platform.tool_gateway.models.socket.getaddrinfo",
+                side_effect=socket.gaierror("unresolved"),
+            ):
+                target = ToolUpstreamTargetCreateRequest(
+                    base_url="https://unresolved.example.com",
+                    path_template="/claims",
+                )
+
+        self.assertEqual(target.base_url, "https://unresolved.example.com")
+
     def test_unit_unresolved_host_bypass_is_ignored_outside_local_envs(self) -> None:
         with patch.dict(
             os.environ,

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0
+## 0.1.0 - 2026-05-12
 
 - Initial beta package for the Ophanix Tool Gateway Python SDK.
 - Provides synchronous and asynchronous clients, environment and static token
@@ -23,3 +23,10 @@
   present.
 - Release validation now writes a local CycloneDX SBOM with artifact hashes and
   records the publish-workflow provenance requirement in the release manifest.
+- Compatibility probing now fails closed when gateway `min_sdk_version` is
+  higher than the installed SDK version.
+- Adds a payload nesting-depth cap, typed custom HTTP adapter Protocols, typed
+  telemetry event aliases, and a default `list_all_tools()` total cap.
+- Documents PyPI-first installation, local dev-login credential issuance,
+  diagnostic `raw` field stability, idempotency stale outcomes, and release
+  dependency-audit expectations.

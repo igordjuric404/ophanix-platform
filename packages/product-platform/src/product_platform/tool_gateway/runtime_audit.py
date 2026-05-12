@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import json
-from product_platform.db.postgres import Connection, IntegrityError, Row
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
+from product_platform.db.postgres import Connection, IntegrityError, Row
 from product_platform.db.ids import generate_id
 from product_platform.db.time import utc_now_iso
 from product_platform.tool_gateway.decision import summarize_tool_payload
+
+DEFAULT_IDEMPOTENCY_IN_PROGRESS_TTL_SECONDS = 600
+DEFAULT_IDEMPOTENCY_REPLAY_RETENTION_SECONDS = 7 * 24 * 60 * 60
 
 TOOL_RUNTIME_ACTION_STATUSES = {
     "authentication_failed",
@@ -389,6 +393,10 @@ class ToolInvocationIdempotencyInProgressError(ValueError):
     """Raised when an idempotent invocation is already running and has no replay yet."""
 
 
+class ToolInvocationIdempotencyStaleError(ValueError):
+    """Raised when a prior invocation's outcome is no longer knowable."""
+
+
 class ToolInvocationIdempotencyRepository:
     """Persistence for idempotent Tool Gateway invocation replay records."""
 
@@ -406,6 +414,7 @@ class ToolInvocationIdempotencyRepository:
         request_hash: str,
         request_id: str,
         correlation_id: str | None,
+        in_progress_ttl_seconds: int = DEFAULT_IDEMPOTENCY_IN_PROGRESS_TTL_SECONDS,
     ) -> tuple[bool, Row]:
         """Create or load a replay record.
 
@@ -413,13 +422,19 @@ class ToolInvocationIdempotencyRepository:
         previously completed invocation that can be replayed.
         """
 
+        if in_progress_ttl_seconds <= 0:
+            raise ValueError("in_progress_ttl_seconds must be greater than zero.")
         existing = self.get_record(
             credential_id=credential_id,
             tool_id=tool_id,
             idempotency_key=idempotency_key,
         )
         if existing is not None:
-            return False, self._validated_existing(existing, request_hash=request_hash)
+            return False, self._validated_existing(
+                existing,
+                request_hash=request_hash,
+                in_progress_ttl_seconds=in_progress_ttl_seconds,
+            )
         record_id = generate_id("toolidem")
         now = utc_now_iso()
         try:
@@ -459,7 +474,11 @@ class ToolInvocationIdempotencyRepository:
             )
             if existing is None:
                 raise
-            return False, self._validated_existing(existing, request_hash=request_hash)
+            return False, self._validated_existing(
+                existing,
+                request_hash=request_hash,
+                in_progress_ttl_seconds=in_progress_ttl_seconds,
+            )
         row = self.get_record(
             credential_id=credential_id,
             tool_id=tool_id,
@@ -550,16 +569,95 @@ class ToolInvocationIdempotencyRepository:
             ),
         ).fetchone()
 
-    def _validated_existing(self, row: Row, *, request_hash: str) -> Row:
+    def _validated_existing(
+        self,
+        row: Row,
+        *,
+        request_hash: str,
+        in_progress_ttl_seconds: int,
+    ) -> Row:
         if row["request_hash"] != request_hash:
             raise ToolInvocationIdempotencyConflictError(
                 "Idempotency key was already used with different request content."
             )
-        if row["status"] != "completed" or row["response_body_json"] is None:
-            raise ToolInvocationIdempotencyInProgressError(
-                "Idempotent invocation is still in progress."
+        status = str(row["status"])
+        if status == "completed" and row["response_body_json"] is not None:
+            return row
+        if status in {"failed_unknown", "expired"}:
+            raise ToolInvocationIdempotencyStaleError(
+                "Idempotent invocation outcome is unknown; use a new idempotency key."
             )
-        return row
+        if _idempotency_record_is_stale(row, in_progress_ttl_seconds):
+            self._mark_failed_unknown(str(row["id"]))
+            raise ToolInvocationIdempotencyStaleError(
+                "Idempotent invocation outcome is unknown; use a new idempotency key."
+            )
+        raise ToolInvocationIdempotencyInProgressError(
+            "Idempotent invocation is still in progress."
+        )
+
+    def _mark_failed_unknown(self, record_id: str) -> None:
+        self.connection.execute(
+            """
+            UPDATE tool_invocation_idempotency_records
+            SET status = ?,
+                error_code = ?,
+                updated_at = ?
+            WHERE id = ?
+              AND organization_id = ?
+              AND environment_id = ?
+              AND status <> 'completed'
+            """,
+            (
+                "failed_unknown",
+                "idempotency_outcome_unknown",
+                utc_now_iso(),
+                record_id,
+                self.organization_id,
+                self.environment_id,
+            ),
+        )
+
+
+def purge_tool_invocation_idempotency_records(
+    connection: Connection,
+    *,
+    retention_seconds: int = DEFAULT_IDEMPOTENCY_REPLAY_RETENTION_SECONDS,
+    now: str | None = None,
+) -> int:
+    """Delete replay records older than the configured replay retention window."""
+
+    if retention_seconds <= 0:
+        raise ValueError("retention_seconds must be greater than zero.")
+    cutoff = _iso_minus_seconds(now or utc_now_iso(), retention_seconds)
+    cursor = connection.execute(
+        """
+        DELETE FROM tool_invocation_idempotency_records
+        WHERE status IN ('completed', 'failed_unknown', 'expired')
+          AND updated_at < ?
+        """,
+        (cutoff,),
+    )
+    return max(0, int(getattr(cursor, "rowcount", 0)))
+
+
+def _idempotency_record_is_stale(row: Row, in_progress_ttl_seconds: int) -> bool:
+    updated_at = _parse_utc_datetime(str(row["updated_at"] or row["created_at"]))
+    return datetime.now(timezone.utc) - updated_at > timedelta(seconds=in_progress_ttl_seconds)
+
+
+def _iso_minus_seconds(value: str, seconds: int) -> str:
+    return (_parse_utc_datetime(value) - timedelta(seconds=seconds)).isoformat()
+
+
+def _parse_utc_datetime(value: str) -> datetime:
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = f"{normalized[:-1]}+00:00"
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def idempotency_response_body(row: Row) -> dict[str, Any]:

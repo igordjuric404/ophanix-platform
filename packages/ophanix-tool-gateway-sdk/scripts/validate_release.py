@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -80,7 +81,7 @@ def main() -> int:
             )
         if args.require_dependency_audit:
             _validate_runtime_dependency_audit(wheel)
-        sbom = _write_minimal_sbom(artifact_dir, package_root=package_root, artifacts=[wheel, sdist])
+        sbom = _write_minimal_sbom(artifact_dir, package_root=package_root, wheel=wheel, artifacts=[wheel, sdist])
         _write_release_manifest(
             artifact_dir,
             package_root=package_root,
@@ -323,7 +324,14 @@ def _write_release_manifest(
     )
 
 
-def _write_minimal_sbom(artifact_dir: Path, *, package_root: Path, artifacts: list[Path]) -> Path:
+def _write_minimal_sbom(
+    artifact_dir: Path,
+    *,
+    package_root: Path,
+    wheel: Path,
+    artifacts: list[Path],
+) -> Path:
+    dependencies = _wheel_requires_dist(wheel)
     sbom = {
         "bomFormat": "CycloneDX",
         "specVersion": "1.5",
@@ -343,6 +351,13 @@ def _write_minimal_sbom(artifact_dir: Path, *, package_root: Path, artifacts: li
                 "hashes": [{"alg": "SHA-256", "content": _sha256_file(artifact)}],
             }
             for artifact in artifacts
+        ]
+        + [
+            {
+                "type": "library",
+                "name": dependency,
+            }
+            for dependency in dependencies
         ],
     }
     path = artifact_dir / "ophanix-tool-gateway-sdk.cdx.json"
@@ -356,6 +371,28 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _wheel_requires_dist(wheel: Path) -> list[str]:
+    with zipfile.ZipFile(wheel) as archive:
+        metadata_name = next(
+            (name for name in archive.namelist() if name.endswith(".dist-info/METADATA")),
+            None,
+        )
+        if metadata_name is None:
+            raise SystemExit("Wheel is missing METADATA")
+        metadata = archive.read(metadata_name).decode("utf-8", errors="replace")
+    dependencies: list[str] = []
+    for line in metadata.splitlines():
+        if not line.startswith("Requires-Dist:"):
+            continue
+        raw = line.partition(":")[2].strip()
+        if ";" in raw and "extra ==" in raw.split(";", 1)[1].lower():
+            continue
+        match = re.match(r"^([A-Za-z0-9_.-]+)", raw)
+        if match:
+            dependencies.append(match.group(1))
+    return sorted(set(dependencies), key=str.lower)
 
 
 def _run(command: list[str], *, cwd: Path) -> None:

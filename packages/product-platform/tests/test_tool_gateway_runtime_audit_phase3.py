@@ -5,13 +5,18 @@ import unittest
 from fastapi.testclient import TestClient
 
 from product_platform import create_app
+from product_platform.agents.credentials import AgentCredentialRepository
+from product_platform.agents.models import CredentialScopeRequest
 from product_platform.api.settings import Settings
-from product_platform.db.seed import DEMO_ENV_ID, DEMO_ORG_ID, seed_demo_data
+from product_platform.db.seed import DEMO_ADMIN_USER_ID, DEMO_ENV_ID, DEMO_ORG_ID, seed_demo_data
 from product_platform.db.testing import create_migrated_test_database
+from product_platform.tool_gateway.models import ToolDefinitionCreateRequest
+from product_platform.tool_gateway.repository import ToolRegistryRepository
 from product_platform.tool_gateway.runtime_audit import (
     ToolRuntimeActionCreate,
     ToolRuntimeActionEventCreate,
     ToolRuntimeActionRepository,
+    purge_tool_invocation_idempotency_records,
 )
 
 
@@ -125,6 +130,120 @@ class ToolGatewayRuntimeAuditPhase3Tests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404, response.text)
 
+    def test_idempotency_cleanup_removes_only_old_terminal_records(self) -> None:
+        with self.database.transaction() as connection:
+            self._insert_cleanup_agent(connection)
+            tool = ToolRegistryRepository(connection, DEMO_ORG_ID, DEMO_ENV_ID).create_tool(
+                ToolDefinitionCreateRequest(
+                    name="claims.cleanup",
+                    display_name="Claims Cleanup",
+                    owner_team="claims-platform",
+                    required_scope="claims.cleanup:read",
+                ),
+                created_by=DEMO_ADMIN_USER_ID,
+            )
+            credential = AgentCredentialRepository(
+                connection,
+                DEMO_ORG_ID,
+                DEMO_ENV_ID,
+            ).create_metadata(
+                agent_id="agent_cleanup",
+                credential_type="bearer",
+                raw_token="cleanup-token",
+                issuer="cleanup-test",
+                expires_at="2030-01-01T00:00:00+00:00",
+                scopes=[
+                    CredentialScopeRequest(
+                        scope="claims.cleanup:read",
+                        resource_type="tool",
+                        resource_id="claims.cleanup",
+                    )
+                ],
+            )
+            connection.execute(
+                """
+                INSERT INTO tool_invocation_idempotency_records (
+                    id, organization_id, environment_id, credential_id, tool_id,
+                    idempotency_key, request_hash, request_id, correlation_id,
+                    status, response_status_code, response_body_json, error_code,
+                    created_at, updated_at
+                )
+                VALUES
+                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?),
+                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?),
+                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "toolidem_cleanup_old",
+                    DEMO_ORG_ID,
+                    DEMO_ENV_ID,
+                    credential["id"],
+                    tool["id"],
+                    "old-key",
+                    "hash-old",
+                    "req-old",
+                    None,
+                    "completed",
+                    200,
+                    "{}",
+                    None,
+                    "2026-05-01T00:00:00+00:00",
+                    "2026-05-01T00:00:00+00:00",
+                    "toolidem_cleanup_recent",
+                    DEMO_ORG_ID,
+                    DEMO_ENV_ID,
+                    credential["id"],
+                    tool["id"],
+                    "recent-key",
+                    "hash-recent",
+                    "req-recent",
+                    None,
+                    "completed",
+                    200,
+                    "{}",
+                    None,
+                    "2026-05-11T00:00:00+00:00",
+                    "2026-05-11T00:00:00+00:00",
+                    "toolidem_cleanup_in_progress",
+                    DEMO_ORG_ID,
+                    DEMO_ENV_ID,
+                    credential["id"],
+                    tool["id"],
+                    "in-progress-key",
+                    "hash-progress",
+                    "req-progress",
+                    None,
+                    "in_progress",
+                    None,
+                    None,
+                    None,
+                    "2026-05-01T00:00:00+00:00",
+                    "2026-05-01T00:00:00+00:00",
+                ),
+            )
+
+        with self.database.transaction() as connection:
+            deleted = purge_tool_invocation_idempotency_records(
+                connection,
+                retention_seconds=24 * 60 * 60,
+                now="2026-05-12T00:00:00+00:00",
+            )
+
+        rows = self.database.connect().execute(
+            """
+            SELECT id
+            FROM tool_invocation_idempotency_records
+            WHERE id LIKE ?
+            ORDER BY id
+            """,
+            ("toolidem_cleanup_%",),
+        ).fetchall()
+        self.assertEqual(deleted, 1)
+        self.assertEqual(
+            [row["id"] for row in rows],
+            ["toolidem_cleanup_in_progress", "toolidem_cleanup_recent"],
+        )
+
     def _headers(self) -> dict[str, str]:
         login = self.client.post(
             "/api/v1/auth/dev-login",
@@ -174,6 +293,34 @@ class ToolGatewayRuntimeAuditPhase3Tests(unittest.TestCase):
                 payload_summary={"claim_id": "claim_other"},
             ),
             created_at="2026-05-01T12:00:00+00:00",
+        )
+
+    def _insert_cleanup_agent(self, connection) -> None:
+        now = "2026-05-01T00:00:00+00:00"
+        connection.execute(
+            """
+            INSERT INTO agents (
+                id, organization_id, environment_id, name, description, framework,
+                runtime_type, endpoint_url, owner_user_id, sponsor_user_id, status,
+                created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "agent_cleanup",
+                DEMO_ORG_ID,
+                DEMO_ENV_ID,
+                "agent_cleanup",
+                "Idempotency cleanup fixture.",
+                "langgraph",
+                "service",
+                None,
+                DEMO_ADMIN_USER_ID,
+                DEMO_ADMIN_USER_ID,
+                "active",
+                now,
+                now,
+            ),
         )
 
 

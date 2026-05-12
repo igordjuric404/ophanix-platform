@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from collections.abc import Callable
 from collections.abc import Mapping
+from unittest.mock import patch
 from typing import Any
 from typing import cast
 
@@ -10,13 +11,16 @@ import httpx
 import ophanix_tool_gateway as sdk
 
 from ophanix_tool_gateway import (
+    AsyncGatewayHttpClient,
     GatewayCompatibility,
     OphanixToolGatewayClient,
     StaticTokenProvider,
+    SyncGatewayHttpClient,
     ToolDeniedError,
     ToolGatewayClientConfig,
     ToolGatewayError,
     ToolGatewayValidationError,
+    EnvironmentTokenProvider,
 )
 
 
@@ -37,10 +41,13 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
     def test_public_api_snapshot_includes_mvp_sdk_types(self) -> None:
         expected_exports = {
             "AsyncOphanixToolGatewayClient",
+            "AsyncGatewayHttpClient",
             "EnvironmentTokenProvider",
             "GatewayCompatibility",
             "OphanixToolGatewayClient",
             "StaticTokenProvider",
+            "SyncGatewayHttpClient",
+            "TelemetryEventHook",
             "ToolGatewayClientConfig",
             "ToolGatewayValidationError",
         }
@@ -48,6 +55,8 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
         self.assertTrue(expected_exports.issubset(set(sdk.__all__)))
         self.assertIs(sdk.GatewayCompatibility, GatewayCompatibility)
         self.assertIs(sdk.ToolGatewayClientConfig, ToolGatewayClientConfig)
+        self.assertIs(sdk.SyncGatewayHttpClient, SyncGatewayHttpClient)
+        self.assertIs(sdk.AsyncGatewayHttpClient, AsyncGatewayHttpClient)
 
     def test_call_tool_returns_typed_result(self) -> None:
         client = _client(
@@ -152,6 +161,29 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
         self.assertEqual(calls, 1)
         self.assertEqual(second.input_schema_json, {"type": "object"})
 
+    def test_cached_discovery_does_not_bypass_invocation_denial(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET":
+                return httpx.Response(200, json=[TOOL_FIXTURE])
+            return httpx.Response(
+                403,
+                json={
+                    "request_id": "req-revoked",
+                    "correlation_id": "corr-revoked",
+                    "tool_name": "claims.lookup",
+                    "reason_code": "permission_revoked",
+                    "error": {"code": "permission_revoked"},
+                },
+            )
+
+        client = _client(handler, cache_tools=True)
+
+        self.assertEqual(client.get_tool("claims.lookup").name, "claims.lookup")
+        with self.assertRaises(ToolDeniedError) as raised:
+            client.call_tool("claims.lookup", {"claim_id": "claim_123"})
+
+        self.assertEqual(raised.exception.reason_code, "permission_revoked")
+
     def test_top_level_gateway_error_code_is_preserved(self) -> None:
         client = _client(
             lambda _request: httpx.Response(
@@ -232,6 +264,26 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
         self.assertTrue(compatibility.compatible)
         self.assertEqual(compatibility.gateway_contract_version, "tool-gateway.v1")
         self.assertEqual(compatibility.expected_gateway_contract_version, "tool-gateway.v1")
+        self.assertTrue(compatibility.min_sdk_version_satisfied)
+        self.assertIsNone(compatibility.incompatibility_reason)
+
+    def test_check_compatibility_respects_gateway_min_sdk_version(self) -> None:
+        client = _client(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "gateway_contract_version": "tool-gateway.v1",
+                    "min_sdk_version": "999.0.0",
+                    "sdk_package": "ophanix-tool-gateway-sdk",
+                },
+            )
+        )
+
+        compatibility = client.check_compatibility()
+
+        self.assertFalse(compatibility.compatible)
+        self.assertFalse(compatibility.min_sdk_version_satisfied)
+        self.assertEqual(compatibility.incompatibility_reason, "sdk_version_below_gateway_minimum")
 
     def test_from_config_constructs_client_without_repeating_every_option(self) -> None:
         config = ToolGatewayClientConfig(
@@ -267,6 +319,40 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
             client.list_all_tools(page_size=1, max_total=1)
 
         self.assertEqual(raised.exception.code, "tool_discovery_too_large")
+
+    def test_list_all_tools_has_default_total_cap(self) -> None:
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            offset = int(request.url.params.get("offset", "0"))
+            return httpx.Response(
+                200,
+                json=[
+                    {**TOOL_FIXTURE, "id": f"tool_{offset}_{index}", "name": f"claims.lookup.{offset}.{index}"}
+                    for index in range(200)
+                ],
+            )
+
+        client = _client(handler)
+
+        with self.assertRaises(ToolGatewayError) as raised:
+            client.list_all_tools()
+
+        self.assertEqual(raised.exception.code, "tool_discovery_too_large")
+        self.assertLessEqual(calls, 51)
+
+    def test_call_tool_rejects_payloads_above_depth_cap(self) -> None:
+        client = _client(lambda _request: httpx.Response(200, json={}))
+        payload: dict[str, Any] = {}
+        cursor = payload
+        for index in range(60):
+            cursor["next"] = {}
+            cursor = cursor["next"]
+
+        with self.assertRaisesRegex(ToolGatewayValidationError, "maximum nesting depth"):
+            client.call_tool("claims.lookup", payload)
 
     def test_streaming_response_cap_blocks_body_without_content_length(self) -> None:
         client = _client(
@@ -308,6 +394,14 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ToolGatewayValidationError, "4096 characters or fewer"):
             client.list_tools()
+
+    def test_environment_token_provider_reads_current_environment_value(self) -> None:
+        provider = EnvironmentTokenProvider("OPHANIX_TEST_GATEWAY_TOKEN")
+
+        with patch.dict("os.environ", {"OPHANIX_TEST_GATEWAY_TOKEN": "first-token"}):
+            self.assertEqual(provider.get_token(), "first-token")
+        with patch.dict("os.environ", {"OPHANIX_TEST_GATEWAY_TOKEN": "second-token"}):
+            self.assertEqual(provider.get_token(), "second-token")
 
     def test_get_tool_not_found_sanitizes_lookup_text(self) -> None:
         client = _client(lambda _request: httpx.Response(200, json=[]))
@@ -361,6 +455,36 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
         tools = client.list_all_tools(page_size=1)
 
         self.assertEqual([tool.id for tool in tools], ["tool_claims_lookup"])
+
+    def test_list_all_tools_prefers_cursor_pages_when_gateway_supports_them(self) -> None:
+        calls: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            self.assertEqual(request.url.params.get("pagination"), "cursor")
+            if "cursor" not in request.url.params:
+                return httpx.Response(
+                    200,
+                    json={
+                        "tools": [{**TOOL_FIXTURE, "id": "tool_1", "name": "claims.lookup.one"}],
+                        "next_cursor": "cursor-2",
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "tools": [{**TOOL_FIXTURE, "id": "tool_2", "name": "claims.lookup.two"}],
+                    "next_cursor": None,
+                },
+            )
+
+        client = _client(handler)
+
+        tools = client.list_all_tools(page_size=1)
+
+        self.assertEqual([tool.name for tool in tools], ["claims.lookup.one", "claims.lookup.two"])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1].url.params["cursor"], "cursor-2")
 
     def test_event_hook_receives_retry_and_elapsed_telemetry(self) -> None:
         events: list[Mapping[str, Any]] = []

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from unittest.mock import patch
 
@@ -14,6 +15,12 @@ from product_platform.api.settings import Settings
 from product_platform.audit.store import AuditEventQuery, AuditEventRepository
 from product_platform.db.seed import DEMO_ADMIN_USER_ID, DEMO_ENV_ID, DEMO_ORG_ID, seed_demo_data
 from product_platform.db.testing import create_migrated_test_database
+from product_platform.tool_gateway.models import (
+    AgentToolPermissionGrantRequest,
+    ToolDefinitionCreateRequest,
+)
+from product_platform.tool_gateway.operational_state import tool_gateway_rate_limit_result
+from product_platform.tool_gateway.repository import ToolRegistryRepository
 
 
 class ToolGatewayAuthPhase3Tests(unittest.TestCase):
@@ -120,6 +127,100 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
         self.assertEqual(probe_response.status_code, 401)
         self.assertEqual(probe_response.json()["code"], "UNAUTHENTICATED")
 
+    def test_api_gateway_cursor_pagination_uses_snapshot_boundary(self) -> None:
+        with self.database.transaction() as connection:
+            connection.execute(
+                "UPDATE credential_scopes SET resource_id = NULL WHERE credential_id = ?",
+                (self.credential["id"],),
+            )
+            registry = ToolRegistryRepository(connection, DEMO_ORG_ID, DEMO_ENV_ID)
+            for suffix in ["a", "b", "c"]:
+                tool = registry.create_tool(
+                    ToolDefinitionCreateRequest(
+                        name=f"claims.lookup.{suffix}",
+                        display_name=f"Claims Lookup {suffix.upper()}",
+                        owner_team="claims-platform",
+                        required_scope="claims.lookup:read",
+                        input_schema_json={"type": "object"},
+                    ),
+                    created_by=DEMO_ADMIN_USER_ID,
+                )
+                tool = registry.activate_tool(tool["id"], actor_id=DEMO_ADMIN_USER_ID)
+                registry.grant_agent_tool_permission(
+                    "agent_gateway_probe",
+                    AgentToolPermissionGrantRequest(
+                        tool_id=tool["id"],
+                        scope="claims.lookup:read",
+                        granted_reason="cursor pagination fixture",
+                    ),
+                    granted_by=DEMO_ADMIN_USER_ID,
+                )
+
+        first = self.client.get(
+            "/api/v1/gateway/tools",
+            headers=self._headers(self.raw_token),
+            params={"pagination": "cursor", "limit": "2"},
+        )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        first_payload = first.json()
+        self.assertEqual(len(first_payload["tools"]), 2)
+        self.assertIsNotNone(first_payload["next_cursor"])
+
+        with self.database.transaction() as connection:
+            registry = ToolRegistryRepository(connection, DEMO_ORG_ID, DEMO_ENV_ID)
+            late_tool = registry.create_tool(
+                ToolDefinitionCreateRequest(
+                    name="claims.lookup.late",
+                    display_name="Claims Lookup Late",
+                    owner_team="claims-platform",
+                    required_scope="claims.lookup:read",
+                    input_schema_json={"type": "object"},
+                ),
+                created_by=DEMO_ADMIN_USER_ID,
+            )
+            late_tool = registry.activate_tool(late_tool["id"], actor_id=DEMO_ADMIN_USER_ID)
+            registry.grant_agent_tool_permission(
+                "agent_gateway_probe",
+                AgentToolPermissionGrantRequest(
+                    tool_id=late_tool["id"],
+                    scope="claims.lookup:read",
+                    granted_reason="late cursor pagination fixture",
+                ),
+                granted_by=DEMO_ADMIN_USER_ID,
+            )
+
+        second = self.client.get(
+            "/api/v1/gateway/tools",
+            headers=self._headers(self.raw_token),
+            params={
+                "pagination": "cursor",
+                "limit": "2",
+                "cursor": first_payload["next_cursor"],
+            },
+        )
+
+        self.assertEqual(second.status_code, 200, second.text)
+        returned_names = {
+            tool["name"]
+            for tool in [*first_payload["tools"], *second.json()["tools"]]
+        }
+        self.assertEqual(
+            returned_names,
+            {"claims.lookup.a", "claims.lookup.b", "claims.lookup.c"},
+        )
+        self.assertNotIn("claims.lookup.late", returned_names)
+
+    def test_api_gateway_cursor_rejects_tampering(self) -> None:
+        response = self.client.get(
+            "/api/v1/gateway/tools",
+            headers=self._headers(self.raw_token),
+            params={"pagination": "cursor", "cursor": "not.a.valid.cursor"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Invalid discovery cursor", response.text)
+
     def test_api_failed_verification_rejects_gateway_discovery(self) -> None:
         response = self.client.get(
             "/api/v1/gateway/tools",
@@ -222,6 +323,57 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
         self.assertEqual(second.json()["code"], "TOOL_GATEWAY_RATE_LIMITED")
         self.assertEqual(second.headers["Retry-After"], "60")
 
+    def test_api_gateway_rate_limit_is_shared_across_app_instances(self) -> None:
+        settings = Settings(
+            app_name="Ophanix Test Platform",
+            environment="test",
+            build_sha="test-sha",
+            build_time="2026-05-01T00:00:00Z",
+            session_secret="test-secret",
+            tool_gateway_rate_limit_window_seconds=60,
+            tool_gateway_rate_limit_max_requests=1,
+        )
+        app_one = create_app(settings, database=self.database)
+        app_two = create_app(settings, database=self.database)
+        client_one = TestClient(app_one, raise_server_exceptions=False)
+        client_two = TestClient(app_two, raise_server_exceptions=False)
+
+        first = client_one.get(
+            "/api/v1/gateway/tools",
+            headers=self._headers(self.raw_token),
+        )
+        second = client_two.get(
+            "/api/v1/gateway/tools",
+            headers=self._headers(self.raw_token),
+        )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 429)
+        self.assertEqual(second.json()["code"], "TOOL_GATEWAY_RATE_LIMITED")
+
+    def test_unit_gateway_rate_limit_increment_is_atomic_across_connections(self) -> None:
+        def hit_limit() -> bool:
+            with self.database.transaction() as connection:
+                return tool_gateway_rate_limit_result(
+                    connection,
+                    key="agent:atomic-rate-test",
+                    overflow_key="agent:atomic-rate-overflow",
+                    max_requests=100,
+                    window_seconds=60,
+                    max_keys=100,
+                    now_epoch=1000.0,
+                ).limited
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            limited_results = list(executor.map(lambda _: hit_limit(), range(20)))
+
+        self.assertEqual(limited_results, [False] * 20)
+        row = self.database.connect().execute(
+            "SELECT request_count FROM tool_gateway_rate_limit_windows"
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["request_count"], 20)
+
     def test_api_gateway_rate_limit_uses_one_invalid_authorization_bucket_per_client(self) -> None:
         app = create_app(
             Settings(
@@ -249,8 +401,11 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
 
         self.assertEqual(first.status_code, 401)
         self.assertEqual(second.status_code, 401)
-        self.assertEqual(len(app.state.tool_gateway_rate_limits), 1)
-        self.assertTrue(next(iter(app.state.tool_gateway_rate_limits)).startswith("authorization:"))
+        row = self.database.connect().execute(
+            "SELECT COUNT(*) AS count FROM tool_gateway_rate_limit_windows"
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["count"], 2)
 
     def test_api_gateway_rate_limit_caps_new_authorization_overflow_per_client(self) -> None:
         app = create_app(
@@ -285,8 +440,11 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
         self.assertEqual(second.status_code, 401)
         self.assertEqual(third.status_code, 429)
         self.assertEqual(third.json()["code"], "TOOL_GATEWAY_RATE_LIMITED")
-        self.assertEqual(len(app.state.tool_gateway_rate_limits), 1)
-        self.assertEqual(len(app.state.tool_gateway_rate_limit_overflow_limits), 1)
+        row = self.database.connect().execute(
+            "SELECT COUNT(*) AS count FROM tool_gateway_rate_limit_windows"
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["count"], 2)
 
     def test_api_rejects_wildcard_cors_with_credentials_in_production(self) -> None:
         with self.assertRaisesRegex(ValueError, "CORS wildcard origins"):

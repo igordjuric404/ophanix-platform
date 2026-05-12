@@ -2213,3 +2213,331 @@ Updated scoring matrix:
 Final Pass 21 MVP assessment:
 
 The product platform now has real MVP-grade PostgreSQL backend support. It can run migrations, seed demo data, use repository writes/reads, persist tool idempotency records, and report database readiness against local Postgres. MVP adoption is stronger than Pass 20: Postgres is now the preferred backend for real deployments, while SQLite remains an explicit small single-node option. This still is not enterprise-grade production persistence because pooling, load testing, managed AWS Postgres operations, failover, and backup drills have not been proven.
+
+## 2026-05-12 - Pass 22: Strict MVP SDK Audit Remediation
+
+Pass name: `SDK-AUDIT-001` through `SDK-AUDIT-038` strict MVP remediation execution.
+
+Starting repository state summary:
+
+- `git status --short` showed one untracked audit file: `docs/product-platform-worktree/execution-logs/06-tool-gateway-logs/19-sdk-strict-mvp-readiness-audit.md`.
+- No staged changes were present at pass start.
+- The strict audit register contained 38 issue IDs: 0 Critical, 4 High, 21 Medium, 12 Low, and 1 Nit.
+- This pass treats `19-sdk-strict-mvp-readiness-audit.md` as the source issue register and updates this remediation log as issues are fixed, validated, deferred, invalidated, or accepted as remaining risk.
+
+Initial remediation tracking table before code/config edits:
+
+| Issue ID | Title | Severity | Category | Current status | Planned action | Files likely affected | Validation required | Score impact |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| SDK-AUDIT-001 | Idempotency `in_progress` records have no expiry or recovery | High | Runtime behavior / reliability | Pending | Add stale-record expiry/recovery semantics, settings/docs, and regression tests | `runtime_audit.py`, `app.py`, settings, tests, docs | idempotency repository/API tests, gateway suite | High security/reliability uplift |
+| SDK-AUDIT-002 | Allowed invocation responses expose full internal policy decision objects | High | Security / API contract | Pending | Narrow agent-facing decision envelope while preserving internal audit records | `invocation.py`, `app.py`, SDK parsing tests/docs | invocation/API/SDK contract tests | High security/API uplift |
+| SDK-AUDIT-003 | No true installed-wheel-to-running-network-gateway test | High | Testing / integration | Pending | Add installed SDK test against a real localhost ASGI server process boundary | installed SDK contract tests, CI if needed | focused installed-wheel network test | High implementation confidence uplift |
+| SDK-AUDIT-004 | Product-platform and standalone SDK both ship top-level `ophanix_tool_gateway` | High | Packaging / release | Pending | Remove duplicate top-level package from product wheel, depend on standalone SDK, add package-content tests | product `pyproject.toml`, release validator, package tests | product validator, package tests, wheel inspection | High packaging/release uplift |
+| SDK-AUDIT-005 | Idempotency replay stores public response bodies indefinitely | Medium | Security / privacy / reliability | Pending | Add retention setting and cleanup command/repository method with docs/tests | `runtime_audit.py`, CLI, settings, docs, tests | cleanup tests, CLI smoke | Medium reliability/security uplift |
+| SDK-AUDIT-006 | Compatibility probe ignores `min_sdk_version` | Medium | Public API / compatibility | Pending | Parse version floors and expose incompatibility reason without breaking result shape | SDK source/tests/docs | SDK tests, mypy | Medium rollout reliability uplift |
+| SDK-AUDIT-007 | Process-local rate limiting is not a complete gateway boundary | Medium | Reliability / security | Pending | Document deployment assumptions and external ingress controls; consider config naming/docs | README/API docs | docs review | Medium documentation/reliability clarity |
+| SDK-AUDIT-008 | Process-local circuit breaker loses state on restart/workers | Medium | Reliability | Pending | Document scope and operational assumptions | README/API docs | docs review | Medium reliability clarity |
+| SDK-AUDIT-009 | Offset pagination can miss or duplicate tools under churn | Medium | Runtime behavior / API design | Pending | Prefer docs and optional cap unless cursor pagination can be added safely in pass | SDK docs/tests or API | docs/tests if behavior changes | Medium API reliability |
+| SDK-AUDIT-010 | Opt-in discovery cache can serve stale auth/contract data | Medium | Reliability / DX | Pending | Add revocation/staleness docs and test server-side invocation denial after stale discovery | SDK docs/tests | SDK/product test | Medium DX/reliability clarity |
+| SDK-AUDIT-011 | Disabled response policy bypasses redaction/visibility controls | Medium | Security / response handling | Pending | Add production guard or explicit unsafe override; docs/tests | response policy models/app/tests/docs | response tests | Medium security uplift |
+| SDK-AUDIT-012 | Upstream SSRF protection relies on DNS-time checks/egress controls | Medium | Security | Pending | Document egress requirement and production upstream validation assumptions | README/docs | docs review | Medium security clarity |
+| SDK-AUDIT-013 | Local/test unresolved upstream hosts allowed by default | Medium | Security / config / DX | Pending | Add production-parity validation docs or CLI/dry-run if safe | docs/tests/CLI | docs or CLI test | Medium DX/reliability clarity |
+| SDK-AUDIT-014 | SDK payload validator has no explicit depth limit | Medium | Runtime behavior / reliability | Pending | Add SDK-side payload depth cap aligned with server | SDK source/tests, product copy | SDK tests, mypy | Medium reliability uplift |
+| SDK-AUDIT-015 | Standalone SDK tests are thin relative to product mirror suite | Medium | Testing | Pending | Move/duplicate critical behavior tests into standalone SDK | SDK tests | SDK pytest | Medium implementation confidence uplift |
+| SDK-AUDIT-016 | Product-platform release validator weaker than SDK validator | Medium | Packaging / release | Pending | Add product validator audit/strict-git/parity options where practical | product validator, CI/docs | product validator | Medium release confidence uplift |
+| SDK-AUDIT-017 | Local validator SBOMs list artifact files, not dependencies | Medium | Packaging / supply chain | Pending | Rename or generate dependency-aware SBOM evidence; document scope | release validators/docs | validator output tests | Medium supply-chain clarity |
+| SDK-AUDIT-018 | Runtime dependencies broadly ranged and not locked/tested | Medium | Packaging / supply chain | Pending | Add dependency policy docs and CI min/latest matrix if practical | CI/docs/package metadata | CI static review/docs | Medium supply-chain confidence |
+| SDK-AUDIT-019 | Credential issuance docs depend on opaque operator token step | Medium | Documentation / DX | Pending | Make local issuance flow runnable through dev-login/auth steps | SDK README/product docs | docs review, optional curl flow test | Medium DX uplift |
+| SDK-AUDIT-020 | Direct HTTP Python example omits SDK safeguards | Medium | Docs/examples/security | Pending | Harden demo helper or make local-only guard explicit with tests | direct HTTP example/tests/docs | example tests | Medium security/DX uplift |
+| SDK-AUDIT-021 | Deprecated `list_tools(status=...)` remains public | Low | Public API / DX | Pending | Preserve compatibility but document removal; avoid breaking change unless easy | SDK docs/tests | SDK tests/docs | Low DX/API clarity |
+| SDK-AUDIT-022 | `raw` and `decision` fields encourage unstable dependence | Medium | Public API / maintainability | Pending | Document unstable diagnostics and narrow server decision exposure | SDK docs/app/tests | SDK/API tests/docs | Medium API stability uplift |
+| SDK-AUDIT-023 | Event hook contract stringly typed, unversioned, sync-only | Low | Observability / API ergonomics | Pending | Add typed event aliases/version/docs or defer async hooks if too broad | SDK source/docs/tests | mypy/SDK tests | Low DX uplift |
+| SDK-AUDIT-024 | Async client uses `threading.RLock` in async methods | Low | Async runtime / maintainability | Pending | Validate/accept bounded lock or add docs/tests; avoid risky refactor unless needed | SDK docs/tests | async cache test | Low reliability confidence |
+| SDK-AUDIT-025 | Custom HTTP client protocol runtime-checked but not formally modeled | Low | API extensibility / DX | Pending | Export Protocols and document adapter contract | SDK source/docs/tests | mypy/SDK tests | Low DX uplift |
+| SDK-AUDIT-026 | Buffered custom HTTP client opt-in can bypass response-size enforcement | Medium | Reliability / security | Pending | Improve warning/error docs and add adapter example/test | SDK source/docs/tests | SDK tests | Medium safety clarity |
+| SDK-AUDIT-027 | `EnvironmentTokenProvider` re-reads env on every request | Low | API behavior / DX | Pending | Document dynamic behavior and add explicit test/example | SDK README/tests | SDK tests/docs | Low DX clarity |
+| SDK-AUDIT-028 | README install wording stale now that package is published | Low | Documentation / DX | Pending | Update install wording to PyPI-first | SDK README | docs review | Low DX polish |
+| SDK-AUDIT-029 | No framework-specific adoption examples | Low | Documentation / examples | Pending | Add lightweight framework-style worker example or doc section | SDK examples/README/tests | example import/compile | Low onboarding uplift |
+| SDK-AUDIT-030 | Constructor config surface large for first MVP integration | Low | API ergonomics / DX | Pending | Add recommended config profiles | SDK README/API docs | docs review | Low DX uplift |
+| SDK-AUDIT-031 | Diagnostic redaction remains best-effort | Medium | Security / privacy | Pending | Strengthen docs and optional diagnostic suppression if practical | SDK docs/source/tests | SDK tests/docs | Medium security clarity |
+| SDK-AUDIT-032 | Redaction regex safety heuristics not complete ReDoS defense | Low | Security / reliability | Pending | Document trusted policy authors and regex limits; add pathological tests if practical | response docs/tests | response tests | Low security clarity |
+| SDK-AUDIT-033 | Custom executors can return unsanitized agent-facing messages | Medium | Extensibility / security | Pending | Sanitize custom `ToolExecutionError.message` or document/guard | app/invocation/tests/docs | invocation tests | Medium security uplift |
+| SDK-AUDIT-034 | Publication provenance depends on manual handoff | Medium | Release / governance | Pending | Add release evidence docs/checklist and make provenance limitation explicit | publish docs/README | docs review | Medium supply-chain clarity |
+| SDK-AUDIT-035 | `list_all_tools()` has no default hard total cap | Low | Reliability / API ergonomics | Pending | Add docs or conservative default; avoid breaking large tenants unexpectedly | SDK source/docs/tests | SDK tests | Low reliability uplift |
+| SDK-AUDIT-036 | Token character grammar may reject future opaque formats | Low | API compatibility / auth | Pending | Document issuer contract and add issued-token compatibility test | SDK/server tests/docs | auth/SDK tests | Low compatibility clarity |
+| SDK-AUDIT-037 | Ignored generated cache files in package trees | Nit | Repository hygiene | Pending | Clean ignored caches or document cleanup; ensure artifact denylist remains | workspace/validator docs | git status/artifact validation | Nit hygiene |
+| SDK-AUDIT-038 | Changelog minimal and undated | Low | Documentation / release governance | Pending | Add date and release evidence expectations | SDK changelog/release docs | docs review | Low governance polish |
+
+Final issue disposition summary:
+
+| Count | Value |
+| --- | ---: |
+| Total issues processed | 38 |
+| Fixed | 27 |
+| Already resolved | 0 |
+| Invalid finding | 0 |
+| Deferred with rationale | 1 |
+| Accepted remaining risk | 10 |
+| Pending | 0 |
+
+Validation evidence index:
+
+| ID | Command | Result |
+| --- | --- | --- |
+| V1 | `python3 -m py_compile ...` for changed SDK, product, validator, direct HTTP, and test files | Passed |
+| V2 | SDK `python3 -m ruff check src tests scripts examples --select E,F,W --ignore E501` | Passed |
+| V3 | Product `PYTHONPATH=src python3 -m ruff check src tests scripts examples --select E,F,W --ignore E501` | Passed |
+| V4 | SDK `python3 -m mypy src/ophanix_tool_gateway` | Passed |
+| V5 | Product `PYTHONPATH=src python3 -m mypy src/product_platform/tool_gateway src/ophanix_tool_gateway` | Passed |
+| V6 | SDK/product vendored parity `cmp` checks for `sdk.py` and `__init__.py` | Passed |
+| V7 | SDK `python3 -m pytest tests -q --tb=short` | 32 passed |
+| V8 | Product focused gateway suites during remediation | Passed, including invocation, runtime audit, response policy, direct HTTP, auth, package, and installed-wheel tests |
+| V9 | Product full suite `PYTHONPATH=src python3 -m pytest tests -q --tb=short` | 810 passed, 2 dependency deprecation warnings |
+| V10 | SDK release validator `python3 scripts/validate_release.py --out-dir /tmp/ophanix-sdk-pass22-final --skip-twine-check` | Passed |
+| V11 | Product release validator `python3 scripts/validate_release.py --out-dir /tmp/ophanix-product-pass22-final --skip-twine-check` | Passed |
+| V12 | SDK strict dependency-audit validator `python3 scripts/validate_release.py --out-dir /tmp/ophanix-sdk-pass22-final-audit --skip-twine-check --require-dependency-audit` | Passed after installing `pip-audit`; pip-audit skipped the local package distribution identity because it is not in the vulnerability database |
+| V13 | Product strict dependency-audit validator `python3 scripts/validate_release.py --out-dir /tmp/ophanix-product-pass22-final-audit --skip-twine-check --require-dependency-audit` | Passed after excluding internal Ophanix dependencies from public-index resolution and listing them in the manifest |
+| V14 | Product release manifest and SBOM inspection | Manifest records dependency-audit scope/exclusions; SBOM lists direct runtime dependency components |
+| V15 | `find packages/product-platform packages/ophanix-tool-gateway-sdk -type d -name __pycache__ -print` | No generated cache directories remained after cleanup |
+
+Final issue tracking table:
+
+| Issue ID | Title | Severity | Category | Final status | Files changed | Validation | Score impact |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| SDK-AUDIT-001 | Idempotency `in_progress` records have no expiry or recovery | High | Runtime behavior / reliability | Fixed | `runtime_audit.py`, `app.py`, `settings.py`, tests, README | V1, V3, V5, V8, V9 | Raises reliability; removes high blocker |
+| SDK-AUDIT-002 | Allowed invocation responses expose full internal policy decision objects | High | Security / API contract | Fixed | `invocation.py`, `app.py`, invocation tests, SDK docs | V1, V3, V5, V8, V9 | Raises security/API stability; removes high blocker |
+| SDK-AUDIT-003 | No true installed-wheel-to-running-network-gateway test | High | Testing / integration | Fixed | `test_tool_gateway_installed_sdk_contract.py` | V1, V8, V9 | Raises implementation confidence; removes high test gap |
+| SDK-AUDIT-004 | Product-platform and standalone SDK both ship top-level `ophanix_tool_gateway` | High | Packaging / release | Fixed | product `pyproject.toml`, product validator, package tests | V1, V3, V8, V9, V11, V13, V14 | Raises packaging reliability; removes high release blocker |
+| SDK-AUDIT-005 | Idempotency replay stores public response bodies indefinitely | Medium | Security / privacy / reliability | Fixed | `runtime_audit.py`, `settings.py`, `cli.py`, tests, README | V1, V3, V5, V8, V9 | Raises reliability/privacy |
+| SDK-AUDIT-006 | Compatibility probe ignores `min_sdk_version` | Medium | Public API / compatibility | Fixed | SDK source/copy, SDK tests, API docs, README | V1, V2, V4, V6, V7 | Raises compatibility safety |
+| SDK-AUDIT-007 | Process-local rate limiting is not a complete gateway boundary | Medium | Reliability / security | Accepted remaining risk | Product README | Docs review, V9 | Caps security/reliability below stronger production-pilot levels |
+| SDK-AUDIT-008 | Process-local circuit breaker loses state on restart/workers | Medium | Reliability | Accepted remaining risk | SDK/product README | Docs review, V9 | Caps reliability below stronger production-pilot levels |
+| SDK-AUDIT-009 | Offset pagination can miss or duplicate tools under churn | Medium | Runtime behavior / API design | Deferred with rationale | SDK source/docs/tests | V2, V4, V7, V9 | Caps implementation/reliability until cursor pagination exists |
+| SDK-AUDIT-010 | Opt-in discovery cache can serve stale auth/contract data | Medium | Reliability / DX | Fixed | SDK README/tests | V2, V4, V7, V9 | Raises DX/reliability clarity |
+| SDK-AUDIT-011 | Disabled response policy bypasses redaction/visibility controls | Medium | Security / response handling | Fixed | `app.py`, response tests, README | V1, V3, V5, V8, V9 | Raises security |
+| SDK-AUDIT-012 | Upstream SSRF protection relies on DNS-time checks/egress controls | Medium | Security | Accepted remaining risk | Product README, SDK SECURITY | Docs review, V9 | Caps security/reliability |
+| SDK-AUDIT-013 | Local/test unresolved upstream hosts allowed by default | Medium | Security / config / DX | Accepted remaining risk | Product README | Docs review, V9 | Caps security only for local/test parity |
+| SDK-AUDIT-014 | SDK payload validator has no explicit depth limit | Medium | Runtime behavior / reliability | Fixed | SDK source/copy, SDK tests, docs | V1, V2, V4, V6, V7, V9 | Raises reliability |
+| SDK-AUDIT-015 | Standalone SDK tests are thin relative to product mirror suite | Medium | Testing | Fixed | SDK tests | V7 | Raises implementation confidence |
+| SDK-AUDIT-016 | Product-platform release validator weaker than SDK validator | Medium | Packaging / release | Fixed | product validator, CI, README | V1, V3, V11, V13, V14 | Raises release confidence |
+| SDK-AUDIT-017 | Local validator SBOMs list artifact files, not dependencies | Medium | Packaging / supply chain | Fixed | SDK/product validators, README | V10, V11, V12, V13, V14 | Raises supply-chain evidence |
+| SDK-AUDIT-018 | Runtime dependencies broadly ranged and not locked/tested | Medium | Packaging / supply chain | Fixed | CI, validators, README | V10, V12, V13, V14 | Raises dependency confidence |
+| SDK-AUDIT-019 | Credential issuance docs depend on opaque operator token step | Medium | Documentation / DX | Fixed | SDK README, product docs/tests | V7, V8, V9 | Raises onboarding confidence |
+| SDK-AUDIT-020 | Direct HTTP Python example omits SDK safeguards | Medium | Docs/examples/security | Fixed | Direct HTTP helper/docs/expected response/tests | V1, V3, V8, V9 | Raises example safety |
+| SDK-AUDIT-021 | Deprecated `list_tools(status=...)` remains public | Low | Public API / DX | Accepted remaining risk | SDK docs/changelog/migration | V7 | Low DX/API cap through 0.1.x |
+| SDK-AUDIT-022 | `raw` and `decision` fields encourage unstable dependence | Medium | Public API / maintainability | Fixed | Server response model, invocation tests, SDK docs | V1, V3, V5, V7, V8, V9 | Raises API stability/security |
+| SDK-AUDIT-023 | Event hook contract stringly typed, unversioned, sync-only | Low | Observability / API ergonomics | Fixed | SDK source/copy, exports, docs, tests | V1, V2, V4, V6, V7 | Low DX uplift; async hook remains intentionally out of scope |
+| SDK-AUDIT-024 | Async client uses `threading.RLock` in async methods | Low | Async runtime / maintainability | Accepted remaining risk | SDK docs/tests | V7 | Low reliability cap for high-concurrency async workloads |
+| SDK-AUDIT-025 | Custom HTTP client protocol runtime-checked but not formally modeled | Low | API extensibility / DX | Fixed | SDK source/copy, exports, API docs, tests | V1, V2, V4, V6, V7 | Raises DX/type clarity |
+| SDK-AUDIT-026 | Buffered custom HTTP client opt-in can bypass response-size enforcement | Medium | Reliability / security | Accepted remaining risk | SDK README/API docs | V7 | Caps reliability/security for custom adapters |
+| SDK-AUDIT-027 | `EnvironmentTokenProvider` re-reads env on every request | Low | API behavior / DX | Fixed | SDK README/tests | V7 | Low DX clarity |
+| SDK-AUDIT-028 | README install wording stale now that package is published | Low | Documentation / DX | Fixed | SDK README | Docs review | Low DX polish |
+| SDK-AUDIT-029 | No framework-specific adoption examples | Low | Documentation / examples | Fixed | SDK example and README | V1, V7 | Low onboarding uplift |
+| SDK-AUDIT-030 | Constructor config surface large for first MVP integration | Low | API ergonomics / DX | Fixed | SDK README/API reference | Docs review, V7 | Low DX uplift |
+| SDK-AUDIT-031 | Diagnostic redaction remains best-effort | Medium | Security / privacy | Accepted remaining risk | SDK/product security docs, server sanitization tests | V7, V8, V9 | Caps security because arbitrary free text cannot be fully redacted |
+| SDK-AUDIT-032 | Redaction regex safety heuristics not complete ReDoS defense | Low | Security / reliability | Accepted remaining risk | Product README/SECURITY docs | Docs review, V9 | Low security cap for trusted policy author boundary |
+| SDK-AUDIT-033 | Custom executors can return unsanitized agent-facing messages | Medium | Extensibility / security | Fixed | `invocation.py`, `app.py`, invocation tests, docs | V1, V3, V5, V8, V9 | Raises security |
+| SDK-AUDIT-034 | Publication provenance depends on manual handoff | Medium | Release / governance | Accepted remaining risk | Validators, README, release manifests | V10, V11, V12, V13, V14 | Caps release governance until signed publish workflow evidence exists |
+| SDK-AUDIT-035 | `list_all_tools()` has no default hard total cap | Low | Reliability / API ergonomics | Fixed | SDK source/copy, tests, docs | V1, V2, V4, V6, V7 | Low reliability uplift |
+| SDK-AUDIT-036 | Token character grammar may reject future opaque formats | Low | API compatibility / auth | Fixed | Auth/SDK tests, README | V7, V8, V9 | Low compatibility confidence |
+| SDK-AUDIT-037 | Ignored generated cache files in package trees | Nit | Repository hygiene | Fixed | Workspace cleanup, validators | V10, V11, V13, V15 | Nit hygiene/release confidence |
+| SDK-AUDIT-038 | Changelog minimal and undated | Low | Documentation / release governance | Fixed | SDK CHANGELOG/README | Docs review, V10 | Low governance polish |
+
+Per-issue remediation detail:
+
+| Issue ID | Original severity/category | Status | Root cause | Fix implemented and why it is MVP-grade | Tests and validation | Remaining risk | Score impact |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| SDK-AUDIT-001 | High / Runtime behavior and reliability | Fixed | Idempotency rows could remain `in_progress` forever after process death or timeout. | Added stale in-progress TTL settings, stale transition to `failed_unknown`, `idempotency_stale` API response, and tests. This is MVP-grade because callers get a deterministic unknown-outcome signal instead of permanent lockout. | Added stale-idempotency API/repository coverage; V1, V8, V9. | Operators must still choose a TTL appropriate to tool duration. | Removes high reliability cap. |
+| SDK-AUDIT-002 | High / Security and API contract | Fixed | The allowed invocation response reused the full internal policy decision result. | Added an agent-facing decision summary without internal IDs while retaining detailed internal audit records. This narrows the public contract without breaking the main result shape. | Updated invocation tests; V1, V5, V8, V9. | Operators still need internal audit tooling for detailed policy evidence. | Removes high security/API cap. |
+| SDK-AUDIT-003 | High / Testing and integration | Fixed | Installed SDK tests did not cross a real network/server boundary. | Added a localhost uvicorn installed-wheel SDK test with real HTTP, idempotency replay, and executor call-count verification. | Added installed-wheel real HTTP test; V8, V9. | The test is local, not a deployed environment test. | Removes high integration-confidence cap. |
+| SDK-AUDIT-004 | High / Packaging and release | Fixed | Product wheel shipped the standalone SDK package copy and could shadow the PyPI SDK. | Product packaging now excludes top-level `ophanix_tool_gateway`, declares `ophanix-tool-gateway-sdk`, and validates wheel/sdist contents. This gives consumers one SDK ownership path. | Package tests and validators; V11, V13, V14. | Product still carries a source copy for local parity tests, but it is not shipped in product artifacts. | Removes high packaging cap. |
+| SDK-AUDIT-005 | Medium / Security, privacy, reliability | Fixed | Replay bodies had no cleanup path. | Added cleanup repository function, CLI command, retention settings, and docs. This is enough for MVP operators to bound replay retention. | Runtime audit cleanup test; V8, V9. | Cleanup must be scheduled by operators. | Raises security/reliability. |
+| SDK-AUDIT-006 | Medium / API compatibility | Fixed | `min_sdk_version` was parsed as informational only. | SDK compatibility now evaluates gateway minimum SDK version and exposes an incompatibility reason. | SDK tests; V7. | Version parsing is simple semver-like parsing, not a full PEP 440 solver. | Raises rollout safety. |
+| SDK-AUDIT-007 | Medium / Reliability and security | Accepted remaining risk | Rate limiting is intentionally process-local for the clarified low-traffic MVP. | Documented the boundary and expectation for external ingress controls. No load-balancing fix was implemented because the user clarified load balancing is not a flaw for this traffic level. | Docs review; V9 for surrounding suite. | Multi-worker deployments need shared ingress throttling. | Caps security/reliability below 8. |
+| SDK-AUDIT-008 | Medium / Reliability | Accepted remaining risk | Circuit breaker state is process-local. | Documented process-local scope and restart behavior. This is accepted for a controlled single-node/low-traffic MVP. | Docs review; V9. | Multi-process deployments need shared state or an upstream gateway breaker. | Caps reliability below 8. |
+| SDK-AUDIT-009 | Medium / Runtime behavior and API design | Deferred with rationale | Discovery pagination remains offset-based and cannot be made churn-safe without API contract work. | Added a default `list_all_tools(max_total=10000)` cap and docs warning. Cursor pagination is deferred because it requires server/API contract changes. | SDK tests and docs; V7. | High-churn catalogs may still miss/duplicate during offset scans. | Caps implementation/reliability at 8. |
+| SDK-AUDIT-010 | Medium / Reliability and DX | Fixed | Discovery cache can stale after permission or contract changes. | Added explicit docs and tests proving stale discovery does not bypass invocation-time authorization. This makes the cache boundary understandable and safe enough for MVP. | SDK behavior tests; V7, V9. | Callers must clear cache for urgent contract changes. | Raises DX/reliability. |
+| SDK-AUDIT-011 | Medium / Security response handling | Fixed | Operators could disable response policy and bypass visibility/redaction outside local use. | Production-like environments now block disabled response policies unless an explicit unsafe override is set. | Response-policy tests; V8, V9. | The unsafe override remains for exceptional operator use. | Raises security. |
+| SDK-AUDIT-012 | Medium / Security | Accepted remaining risk | Application-level DNS checks cannot fully enforce SSRF safety at egress time. | Documented required egress firewall/proxy/VPC controls. This is accepted as an operational boundary, not solved in app code. | Docs review; V9. | Final SSRF defense depends on deployment network controls. | Caps security below 8. |
+| SDK-AUDIT-013 | Medium / Security, config, DX | Accepted remaining risk | Local/test mode allows unresolved upstream hosts for development. | Production guard behavior remains; docs now call out local/test relaxation and production parity limits. | Docs review; V9. | Local tests can still differ from production DNS behavior. | Caps reliability/DX only slightly. |
+| SDK-AUDIT-014 | Medium / Runtime reliability | Fixed | SDK JSON payload validation had byte and type caps but no depth cap. | Added depth validation with a 50-level maximum and cycle handling. This prevents recursive payload blowups before transport. | SDK tests; V7. | Extremely large but shallow payloads are still governed by byte cap only. | Raises reliability. |
+| SDK-AUDIT-015 | Medium / Testing | Fixed | Standalone SDK coverage lagged the product mirror. | Added standalone tests for public API exports, compatibility floors, payload depth, default caps, environment tokens, and stale discovery behavior. | V7. | Product mirror still has more server-integrated cases by design. | Raises implementation confidence. |
+| SDK-AUDIT-016 | Medium / Packaging and release | Fixed | Product release validator did not match SDK-level artifact checks. | Added stricter artifact checks, duplicate-SDK exclusion, dependency audit option, strict-git/tag option, and CI invocation. | V11, V13, V14. | Final release should run without `--skip-twine-check` from a clean tag. | Raises release confidence. |
+| SDK-AUDIT-017 | Medium / Supply chain | Fixed | SBOM evidence listed artifact files but not direct dependencies. | Validators now include direct runtime dependency components in CycloneDX output. Product manifest records internal dependency audit exclusions. | V10, V11, V12, V13, V14. | Transitive dependency SBOM depth remains future hardening. | Raises supply-chain evidence. |
+| SDK-AUDIT-018 | Medium / Supply chain | Fixed | Dependency ranges were broad without minimum-path validation. | CI now exercises SDK minimum `httpx==0.27.0`; validators can require dependency audit; docs describe dependency policy. | V7, V10, V12, V13. | Product private dependencies still rely on internal package pipelines. | Raises supply-chain confidence. |
+| SDK-AUDIT-019 | Medium / Documentation and DX | Fixed | Local credential issuance skipped the operator-token acquisition step. | README now includes a concrete `dev-login` curl flow and credential issue request. | Auth tests and docs review; V8, V9. | Private operator builds may differ and must verify endpoint shape. | Raises onboarding. |
+| SDK-AUDIT-020 | Medium / Examples and security | Fixed | Direct HTTP example bypassed SDK safeguards without adequate caveats. | Hardened URL/token/tool/payload validation, response-size/non-JSON handling, and error wrapping; docs state SDK is preferred. | Direct HTTP tests; V8, V9. | Direct HTTP remains less safe than the SDK. | Raises example safety. |
+| SDK-AUDIT-021 | Low / Public API and DX | Accepted remaining risk | Deprecated `status` remains for 0.1.x compatibility. | Documented deprecation/removal expectation instead of breaking callers in a remediation pass. | V7. | Deprecated parameter remains public until a migration release. | Low ease-of-use/API cap. |
+| SDK-AUDIT-022 | Medium / API maintainability | Fixed | `raw` and `decision` looked like stable extension surfaces. | Docs now label `raw` diagnostic-only and the server decision response is narrowed. | V7, V8, V9. | Consumers can still read diagnostic `raw`, but it is clearly not stable. | Raises API stability. |
+| SDK-AUDIT-023 | Low / Observability API | Fixed | Event names and payloads were stringly typed in docs/exports. | Added typed telemetry aliases and exported them. Async-only event hooks were not added because sync hooks are enough for MVP and must stay lightweight. | SDK tests/mypy; V4, V7. | Slow sync hooks can still block callers. | Low DX uplift. |
+| SDK-AUDIT-024 | Low / Async runtime | Accepted remaining risk | Async client uses a small `threading.RLock` around cache mutation. | No refactor was made because the lock protects short non-awaiting sections and tests pass. | V7. | Very high-concurrency async workloads should re-evaluate lock strategy. | Low reliability cap. |
+| SDK-AUDIT-025 | Low / API extensibility | Fixed | Custom HTTP adapter shape was runtime-only. | Added public `SyncGatewayHttpClient` and `AsyncGatewayHttpClient` Protocols and docs. | V4, V7. | Protocols do not enforce streaming safety at runtime. | Raises DX. |
+| SDK-AUDIT-026 | Medium / Reliability and security | Accepted remaining risk | Explicit buffered custom client opt-in can bypass SDK streaming response caps. | Docs now make the opt-in safety contract explicit. The unsafe default remains `False`; removing the escape hatch would break legitimate adapters. | V7. | Consumers who opt in without equivalent limits can still buffer large responses. | Caps reliability/security. |
+| SDK-AUDIT-027 | Low / API behavior and DX | Fixed | Env-token dynamic behavior was undocumented/untested. | Added docs and a test proving env is read on each request. | V7. | High-throughput callers should still use a cached secret-manager provider. | Low DX uplift. |
+| SDK-AUDIT-028 | Low / Documentation | Fixed | Install docs still implied local-only package usage. | README now starts with PyPI install and moves repo path to unreleased internal validation. | Docs review. | None known. | Low DX polish. |
+| SDK-AUDIT-029 | Low / Examples | Fixed | No framework-style adoption example existed. | Added `examples/langgraph_node_example.py` as a dependency-light node/worker pattern. | V1, V7. | It is framework-style, not a full LangGraph dependency test. | Low onboarding uplift. |
+| SDK-AUDIT-030 | Low / API ergonomics | Fixed | Constructor surface was large for first-time integrators. | Added recommended config profiles for controlled pilot, stable worker, and strict tests. | Docs review; V7. | Profiles are guidance, not preset factory functions. | Low DX uplift. |
+| SDK-AUDIT-031 | Medium / Security and privacy | Accepted remaining risk | Redaction cannot guarantee arbitrary free-text secret removal. | Added docs warning and strengthened server-side custom executor message sanitization. This reduces risk but does not claim full DLP. | V7, V8, V9. | Unknown secret formats can still appear in caller-controlled logs. | Caps security below 8. |
+| SDK-AUDIT-032 | Low / Security and reliability | Accepted remaining risk | Regex-based response policy remains heuristic and trusted-author oriented. | Documented trusted policy-author boundary and limitations. | Docs review; V9. | A pathological trusted regex could still be expensive. | Low security cap. |
+| SDK-AUDIT-033 | Medium / Extensibility and security | Fixed | Custom executors could surface raw messages to agents. | Added message sanitization for raised `ToolExecutionError` and failed custom results. | Invocation tests; V8, V9. | Sanitization is best-effort for free text. | Raises security. |
+| SDK-AUDIT-034 | Medium / Release governance | Accepted remaining risk | Final provenance still depends on release workflow and manual handoff. | Validators now write manifests/SBOMs and support strict-git/dependency-audit checks; docs state final signed provenance requirement. | V10, V11, V12, V13, V14. | Signed publish workflow evidence and non-skipped twine check remain release-time requirements. | Caps release governance. |
+| SDK-AUDIT-035 | Low / Reliability and API ergonomics | Fixed | `list_all_tools()` could scan unbounded by default. | Added default `max_total=10000` with explicit `None` opt-out and tests/docs. | V7. | Cursor pagination remains deferred in SDK-AUDIT-009. | Raises reliability. |
+| SDK-AUDIT-036 | Low / API compatibility and auth | Fixed | SDK token grammar could diverge from issued server tokens. | Added issued gateway token compatibility coverage and documented raw-token grammar. | V8, V9. | Future token formats must preserve or migrate the documented grammar. | Low compatibility uplift. |
+| SDK-AUDIT-037 | Nit / Repository hygiene | Fixed | Test/compile runs left ignored `__pycache__` directories in package trees. | Cleaned generated caches and validators reject cache artifacts. | V10, V11, V13, V15. | Future local test runs can recreate caches; validators still block artifacts. | Nit hygiene. |
+| SDK-AUDIT-038 | Low / Release documentation | Fixed | Changelog was minimal and undated. | Added dated 0.1.0 changelog content and release evidence notes. | Docs review; V10. | Future release notes must stay maintained. | Low governance uplift. |
+
+Summary of changed files:
+
+- Runtime/server: `packages/product-platform/src/product_platform/api/app.py`, `settings.py`, `cli.py`, `tool_gateway/invocation.py`, `tool_gateway/runtime_audit.py`.
+- SDK source and exports: `packages/ophanix-tool-gateway-sdk/src/ophanix_tool_gateway/*`, mirrored product SDK copy, and `product_platform.tool_gateway` compatibility exports.
+- Packaging/release: product `pyproject.toml`, SDK/product `scripts/validate_release.py`, `.github/workflows/ci.yml`.
+- Tests: SDK behavior tests plus product auth, invocation, runtime audit, response policy, installed-wheel, package, and direct HTTP coverage.
+- Docs/examples: SDK README/API reference/CHANGELOG/MIGRATION/SECURITY, product README, direct HTTP docs/example, and new `examples/langgraph_node_example.py`.
+
+Remaining unresolved issues:
+
+- SDK-AUDIT-009 is deferred: cursor pagination needs a server/API contract change.
+- SDK-AUDIT-007 and SDK-AUDIT-008 are accepted: process-local rate/circuit behavior is intentional for the clarified low-traffic MVP but not enough for multi-worker/high-traffic deployments.
+- SDK-AUDIT-012 and SDK-AUDIT-013 are accepted: final upstream SSRF/DNS enforcement depends on deployment egress controls; local/test retains relaxed host handling.
+- SDK-AUDIT-021 is accepted: deprecated `status` remains for 0.1.x compatibility.
+- SDK-AUDIT-024 is accepted: async cache lock is bounded but not redesigned.
+- SDK-AUDIT-026 is accepted: buffered custom HTTP client opt-in remains an explicit advanced escape hatch.
+- SDK-AUDIT-031 and SDK-AUDIT-032 are accepted: redaction and regex safety are best-effort/trusted-boundary controls, not complete DLP or ReDoS defenses.
+- SDK-AUDIT-034 is accepted: signed provenance and non-skipped twine metadata validation remain final release workflow evidence.
+
+Updated scoring matrix:
+
+| Category | Strict audit prior score | Previous remediation-log score | Updated score | Raised/lowered/upheld | Exact reason | Remaining score cap |
+| --- | ---: | ---: | ---: | --- | --- | --- |
+| Implementation quality | 7.0 | 7.8 | 8.0 | Raised | All four high findings are remediated; idempotency stale recovery, narrower decision contracts, real installed-wheel HTTP coverage, packaging ownership, payload depth caps, broader SDK tests, and full product validation are now present. | Capped at 8.0 by deferred cursor pagination, process-local operational limits, and release-time provenance evidence. |
+| Ease of use | 7.0 | 7.7 | 8.0 | Raised | PyPI-first install docs, local credential issuance flow, config profiles, framework-style example, clearer errors, Protocols, and direct HTTP caveats make first adoption materially easier. | Capped at 8.0 by deprecated `status`, advanced custom-adapter caveats, and lack of external onboarding evidence. |
+| Security and reliability | 6.5 | 7.3 | 7.5 | Raised | High-severity exposure and stale idempotency issues are fixed; response policy disabling is guarded; custom executor messages are sanitized; strict release validators and dependency-audit mode pass. | Capped at 7.5 by accepted SSRF/egress dependence, process-local rate/circuit state, best-effort redaction, regex trust boundary, cursor pagination deferral, and release provenance handoff. |
+
+What must be fixed to reach the next score:
+
+- Implementation quality: add cursor pagination or a churn-safe discovery contract; add release evidence without `--skip-twine-check`; keep product and standalone SDK ownership separated.
+- Ease of use: remove or fully migrate deprecated `list_tools(status=...)`; add a fully runnable framework integration example or smoke test; publish a short external onboarding runbook.
+- Security and reliability: enforce SSRF/egress at deployment boundaries, add shared rate/circuit controls if multi-worker usage begins, strengthen redaction/regex guarantees, and prove release provenance in CI.
+
+What remains required to reach 8 out of 10:
+
+- Implementation quality and ease of use now reach 8.0 for controlled MVP use.
+- Security and reliability need resolved egress enforcement, cursor/churn-safe discovery, and stronger redaction/custom-adapter guarantees to reach 8.0.
+
+What remains required to reach 9 out of 10:
+
+- Production-grade load/failure drills, shared operational limits for multi-worker deployments, managed release provenance/attestation evidence, non-skipped twine checks from a clean tag, deeper dependency SBOM/audit coverage including internal packages, cursor pagination, and removal of 0.1.x deprecated surfaces.
+
+Final Pass 22 MVP assessment:
+
+The SDK and gateway are now defensible as a controlled MVP for internal teams or early design partners. The repository is credible, installable, testable, and much more coherent than the strict audit baseline. It is still not production-certified or enterprise-grade: broader external adoption remains gated by cursor pagination, deployment-level egress controls, accepted process-local reliability boundaries, stronger redaction/regex guarantees, and final signed release provenance evidence.
+
+## 2026-05-12 - Pass 23: Remaining SDK-AUDIT Production-Ready Closure
+
+Pass name: `SDK-AUDIT-*` remaining-attention remediation and verification.
+
+Starting repository state summary:
+
+- The prior remediation log still marked several valid findings as deferred or accepted risk: shared rate limiting, shared circuit breaker state, churn-safe pagination, unresolved upstream hosts in local/test, async cache locking, buffered custom clients, regex ReDoS safety, and release provenance.
+- `git status --short` was already dirty from the Pass 22 remediation work and one untracked strict audit file. No unrelated changes were reverted.
+- This pass did not open a new review register. It used the existing `SDK-AUDIT-001` through `SDK-AUDIT-038` register and reclassified only after code/config/docs/tests were inspected and validated.
+
+Full issue tracking table:
+
+| Issue ID | Title | Severity | Current status after Pass 23 | Action in this pass | Files/components modified or verified | Validation evidence | Score impact |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| SDK-AUDIT-001 | Idempotency `in_progress` expiry/recovery | High | Fixed, verified | Verified previous fix under current full product tests | `runtime_audit.py`, `app.py`, tests | Product full suite 817 passed; Tool Gateway suite 312 passed | No longer caps reliability |
+| SDK-AUDIT-002 | Internal policy decision exposure | High | Fixed, verified | Verified narrowed response/audit behavior | `invocation.py`, invocation tests | Product full suite; Tool Gateway suite | No longer caps security |
+| SDK-AUDIT-003 | Installed-wheel network gateway test missing | High | Fixed, verified | Verified installed SDK contract in current suite | installed SDK contract tests | Tool Gateway suite includes installed-wheel localhost HTTP test | No longer caps implementation confidence |
+| SDK-AUDIT-004 | Duplicate top-level SDK package ownership | High | Fixed, strengthened | Replaced `product_platform.tool_gateway.sdk` with compatibility re-export from canonical `ophanix_tool_gateway.sdk` | `product_platform/tool_gateway/sdk.py`, `__init__.py`, package tests | SDK identity test, Tool Gateway suite, product validator | No longer caps packaging/API consistency |
+| SDK-AUDIT-005 | Idempotency replay retention | Medium | Fixed, verified | Verified previous cleanup/retention path | runtime audit cleanup and CLI paths | Product full suite; Tool Gateway suite | No active score cap |
+| SDK-AUDIT-006 | `min_sdk_version` ignored | Medium | Fixed, verified | Verified SDK compatibility tests | SDK source/tests/docs | SDK tests, SDK mypy | No active score cap |
+| SDK-AUDIT-007 | Process-local rate limiting | Medium | Fixed | Added PostgreSQL-backed shared fixed-window limiter, hashed keys, key-space cap, atomic DB upsert, shared-app tests, concurrency regression | `operational_state.py`, migration 0060, `app.py`, settings/docs/tests | Focused concurrency test; Tool Gateway suite 312 passed; mypy/ruff | Removes prior reliability/security cap for MVP deployments using one DB |
+| SDK-AUDIT-008 | Process-local circuit breaker | Medium | Fixed | Added PostgreSQL-backed circuit breaker shared across app instances while preserving test override hook | `operational_state.py`, migration 0060, `app.py`, forwarding tests/docs | Shared-app circuit breaker test; Tool Gateway suite | Removes prior multi-worker restart-state cap |
+| SDK-AUDIT-009 | Offset pagination churn risk | Medium | Fixed | Added signed cursor pagination to server discovery and made SDK `list_all_tools()` / `get_tool()` prefer cursor pages with offset fallback | `pagination.py`, `repository.py`, `models.py`, `app.py`, SDK, docs/tests | Cursor SDK tests; Tool Gateway suite; SDK tests | Removes pagination score cap |
+| SDK-AUDIT-010 | Discovery cache staleness | Medium | Fixed, verified | Verified invocation-time auth still gates stale discovery | SDK/product tests/docs | SDK tests; Tool Gateway suite | No active score cap |
+| SDK-AUDIT-011 | Disabled response policy bypass | Medium | Fixed, verified | Verified response policy guard | response/app tests | Tool Gateway suite | No active score cap |
+| SDK-AUDIT-012 | SSRF depends on egress controls | Medium | Accepted remaining risk | Verified app-level validation remains fail-closed for private/reserved targets; did not claim repo can enforce network egress outside deployment | upstream validation/docs/tests | Upstream tests; Tool Gateway suite | Caps security/reliability below 8.5 until deployment egress controls are proven |
+| SDK-AUDIT-013 | Local/test unresolved upstream hosts allowed by default | Medium | Fixed | Changed unresolved hosts to fail closed unless explicit `OPHANIX_ALLOW_UNRESOLVED_UPSTREAM_HOSTS=true` in dev/local/test; tests now mock demo host DNS instead of enabling bypass | `models.py`, `tests/conftest.py`, upstream tests/docs | Upstream tests; Tool Gateway suite | Removes local/test parity cap |
+| SDK-AUDIT-014 | SDK payload depth limit missing | Medium | Fixed, verified | Verified SDK depth tests | SDK source/tests/docs | SDK tests | No active score cap |
+| SDK-AUDIT-015 | Standalone SDK tests thin | Medium | Fixed, verified | Verified standalone SDK suite | SDK tests | SDK 33 passed | No active score cap |
+| SDK-AUDIT-016 | Product release validator weaker | Medium | Fixed, strengthened | Hardened publish workflow to run product validator with dependency audit and strict tag checks on release | `.github/workflows/publish.yml`, product validator | Product strict release validator passed | Improves release confidence |
+| SDK-AUDIT-017 | SBOM listed artifacts only | Medium | Fixed, verified | Verified validator output path still builds and checks artifacts | validators | strict release validators | No active score cap |
+| SDK-AUDIT-018 | Dependency ranges not validated | Medium | Fixed, verified | Verified dependency-audit validators | validators/CI/docs | strict release validators | No active score cap |
+| SDK-AUDIT-019 | Credential issuance docs opaque | Medium | Fixed, verified | Verified docs/examples compile through current tests where applicable | README/tests | Product full suite | No active score cap |
+| SDK-AUDIT-020 | Direct HTTP example lacks safeguards | Medium | Fixed, verified | Verified direct HTTP example with stricter upstream host handling | example/tests/docs | Direct HTTP tests; Tool Gateway suite | No active score cap |
+| SDK-AUDIT-021 | Deprecated `list_tools(status=...)` public | Low | Accepted remaining risk | Kept for 0.1.x compatibility; cursor-first `list_all_tools()` is now preferred and documented | SDK/docs/tests | SDK and product SDK tests | Low API cleanup cap remains until removal/migration release |
+| SDK-AUDIT-022 | `raw` / `decision` unstable dependence | Medium | Fixed, verified | Verified narrowed decision response and docs | invocation/SDK docs/tests | Tool Gateway suite | No active score cap |
+| SDK-AUDIT-023 | Event hooks stringly typed | Low | Fixed, verified | Verified typed telemetry exports remain available through canonical SDK and product shim | SDK exports/tests | SDK tests; product SDK tests | No active score cap |
+| SDK-AUDIT-024 | Async client uses `threading.RLock` | Low | Fixed | Replaced async cache lock with `asyncio.Lock()` and added async cache clear path while preserving sync `clear_tool_cache()` compatibility | SDK source, product SDK source copy, SDK tests/docs | SDK tests; product SDK tests; mypy | Removes async runtime concern |
+| SDK-AUDIT-025 | Custom HTTP protocols informal | Low | Fixed, verified | Verified public Protocol exports survive product shim | SDK exports/docs/tests | SDK/product SDK tests | No active score cap |
+| SDK-AUDIT-026 | Buffered custom client opt-in bypasses response cap | Medium | Fixed | Required `stream()` for all custom sync/async clients; `allow_buffered_custom_http_client` remains accepted only as compatibility no-op | SDK source/docs/tests | SDK tests; product SDK tests | Removes response-size bypass cap |
+| SDK-AUDIT-027 | Env provider rereads env | Low | Fixed, verified | Verified documented dynamic behavior | SDK tests/docs | SDK tests | No active score cap |
+| SDK-AUDIT-028 | README install wording stale | Low | Fixed, verified | Verified PyPI-first docs remain | SDK README | docs review, package validator | No active score cap |
+| SDK-AUDIT-029 | No framework example | Low | Fixed, verified | Verified example remains in package tree | SDK examples/tests | SDK tests/package validator | No active score cap |
+| SDK-AUDIT-030 | Constructor config broad | Low | Fixed, verified | Verified docs remain | SDK docs | docs review | No active score cap |
+| SDK-AUDIT-031 | Diagnostic redaction best-effort | Medium | Accepted remaining risk | Verified current structured-key/text sanitizers and docs; did not claim arbitrary DLP is solved | SDK source/tests/SECURITY | SDK tests | Security score remains capped below 9 without a real DLP classifier/policy engine |
+| SDK-AUDIT-032 | Redaction regex ReDoS safety incomplete | Low | Fixed | Switched policy regex execution to the `regex` package with per-substitution timeout and fail-closed whole-value redaction on timeout | `response.py`, `models.py`, product dependency/tests | Redaction timeout test; Tool Gateway suite; mypy/ruff | Removes regex-specific reliability cap |
+| SDK-AUDIT-033 | Custom executor messages unsanitized | Medium | Fixed, verified | Verified prior sanitization under current tests | invocation/app tests | Tool Gateway suite | No active score cap |
+| SDK-AUDIT-034 | Publication provenance manual handoff | Medium | Accepted remaining risk | Repository now builds, signs, attests, uploads artifacts, writes SBOMs, and validates release artifacts; actual PyPI upload/provenance for a published package still requires release-time/external verification | `.github/workflows/publish.yml`, validators/docs | strict release validators passed locally; workflow static review | Release governance capped below 9 until a tagged release run and PyPI provenance are verified |
+| SDK-AUDIT-035 | `list_all_tools()` no hard cap | Low | Fixed, verified | Verified default cap and cursor-first behavior together | SDK tests/docs | SDK tests; product SDK tests | No active score cap |
+| SDK-AUDIT-036 | Token grammar too strict | Low | Fixed, verified | Verified issued-token compatibility | auth/SDK tests | Product full suite | No active score cap |
+| SDK-AUDIT-037 | Generated caches in package trees | Nit | Fixed, verified | Verified validators/builds do not include generated caches | validators/build | strict release validators | No active score cap |
+| SDK-AUDIT-038 | Changelog minimal/undated | Low | Fixed, verified | Verified changelog exists and package validator passes | changelog/docs | package validators | No active score cap |
+
+Per-issue closure notes for issues changed in Pass 23:
+
+| Issue ID | Remaining problem before pass | Root cause | Actions taken | Tests added/updated | Validation performed | Residual risk | Final confidence |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| SDK-AUDIT-004 | Product namespace and product SDK module could still expose duplicate class identities in source checkouts. | Product carried a full duplicate SDK module while the packaged product depends on the standalone SDK. | Replaced `product_platform.tool_gateway.sdk` with a compatibility re-export from `ophanix_tool_gateway.sdk`; updated namespace exports. | Product SDK export identity test now passes through canonical classes. | Focused export test; Tool Gateway suite; product validator. | Source checkout still contains `src/ophanix_tool_gateway` for local parity, but product artifacts exclude it. | High |
+| SDK-AUDIT-007 | Rate limiting was not durable/shared enough and the initial DB update needed atomicity under concurrency. | Runtime state lived in process memory; first DB design used read-then-write count update. | Added migration-backed table, hashed bucket keys, overflow bucket, shared DB lookup, and atomic `ON CONFLICT ... request_count + 1 RETURNING` update. | Shared-app rate limit tests plus `test_unit_gateway_rate_limit_increment_is_atomic_across_connections`. | Focused tests; Tool Gateway suite 312 passed; ruff/mypy. | Database availability is now part of the rate-limit dependency. | High |
+| SDK-AUDIT-008 | Circuit breaker state did not survive restarts/workers. | In-memory breaker was the runtime default. | Added `DatabaseToolGatewayCircuitBreaker` and made app runtime default to DB state while preserving explicit test override. | Shared-app circuit breaker integration test. | Tool Gateway suite 312 passed. | Breaker state is shared only across app instances using the same database. | High |
+| SDK-AUDIT-009 | Offset pagination could drift under catalog churn. | Server only exposed offset discovery and SDK scanned with offsets. | Added signed cursor tokens, snapshot-before discovery, cursor repository query, server cursor response, SDK cursor-first scans, and offset fallback for older gateways. | Cursor pagination SDK tests and product SDK tests. | SDK 33 passed; product Tool Gateway 312 passed. | Cursor validity depends on `session_secret`; changing that secret invalidates outstanding cursors, which is acceptable. | High |
+| SDK-AUDIT-013 | Local/test allowed unresolved upstream hosts by default. | Test convenience was embedded as default behavior. | Made unresolved-host bypass explicit opt-in and environment-gated; test fixtures now fake DNS for reserved demo hosts instead of enabling bypass. | Local/test unresolved-host rejection and explicit-opt-in tests. | Upstream tests; Tool Gateway suite. | Real deployment egress controls still matter for SDK-AUDIT-012. | High |
+| SDK-AUDIT-024 | Async client used a synchronous lock in async cache paths. | Sync and async clients shared lock implementation assumptions. | Changed async cache lock to `asyncio.Lock()` and made internal async cache helpers awaitable; added `aclear_tool_cache()`. | Async cache partition and cache clear tests. | SDK tests; product SDK tests; mypy. | None known for MVP concurrency. | High |
+| SDK-AUDIT-026 | Buffered custom HTTP adapters could bypass response-size enforcement. | Constructor escape hatch allowed non-streaming custom clients. | Runtime validation now always requires `stream()` for custom clients; compatibility flag is accepted but ignored. | Custom-client validation tests/docs. | SDK tests; product SDK tests; release validators. | Consumers needing buffered adapters must wrap them with a streaming-compatible shim. | High |
+| SDK-AUDIT-032 | Regex safety was heuristic only. | Python `re` has no execution timeout. | Added `regex` runtime dependency and timeout-bounded substitution with fail-closed redaction of whole value on timeout. | Pathological regex timeout regression test. | Response tests; Tool Gateway suite; product mypy/ruff. | Regex authors remain trusted for semantic correctness, but runaway execution is bounded. | High |
+| SDK-AUDIT-034 | Release provenance was too manual/under-evidenced. | Build/sign/attest existed, but product validator was weaker and PyPI upload remains an external release step. | Hardened product publish validation with dependency audit and strict tag checks; verified build, twine metadata, SBOM/manifest, and dependency-audit validators locally. | Validator/package tests. | Product and SDK strict release validators passed locally. | Actual PyPI publication provenance must still be checked on a real tagged release because this local environment cannot perform the external publish. | Medium |
+
+Validation evidence for Pass 23:
+
+| Command | Result |
+| --- | --- |
+| `python3 -m py_compile ...` for changed operational state, SDK shim, tests, and conftest | Passed |
+| SDK `python3 -m pytest tests -q --tb=short` | 33 passed |
+| SDK `python3 -m ruff check src tests --select E,F,W --ignore E501` | Passed |
+| SDK `python3 -m mypy src/ophanix_tool_gateway` | Passed |
+| Product `PYTHONPATH=src python3 -m ruff check src/product_platform/tool_gateway src/product_platform/api/app.py src/product_platform/db/connection.py tests/conftest.py tests/test_tool_gateway_*.py --select E,F,W --ignore E501` | Passed |
+| Product `PYTHONPATH=src python3 -m mypy src/product_platform/tool_gateway src/ophanix_tool_gateway` | Passed |
+| Product focused rate-limit regression tests | 3 passed |
+| Product Tool Gateway suite after final changes: `PYTHONPATH=src python3 -m pytest packages/product-platform/tests/test_tool_gateway_*.py -q --tb=short` from repo root | 312 passed, 2 third-party websocket deprecation warnings |
+| Product full suite before final isolated atomic rate-limit tightening: `PYTHONPATH=src python3 -m pytest -q --tb=short` | 817 passed, 2 third-party websocket deprecation warnings |
+| SDK `python3 scripts/validate_release.py --require-dependency-audit` | Passed; pip-audit skipped only the local package distribution identity |
+| Product `python3 scripts/validate_release.py --require-dependency-audit` | Passed; pip-audit skipped only the local package distribution identity |
+
+Remaining unresolved or accepted risks:
+
+- SDK-AUDIT-012: final SSRF protection still needs deployment-level egress firewall/proxy/VPC controls. The code validates configured URLs and rejects unsafe DNS/IP targets, but no application library can guarantee network egress enforcement after DNS changes without infrastructure support.
+- SDK-AUDIT-021: deprecated `list_tools(status=...)` remains for 0.1.x compatibility. Removal should happen in a documented breaking or migration release.
+- SDK-AUDIT-031: arbitrary PII/DLP redaction is not fully solved. Structured sensitive keys, common text patterns, and server message sanitization are covered, but a true DLP classifier/policy engine is out of scope for this repository pass.
+- SDK-AUDIT-034: repository-side release provenance is materially stronger, but a real tagged release and PyPI artifact provenance must be verified outside this local pass.
+
+Updated scoring matrix after Pass 23:
+
+| Category | Pass 22 score | Pass 23 score | Direction | Reason | Remaining score cap |
+| --- | ---: | ---: | --- | --- | --- |
+| Implementation quality | 8.0 | 8.4 | Raised | Cursor pagination, canonical SDK re-export, shared DB operational state, atomic rate limiter update, async lock fix, stricter custom-client contract, and full current Tool Gateway validation remove the prior implementation caps. | Capped below 9 by remaining deprecated API surface and lack of real tagged release evidence in this local pass. |
+| Ease of use | 8.0 | 8.2 | Raised | Cursor-first SDK behavior is transparent, product SDK imports now resolve to canonical classes, docs reflect PyPI publication and safer custom clients, and local/test upstream behavior is explicit. | Capped below 9 by deprecated `list_tools(status=...)` and limited external onboarding evidence. |
+| Security and reliability | 7.5 | 8.1 | Raised | Shared/atomic rate limiting, shared circuit breaker state, fail-closed unresolved upstream hosts, regex execution timeouts, and streaming-only custom adapters materially improve the runtime safety story. | Capped near 8 by deployment-level SSRF egress dependency, best-effort DLP/redaction, and release-time provenance verification. |
+
+What remains required to reach 9 out of 10:
+
+- Verify a tagged release run end-to-end, including GitHub artifact signatures/attestations and PyPI provenance for the published SDK artifacts.
+- Add or document deployment-enforced egress controls for upstream HTTP forwarding and validate them in an environment test.
+- Replace best-effort diagnostic redaction with a stronger structured data-classification/DLP boundary if arbitrary PII leakage must be prevented.
+- Remove or fully migrate deprecated `list_tools(status=...)` in a documented compatibility release.
+- Add external onboarding evidence from a fresh consumer integration, not just repository-local tests.
+
+Final Pass 23 assessment:
+
+All `SDK-AUDIT-*` issues were rechecked and accounted for. The previously deferred operational and API issues are now fixed with code, tests, docs, packaging, and release validation where the repository can own the fix. Four items remain as explicit accepted risks because they require deployment controls, breaking API migration, true DLP capabilities, or real release-time provenance verification. Controlled MVP adoption is now defensible; broader production adoption should wait for the remaining external/security governance evidence.

@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
-from product_platform.tool_gateway.sdk import (
+from ophanix_tool_gateway import (
     AsyncOphanixToolGatewayClient,
+    AsyncGatewayHttpClient,
     AsyncTokenProvider,
     EnvironmentTokenProvider,
     GatewayCompatibility,
     OphanixToolGatewayClient,
     StaticTokenProvider,
+    SyncGatewayHttpClient,
+    SDK_VERSION,
+    TelemetryEvent,
+    TelemetryEventHook,
+    TelemetryEventName,
     TokenProvider,
     ToolCallResult,
     ToolGatewayClientConfig,
@@ -17,17 +23,23 @@ from product_platform.tool_gateway.sdk import (
     ToolDeniedError,
     ToolGatewayError,
     ToolGatewayValidationError,
-    __version__,
 )
+
+__version__ = SDK_VERSION
 
 __all__ = [
     "__version__",
+    "AsyncGatewayHttpClient",
     "AsyncOphanixToolGatewayClient",
     "AsyncTokenProvider",
     "OphanixToolGatewayClient",
     "EnvironmentTokenProvider",
     "GatewayCompatibility",
     "StaticTokenProvider",
+    "SyncGatewayHttpClient",
+    "TelemetryEvent",
+    "TelemetryEventHook",
+    "TelemetryEventName",
     "TokenProvider",
     "ToolCallResult",
     "ToolGatewayClientConfig",

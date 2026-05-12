@@ -6,10 +6,8 @@ import base64
 import hashlib
 import inspect
 import json
-import math
 import os
 import re
-import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -127,6 +125,7 @@ from product_platform.agents.simulation import simulate_registration_action
 from product_platform.db.connection import Database
 from product_platform.db.migrator import is_supported_database_url
 from product_platform.db.seed import seed_demo_data
+from product_platform.db.time import utc_now_iso
 from product_platform.compliance.models import (
     AuditExportRequest,
     AuditExportResponse,
@@ -540,6 +539,7 @@ from product_platform.tool_gateway.models import (
     AgentToolPermissionResponse,
     GatewayCapabilitiesResponse,
     GatewayToolDefinitionResponse,
+    GatewayToolListPageResponse,
     ToolDefinitionCreateRequest,
     ToolDefinitionPatchRequest,
     ToolDefinitionResponse,
@@ -582,13 +582,23 @@ from product_platform.tool_gateway.decision import ToolPolicyDecisionService
 from product_platform.tool_gateway.health import ToolUpstreamHealthChecker
 from product_platform.tool_gateway.invocation import (
     AsyncHttpToolInvocationExecutor,
-    InMemoryToolGatewayCircuitBreaker,
     ToolExecutionError,
     ToolExecutionResult,
+    ToolInvocationDecisionSummary,
     ToolInvocationRequest,
     ToolInvocationResponse,
     invocation_request_hash,
+    safe_agent_error_message,
     validate_idempotency_key,
+)
+from product_platform.tool_gateway.operational_state import (
+    DatabaseToolGatewayCircuitBreaker,
+    tool_gateway_rate_limit_result,
+)
+from product_platform.tool_gateway.pagination import (
+    GatewayToolCursor,
+    decode_gateway_tool_cursor,
+    encode_gateway_tool_cursor,
 )
 from product_platform.tool_gateway.schemas import ToolSchemaValidationError, validate_payload
 from product_platform.tool_gateway.response import process_tool_execution_response
@@ -596,6 +606,7 @@ from product_platform.tool_gateway.runtime_audit import (
     ToolInvocationIdempotencyConflictError,
     ToolInvocationIdempotencyInProgressError,
     ToolInvocationIdempotencyRepository,
+    ToolInvocationIdempotencyStaleError,
     ToolRuntimeActionCreate,
     ToolRuntimeActionDetailResponse,
     ToolRuntimeActionEventCreate,
@@ -681,6 +692,22 @@ def _tool_gateway_idempotency_key(request: Request, body: ToolInvocationRequest)
     return normalized_header or body_value
 
 
+def _tool_invocation_decision_summary(decision: Any) -> ToolInvocationDecisionSummary:
+    return ToolInvocationDecisionSummary(
+        decision=str(decision.decision),
+        reason_code=decision.reason_code,
+    )
+
+
+def _tool_execution_error_body(error: dict[str, Any] | None) -> dict[str, str]:
+    error = error if isinstance(error, dict) else {}
+    code = str(error.get("code") or "upstream_error")
+    return {
+        "code": code,
+        "message": safe_agent_error_message(error.get("message") or "Tool execution failed."),
+    }
+
+
 def _error_response(
     request: Request,
     *,
@@ -744,6 +771,7 @@ def _validate_production_settings(settings: Settings) -> None:
     if not settings.gateway_token_hash_pepper:
         raise ValueError("OPHANIX_GATEWAY_TOKEN_HASH_PEPPER must be set in production.")
     positive_gateway_limits = {
+        "OPHANIX_DATABASE_MAX_POOL_SIZE": settings.database_max_pool_size,
         "OPHANIX_TOOL_GATEWAY_MAX_BODY_BYTES": settings.tool_gateway_max_body_bytes,
         "OPHANIX_TOOL_GATEWAY_RATE_LIMIT_WINDOW_SECONDS": (
             settings.tool_gateway_rate_limit_window_seconds
@@ -758,6 +786,12 @@ def _validate_production_settings(settings: Settings) -> None:
         ),
         "OPHANIX_TOOL_GATEWAY_CIRCUIT_BREAKER_COOLDOWN_SECONDS": (
             settings.tool_gateway_circuit_breaker_cooldown_seconds
+        ),
+        "OPHANIX_TOOL_GATEWAY_IDEMPOTENCY_IN_PROGRESS_TTL_SECONDS": (
+            settings.tool_gateway_idempotency_in_progress_ttl_seconds
+        ),
+        "OPHANIX_TOOL_GATEWAY_IDEMPOTENCY_REPLAY_RETENTION_SECONDS": (
+            settings.tool_gateway_idempotency_replay_retention_seconds
         ),
     }
     unsafe_limits = [name for name, value in positive_gateway_limits.items() if int(value) <= 0]
@@ -789,59 +823,37 @@ def _gateway_rate_limit_key(request: Request) -> str:
     return f"client:{client_host}"
 
 
-def _tool_gateway_rate_limit_result(app: FastAPI, request: Request) -> tuple[bool, int]:
+def _tool_gateway_rate_limit_result(
+    app: FastAPI,
+    request: Request,
+    database_factory: Any | None = None,
+) -> tuple[bool, int]:
     settings = app.state.settings
     max_requests = int(settings.tool_gateway_rate_limit_max_requests)
     window_seconds = int(settings.tool_gateway_rate_limit_window_seconds)
     if max_requests <= 0 or window_seconds <= 0:
         return False, 0
-    now = time.monotonic()
     key = _gateway_rate_limit_key(request)
-    limits: dict[str, tuple[float, int]] = app.state.tool_gateway_rate_limits
-    overflow_limits: dict[str, tuple[float, int]] = getattr(
-        app.state,
-        "tool_gateway_rate_limit_overflow_limits",
-        {},
-    )
-    app.state.tool_gateway_rate_limit_overflow_limits = overflow_limits
+    client_host = request.client.host if request.client else "unknown"
+    overflow_key = f"client:{client_host}:overflow"
     max_keys = int(getattr(settings, "tool_gateway_rate_limit_max_keys", 10_000))
-    lock = getattr(app.state, "tool_gateway_rate_limit_lock", None)
-    if lock is None:
-        lock = threading.Lock()
-        app.state.tool_gateway_rate_limit_lock = lock
-    with lock:
-        window_started_at, count = limits.get(key, (now, 0))
-        elapsed = now - window_started_at
-        retry_after = max(1, int(math.ceil(window_seconds - elapsed)))
-        if elapsed >= window_seconds:
-            limits[key] = (now, 1)
-            return False, 0
-        if key not in limits and max_keys > 0 and len(limits) >= max_keys:
-            expired_keys = [
-                existing_key
-                for existing_key, (started_at, _) in limits.items()
-                if now - started_at >= window_seconds
-            ]
-            for expired_key in expired_keys:
-                limits.pop(expired_key, None)
-            if len(limits) >= max_keys:
-                client_host = request.client.host if request.client else "unknown"
-                overflow_key = f"client:{client_host}:overflow"
-                overflow_started_at, overflow_count = overflow_limits.get(
-                    overflow_key,
-                    (now, 0),
-                )
-                overflow_elapsed = now - overflow_started_at
-                overflow_retry_after = max(1, int(math.ceil(window_seconds - overflow_elapsed)))
-                if overflow_elapsed >= window_seconds:
-                    overflow_limits[overflow_key] = (now, 1)
-                    return False, 0
-                overflow_count += 1
-                overflow_limits[overflow_key] = (overflow_started_at, overflow_count)
-                return overflow_count > max_requests, overflow_retry_after
-        count += 1
-        limits[key] = (window_started_at, count)
-        return count > max_requests, retry_after
+    database = (
+        database_factory()
+        if callable(database_factory)
+        else getattr(app.state, "database", None)
+    )
+    if not isinstance(database, Database):
+        raise RuntimeError("Database is required for Tool Gateway rate limiting.")
+    with database.transaction() as connection:
+        result = tool_gateway_rate_limit_result(
+            connection,
+            key=key,
+            overflow_key=overflow_key,
+            max_requests=max_requests,
+            window_seconds=window_seconds,
+            max_keys=max_keys,
+        )
+    return result.limited, result.retry_after_seconds
 
 
 def _bool_env(name: str, default: bool = False) -> bool:
@@ -1021,13 +1033,7 @@ def create_app(
     app.state.denied_audit_events = []
     app.state.started_at = started_at
     app.state.tool_gateway_http_client = httpx.AsyncClient(follow_redirects=False, trust_env=False)
-    app.state.tool_gateway_rate_limits = {}
-    app.state.tool_gateway_rate_limit_overflow_limits = {}
-    app.state.tool_gateway_rate_limit_lock = threading.Lock()
-    app.state.tool_gateway_circuit_breaker = InMemoryToolGatewayCircuitBreaker(
-        failure_threshold=int(resolved_settings.tool_gateway_circuit_breaker_failure_threshold),
-        cooldown_seconds=float(resolved_settings.tool_gateway_circuit_breaker_cooldown_seconds),
-    )
+    app.state.tool_gateway_circuit_breaker = None
 
     async def _close_tool_gateway_http_client() -> None:
         client = app.state.tool_gateway_http_client
@@ -1126,7 +1132,11 @@ def create_app(
                         code="REQUEST_BODY_TOO_LARGE",
                         message="Tool Gateway request body exceeds the configured size limit.",
                     )
-            rate_limited, retry_after_seconds = _tool_gateway_rate_limit_result(app, request)
+            rate_limited, retry_after_seconds = _tool_gateway_rate_limit_result(
+                app,
+                request,
+                _audit_database,
+            )
             if rate_limited:
                 return _error_response(
                     request,
@@ -1241,7 +1251,10 @@ def create_app(
 
             created = create_migrated_test_database()
         else:
-            created = Database(resolved_settings.database_url)
+            created = Database(
+                resolved_settings.database_url,
+                max_pool_size=int(resolved_settings.database_max_pool_size),
+            )
             created.migrate()
         if _is_local_environment(resolved_settings.environment):
             with created.transaction() as connection:
@@ -3338,15 +3351,17 @@ def create_app(
 
     @app.get(
         "/api/v1/gateway/tools",
-        response_model=list[GatewayToolDefinitionResponse],
+        response_model=list[GatewayToolDefinitionResponse] | GatewayToolListPageResponse,
         tags=["tool-gateway"],
     )
     async def list_gateway_callable_tools(
         owner_team: str | None = None,
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
+        pagination: str = Query(default="offset", pattern="^(offset|cursor)$"),
+        cursor: str | None = None,
         principal: GatewayPrincipal = Depends(_get_gateway_principal),
-    ) -> list[GatewayToolDefinitionResponse]:
+    ) -> list[GatewayToolDefinitionResponse] | GatewayToolListPageResponse:
         """List active Tool Gateway contracts callable by the authenticated agent."""
 
         with _audit_database().transaction() as connection:
@@ -3355,6 +3370,55 @@ def create_app(
                 principal.organization_id,
                 principal.environment_id,
             )
+            if pagination == "cursor" or cursor is not None:
+                try:
+                    decoded_cursor = (
+                        decode_gateway_tool_cursor(
+                            cursor,
+                            secret=resolved_settings.session_secret,
+                        )
+                        if cursor
+                        else GatewayToolCursor(
+                            snapshot_before=utc_now_iso(),
+                            last_updated_at=None,
+                            last_id=None,
+                            owner_team=owner_team.strip() if owner_team else None,
+                        )
+                    )
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                normalized_owner_team = owner_team.strip() if owner_team else None
+                if decoded_cursor.owner_team != normalized_owner_team:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Discovery cursor does not match the requested owner_team filter.",
+                    )
+                rows = repository.list_tools_for_gateway_principal_cursor(
+                    agent_id=principal.agent_id,
+                    credential_id=principal.credential_id,
+                    owner_team=normalized_owner_team,
+                    limit=limit + 1,
+                    snapshot_before=decoded_cursor.snapshot_before,
+                    last_updated_at=decoded_cursor.last_updated_at,
+                    last_id=decoded_cursor.last_id,
+                )
+                page_rows = rows[:limit]
+                next_cursor = None
+                if len(rows) > limit and page_rows:
+                    last_row = page_rows[-1]
+                    next_cursor = encode_gateway_tool_cursor(
+                        GatewayToolCursor(
+                            snapshot_before=decoded_cursor.snapshot_before,
+                            last_updated_at=str(last_row["updated_at"]),
+                            last_id=str(last_row["id"]),
+                            owner_team=normalized_owner_team,
+                        ),
+                        secret=resolved_settings.session_secret,
+                    )
+                return GatewayToolListPageResponse(
+                    tools=[gateway_tool_definition_response(row) for row in page_rows],
+                    next_cursor=next_cursor,
+                )
             return [
                 gateway_tool_definition_response(row)
                 for row in repository.list_tools_for_gateway_principal(
@@ -3514,6 +3578,9 @@ def create_app(
                                 ),
                                 request_id=context.request_id,
                                 correlation_id=correlation_id,
+                                in_progress_ttl_seconds=(
+                                    resolved_settings.tool_gateway_idempotency_in_progress_ttl_seconds
+                                ),
                             )
                         )
                     except ToolInvocationIdempotencyConflictError:
@@ -3553,6 +3620,28 @@ def create_app(
                                         "message": (
                                             "An invocation with this idempotency key "
                                             "is still in progress."
+                                        ),
+                                    },
+                                )
+                            ),
+                        )
+                    except ToolInvocationIdempotencyStaleError:
+                        return JSONResponse(
+                            status_code=409,
+                            content=jsonable_encoder(
+                                ToolInvocationResponse(
+                                    request_id=context.request_id,
+                                    correlation_id=correlation_id,
+                                    tool_name=tool_name,
+                                    decision=None,
+                                    reason_code="idempotency_stale",
+                                    result=None,
+                                    error={
+                                        "code": "idempotency_stale",
+                                        "message": (
+                                            "A previous invocation with this idempotency key "
+                                            "did not complete and its outcome is unknown; "
+                                            "use a new idempotency key after reconciliation."
                                         ),
                                     },
                                 )
@@ -3633,6 +3722,18 @@ def create_app(
 
             executor = getattr(app.state, "tool_gateway_executor", None)
             if executor is None:
+                circuit_breaker = getattr(app.state, "tool_gateway_circuit_breaker", None)
+                if circuit_breaker is None:
+                    circuit_breaker = DatabaseToolGatewayCircuitBreaker(
+                        _audit_database(),
+                        failure_threshold=int(
+                            resolved_settings.tool_gateway_circuit_breaker_failure_threshold
+                        ),
+                        cooldown_seconds=float(
+                            resolved_settings.tool_gateway_circuit_breaker_cooldown_seconds
+                        ),
+                    )
+                    app.state.tool_gateway_circuit_breaker = circuit_breaker
                 executor = AsyncHttpToolInvocationExecutor(
                     _PreloadedToolUpstreamTargetRepository(upstream_target),
                     http_client=getattr(app.state, "tool_gateway_http_client", None),
@@ -3641,7 +3742,7 @@ def create_app(
                         resolved_settings.tool_gateway_max_upstream_response_bytes
                     ),
                     allowed_upstream_hosts=resolved_settings.tool_gateway_upstream_host_allowlist,
-                    circuit_breaker=getattr(app.state, "tool_gateway_circuit_breaker", None),
+                    circuit_breaker=circuit_breaker,
                 )
             try:
                 maybe_execution = executor.execute(
@@ -3656,11 +3757,12 @@ def create_app(
                     else maybe_execution
                 )
             except ToolExecutionError as exc:
+                safe_message = safe_agent_error_message(exc.message)
                 _update_runtime_action(
                     ToolRuntimeActionUpdate(
                         action_status="upstream_failed",
                         error_code=exc.code,
-                        response_summary={"error": exc.message},
+                        response_summary={"error": safe_message},
                     ),
                     "tool.runtime.upstream_failed",
                     {"error_code": exc.code},
@@ -3670,10 +3772,10 @@ def create_app(
                         request_id=context.request_id,
                         correlation_id=correlation_id,
                         tool_name=tool_name,
-                        decision=decision,
+                        decision=_tool_invocation_decision_summary(decision),
                         reason_code=decision.reason_code,
                         result=None,
-                        error={"code": exc.code, "message": exc.message},
+                        error={"code": exc.code, "message": safe_message},
                     )
                 )
                 _store_idempotency_response(
@@ -3700,7 +3802,7 @@ def create_app(
                         request_id=context.request_id,
                         correlation_id=correlation_id,
                         tool_name=tool_name,
-                        decision=decision,
+                        decision=_tool_invocation_decision_summary(decision),
                         reason_code=decision.reason_code,
                         result=None,
                         error={
@@ -3759,10 +3861,13 @@ def create_app(
                             request_id=context.request_id,
                             correlation_id=correlation_id,
                             tool_name=tool_name,
-                            decision=decision,
+                            decision=_tool_invocation_decision_summary(decision),
                             reason_code=decision.reason_code,
                             result=None,
-                            error={"code": exc.code, "message": exc.message},
+                            error={
+                                "code": exc.code,
+                                "message": safe_agent_error_message(exc.message),
+                            },
                         )
                     )
                     _store_idempotency_response(
@@ -3805,14 +3910,10 @@ def create_app(
                         request_id=context.request_id,
                         correlation_id=correlation_id,
                         tool_name=tool_name,
-                        decision=decision,
+                        decision=_tool_invocation_decision_summary(decision),
                         reason_code=decision.reason_code,
                         result=None,
-                        error=execution.error
-                        or {
-                            "code": "upstream_error",
-                            "message": "Tool execution failed.",
-                        },
+                        error=_tool_execution_error_body(execution.error),
                     )
                 )
                 _store_idempotency_response(502, response_body, error_code=error_code)
@@ -3848,7 +3949,7 @@ def create_app(
                 request_id=context.request_id,
                 correlation_id=correlation_id,
                 tool_name=tool_name,
-                decision=decision,
+                decision=_tool_invocation_decision_summary(decision),
                 reason_code=decision.reason_code,
                 result=result,
                 error=None,
@@ -6087,6 +6188,18 @@ def create_app(
     ) -> ToolResponsePolicyResponse:
         """Patch response handling policy for a tool."""
 
+        if (
+            body.status == "disabled"
+            and not _is_local_environment(resolved_settings.environment)
+            and not _bool_env("OPHANIX_ALLOW_DISABLED_TOOL_RESPONSE_POLICY", False)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Disabling Tool Gateway response policy is blocked outside local/test "
+                    "environments unless OPHANIX_ALLOW_DISABLED_TOOL_RESPONSE_POLICY=true."
+                ),
+            )
         organization_id = _require_organization_id(current_user)
         try:
             with _audit_database().transaction() as connection:

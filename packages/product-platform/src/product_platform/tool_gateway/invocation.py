@@ -9,7 +9,7 @@ import math
 import re
 import threading
 import time
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import quote
 
 import httpx
@@ -25,8 +25,18 @@ MAX_UPSTREAM_URL_BYTES = 4096
 MAX_INVOCATION_PAYLOAD_DEPTH = 50
 MAX_CORRELATION_ID_LENGTH = 128
 MAX_IDEMPOTENCY_KEY_LENGTH = 128
+MAX_AGENT_SAFE_ERROR_MESSAGE_CHARS = 512
 CORRELATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:/@+-]+$")
 IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.:/@+-]+$")
+BEARER_TOKEN_RE = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
+SENSITIVE_ASSIGNMENT_RE = re.compile(
+    r"(?P<key>\b(?:authorization|api[-_\s]?key|apikey|client[-_\s]?secret|"
+    r"credential|password|passwd|pwd|private[-_\s]?key|refresh[-_\s]?token|"
+    r"access[-_\s]?token|secret|token)\b)"
+    r"(?P<before_sep>\s*)(?P<sep>[:=])(?P<after_sep>\s*)"
+    r"(?P<value>bearer\s+[^\s,;]+|\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+    re.IGNORECASE,
+)
 SECRET_LIKE_QUERY_KEY_TOKENS = {
     "api_key",
     "apikey",
@@ -100,13 +110,20 @@ def invocation_request_hash(*, tool_name: str, payload: dict[str, Any]) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
+class ToolInvocationDecisionSummary(BaseModel):
+    """Agent-facing policy decision summary without internal policy identifiers."""
+
+    decision: str
+    reason_code: str | None = None
+
+
 class ToolInvocationResponse(BaseModel):
     """Stable response envelope for allowed and denied tool calls."""
 
     request_id: str
     correlation_id: str
     tool_name: str
-    decision: ToolPolicyDecisionResult | None = None
+    decision: ToolInvocationDecisionSummary | None = None
     reason_code: str | None = None
     result: Any | None = None
     error: dict[str, Any] | None = None
@@ -143,6 +160,30 @@ class ToolExecutionError(RuntimeError):
         self.code = code
         self.message = message
         self.status_code = status_code
+
+
+def safe_agent_error_message(message: object) -> str:
+    """Return an agent-facing error message with common secret shapes redacted."""
+
+    raw = str(message or "").strip() or "Tool execution failed."
+    redacted = BEARER_TOKEN_RE.sub("Bearer [redacted]", raw)
+    redacted = SENSITIVE_ASSIGNMENT_RE.sub(_redact_sensitive_assignment, redacted)
+    if len(redacted) > MAX_AGENT_SAFE_ERROR_MESSAGE_CHARS:
+        redacted = f"{redacted[:MAX_AGENT_SAFE_ERROR_MESSAGE_CHARS - 3]}..."
+    return redacted
+
+
+class ToolGatewayCircuitBreaker(Protocol):
+    """Circuit-breaker interface used by invocation executors."""
+
+    def before_call(self, target_id: str) -> None:
+        ...
+
+    def record_success(self, target_id: str) -> None:
+        ...
+
+    def record_failure(self, target_id: str) -> None:
+        ...
 
 
 class InMemoryToolGatewayCircuitBreaker:
@@ -211,7 +252,7 @@ class HttpToolInvocationExecutor:
         fail_closed_unhealthy: bool = True,
         max_response_bytes: int = MAX_UPSTREAM_RESPONSE_BYTES,
         allowed_upstream_hosts: list[str] | tuple[str, ...] | set[str] | None = None,
-        circuit_breaker: InMemoryToolGatewayCircuitBreaker | None = None,
+        circuit_breaker: ToolGatewayCircuitBreaker | None = None,
     ) -> None:
         self.repository = repository
         self._owns_http_client = http_client is None
@@ -333,7 +374,7 @@ class AsyncHttpToolInvocationExecutor:
         fail_closed_unhealthy: bool = True,
         max_response_bytes: int = MAX_UPSTREAM_RESPONSE_BYTES,
         allowed_upstream_hosts: list[str] | tuple[str, ...] | set[str] | None = None,
-        circuit_breaker: InMemoryToolGatewayCircuitBreaker | None = None,
+        circuit_breaker: ToolGatewayCircuitBreaker | None = None,
     ) -> None:
         self.repository = repository
         self._owns_http_client = http_client is None
@@ -808,6 +849,16 @@ def _target_optional_value(target: Any, key: str) -> Any | None:
 
 def _normalize_key(key: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_")
+
+
+def _redact_sensitive_assignment(match: re.Match[str]) -> str:
+    return (
+        f"{match.group('key')}"
+        f"{match.group('before_sep')}"
+        f"{match.group('sep')}"
+        f"{match.group('after_sep')}"
+        "[redacted]"
+    )
 
 
 def _validate_json_value(

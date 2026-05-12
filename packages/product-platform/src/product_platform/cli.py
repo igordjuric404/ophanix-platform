@@ -13,6 +13,7 @@ from product_platform.db.connection import Database
 from product_platform.db.migrator import MigrationRunner
 from product_platform.db.seed import reset_demo_data, seed_demo_data
 from product_platform.demo.services import check_demo_http_health, run_demo_http_service
+from product_platform.tool_gateway.runtime_audit import purge_tool_invocation_idempotency_records
 from product_platform.worker import InMemoryJobQueue, JobRegistry, JobRequest, JobResult, Worker
 
 
@@ -33,6 +34,16 @@ def main() -> None:
     db_subparsers.add_parser("seed", help="Seed local demo data")
     reset = db_subparsers.add_parser("reset-demo", help="Reset local demo data")
     reset.add_argument("--remove-admin", action="store_true")
+    cleanup_idempotency = db_subparsers.add_parser(
+        "cleanup-idempotency",
+        help="Delete expired Tool Gateway idempotency replay records",
+    )
+    cleanup_idempotency.add_argument(
+        "--retention-seconds",
+        type=int,
+        default=None,
+        help="Replay retention window; defaults to OPHANIX_TOOL_GATEWAY_IDEMPOTENCY_REPLAY_RETENTION_SECONDS.",
+    )
 
     worker = subparsers.add_parser("worker", help="Run local worker utilities")
     worker_subparsers = worker.add_subparsers(dest="worker_command")
@@ -76,7 +87,24 @@ def main() -> None:
                 reset_demo_data(runner.connection, remove_admin=args.remove_admin)
             print("Reset demo data")
             return
-        parser.error("db command requires migrate, rollback, seed, or reset-demo")
+        if args.db_command == "cleanup-idempotency":
+            settings = load_settings()
+            retention_seconds = (
+                args.retention_seconds
+                if args.retention_seconds is not None
+                else settings.tool_gateway_idempotency_replay_retention_seconds
+            )
+            if retention_seconds <= 0:
+                parser.error("--retention-seconds must be greater than zero")
+            runner.apply_all()
+            with runner.connection:
+                deleted = purge_tool_invocation_idempotency_records(
+                    runner.connection,
+                    retention_seconds=retention_seconds,
+                )
+            print(f"Deleted idempotency records: {deleted}")
+            return
+        parser.error("db command requires migrate, rollback, seed, reset-demo, or cleanup-idempotency")
 
     if args.command == "worker":
         if args.worker_command == "noop":
@@ -112,7 +140,7 @@ def main() -> None:
     host = args.host or "127.0.0.1"
     port = args.port or 8088
     settings = load_settings()
-    database = Database(settings.database_url)
+    database = Database(settings.database_url, max_pool_size=int(settings.database_max_pool_size))
     database.migrate()
     uvicorn.run(create_app(settings, database=database), host=host, port=port, reload=False)
 

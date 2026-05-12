@@ -1,8 +1,9 @@
-"""Compatibility exports for the standalone Tool Gateway SDK package."""
+"""Compatibility re-export for the standalone Ophanix Tool Gateway SDK."""
 
 from __future__ import annotations
 
 from ophanix_tool_gateway.sdk import (
+    AsyncGatewayHttpClient,
     AsyncOphanixToolGatewayClient,
     AsyncTokenProvider,
     EnvironmentTokenProvider,
@@ -10,32 +11,39 @@ from ophanix_tool_gateway.sdk import (
     OphanixToolGatewayClient,
     SDK_VERSION,
     StaticTokenProvider,
+    SyncGatewayHttpClient,
+    TelemetryEvent,
+    TelemetryEventHook,
+    TelemetryEventName,
     TokenProvider,
-    ToolCallResult,
-    ToolGatewayClientConfig,
     ToolAuthenticationError,
+    ToolCallResult,
     ToolDefinition,
     ToolDeniedError,
+    ToolGatewayClientConfig,
     ToolGatewayError,
     ToolGatewayValidationError,
 )
 
-__version__ = SDK_VERSION
-
 __all__ = [
-    "__version__",
+    "AsyncGatewayHttpClient",
     "AsyncOphanixToolGatewayClient",
     "AsyncTokenProvider",
     "EnvironmentTokenProvider",
     "GatewayCompatibility",
     "OphanixToolGatewayClient",
+    "SDK_VERSION",
     "StaticTokenProvider",
+    "SyncGatewayHttpClient",
+    "TelemetryEvent",
+    "TelemetryEventHook",
+    "TelemetryEventName",
     "TokenProvider",
-    "ToolCallResult",
-    "ToolGatewayClientConfig",
     "ToolAuthenticationError",
+    "ToolCallResult",
     "ToolDefinition",
     "ToolDeniedError",
+    "ToolGatewayClientConfig",
     "ToolGatewayError",
     "ToolGatewayValidationError",
 ]

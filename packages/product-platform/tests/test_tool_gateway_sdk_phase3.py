@@ -172,53 +172,65 @@ class ToolGatewaySdkPhase3Tests(unittest.TestCase):
         self.assertEqual(tool.name, "claims.lookup")
 
     def test_get_tool_paginates_until_matching_tool_is_found(self) -> None:
-        seen_offsets: list[str] = []
+        seen_cursors: list[str | None] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
             query = parse_qs(request.url.query.decode())
-            offset = query["offset"][0]
-            seen_offsets.append(offset)
-            if offset == "0":
+            self.assertEqual(query["pagination"][0], "cursor")
+            cursor = query.get("cursor", [None])[0]
+            seen_cursors.append(cursor)
+            if cursor is None:
                 return httpx.Response(
                     200,
-                    json=[
+                    json=_tool_page(
                         {
-                            **TOOL_FIXTURE,
-                            "id": f"tool_other_{index}",
-                            "name": f"claims.other_{index}",
+                            "items": [
+                                {
+                                    **TOOL_FIXTURE,
+                                    "id": f"tool_other_{index}",
+                                    "name": f"claims.other_{index}",
+                                }
+                                for index in range(200)
+                            ],
+                            "next_cursor": "page-2",
                         }
-                        for index in range(200)
-                    ],
+                    ),
                 )
-            return httpx.Response(200, json=[TOOL_FIXTURE])
+            return httpx.Response(200, json=_tool_page({"items": [TOOL_FIXTURE]}))
 
         client = _client(handler)
 
         tool = client.get_tool("claims.lookup")
 
         self.assertEqual(tool.id, "tool_claims_lookup")
-        self.assertEqual(seen_offsets, ["0", "200"])
+        self.assertEqual(seen_cursors, [None, "page-2"])
 
     def test_list_all_tools_paginates_until_final_page(self) -> None:
-        seen_offsets: list[str] = []
+        seen_cursors: list[str | None] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
             query = parse_qs(request.url.query.decode())
-            offset = query["offset"][0]
-            seen_offsets.append(offset)
-            if offset == "0":
+            self.assertEqual(query["pagination"][0], "cursor")
+            cursor = query.get("cursor", [None])[0]
+            seen_cursors.append(cursor)
+            if cursor is None:
                 return httpx.Response(
                     200,
-                    json=[
+                    json=_tool_page(
                         {
-                            **TOOL_FIXTURE,
-                            "id": f"tool_other_{index}",
-                            "name": f"claims.other_{index}",
+                            "items": [
+                                {
+                                    **TOOL_FIXTURE,
+                                    "id": f"tool_other_{index}",
+                                    "name": f"claims.other_{index}",
+                                }
+                                for index in range(2)
+                            ],
+                            "next_cursor": "page-2",
                         }
-                        for index in range(2)
-                    ],
+                    ),
                 )
-            return httpx.Response(200, json=[TOOL_FIXTURE])
+            return httpx.Response(200, json=_tool_page({"items": [TOOL_FIXTURE]}))
 
         client = _client(handler)
 
@@ -229,7 +241,7 @@ class ToolGatewaySdkPhase3Tests(unittest.TestCase):
             "tool_other_1",
             "tool_claims_lookup",
         ])
-        self.assertEqual(seen_offsets, ["0", "2"])
+        self.assertEqual(seen_cursors, [None, "page-2"])
 
     def test_list_all_tools_rejects_non_integer_page_size(self) -> None:
         client = _client(lambda _request: httpx.Response(200, json=[]))
@@ -405,12 +417,16 @@ class ToolGatewaySdkPhase3Tests(unittest.TestCase):
             authorizations.append(request.headers["authorization"])
             return httpx.Response(
                 200,
-                json=[
+                json=_tool_page(
                     {
-                        **TOOL_FIXTURE,
-                        "id": f"tool_{len(authorizations)}",
+                        "items": [
+                            {
+                                **TOOL_FIXTURE,
+                                "id": f"tool_{len(authorizations)}",
+                            }
+                        ]
                     }
-                ],
+                ),
             )
 
         client = _client(handler, cache_tools=True, token_provider=provider)
@@ -430,16 +446,22 @@ class ToolGatewaySdkPhase3Tests(unittest.TestCase):
         def handler(request: httpx.Request) -> httpx.Response:
             authorizations.append(request.headers["authorization"])
             query = parse_qs(request.url.query.decode())
-            offset = query["offset"][0]
-            if offset == "0":
+            self.assertEqual(query["pagination"][0], "cursor")
+            cursor = query.get("cursor", [None])[0]
+            if cursor is None:
                 return httpx.Response(
                     200,
-                    json=[
-                        {**TOOL_FIXTURE, "id": "tool_1", "name": "claims.lookup_1"},
-                        {**TOOL_FIXTURE, "id": "tool_2", "name": "claims.lookup_2"},
-                    ],
+                    json=_tool_page(
+                        {
+                            "items": [
+                                {**TOOL_FIXTURE, "id": "tool_1", "name": "claims.lookup_1"},
+                                {**TOOL_FIXTURE, "id": "tool_2", "name": "claims.lookup_2"},
+                            ],
+                            "next_cursor": "page-2",
+                        }
+                    ),
                 )
-            return httpx.Response(200, json=[{**TOOL_FIXTURE, "id": "tool_3"}])
+            return httpx.Response(200, json=_tool_page({"items": [{**TOOL_FIXTURE, "id": "tool_3"}]}))
 
         client = _client(handler, token_provider=provider)
 
@@ -532,25 +554,31 @@ class ToolGatewaySdkPhase3Tests(unittest.TestCase):
         asyncio.run(self._async_list_all_tools_paginates_until_final_page())
 
     async def _async_list_all_tools_paginates_until_final_page(self) -> None:
-        seen_offsets: list[str] = []
+        seen_cursors: list[str | None] = []
 
         async def handler(request: httpx.Request) -> httpx.Response:
             query = parse_qs(request.url.query.decode())
-            offset = query["offset"][0]
-            seen_offsets.append(offset)
-            if offset == "0":
+            self.assertEqual(query["pagination"][0], "cursor")
+            cursor = query.get("cursor", [None])[0]
+            seen_cursors.append(cursor)
+            if cursor is None:
                 return httpx.Response(
                     200,
-                    json=[
+                    json=_tool_page(
                         {
-                            **TOOL_FIXTURE,
-                            "id": f"tool_other_{index}",
-                            "name": f"claims.other_{index}",
+                            "items": [
+                                {
+                                    **TOOL_FIXTURE,
+                                    "id": f"tool_other_{index}",
+                                    "name": f"claims.other_{index}",
+                                }
+                                for index in range(2)
+                            ],
+                            "next_cursor": "page-2",
                         }
-                        for index in range(2)
-                    ],
+                    ),
                 )
-            return httpx.Response(200, json=[TOOL_FIXTURE])
+            return httpx.Response(200, json=_tool_page({"items": [TOOL_FIXTURE]}))
 
         transport = httpx.MockTransport(handler)
         async with AsyncOphanixToolGatewayClient(
@@ -566,7 +594,7 @@ class ToolGatewaySdkPhase3Tests(unittest.TestCase):
             "tool_other_1",
             "tool_claims_lookup",
         ])
-        self.assertEqual(seen_offsets, ["0", "2"])
+        self.assertEqual(seen_cursors, [None, "page-2"])
 
     def test_async_get_tool_cache_is_partitioned_by_current_token(self) -> None:
         asyncio.run(self._async_get_tool_cache_is_partitioned_by_current_token())
@@ -579,12 +607,16 @@ class ToolGatewaySdkPhase3Tests(unittest.TestCase):
             authorizations.append(request.headers["authorization"])
             return httpx.Response(
                 200,
-                json=[
+                json=_tool_page(
                     {
-                        **TOOL_FIXTURE,
-                        "id": f"tool_{len(authorizations)}",
+                        "items": [
+                            {
+                                **TOOL_FIXTURE,
+                                "id": f"tool_{len(authorizations)}",
+                            }
+                        ]
                     }
-                ],
+                ),
             )
 
         transport = httpx.MockTransport(handler)
@@ -627,6 +659,14 @@ def _client(
         discovery_retry_max_sleep_seconds=discovery_retry_max_sleep_seconds,
         discovery_retry_jitter_ratio=0,
     )
+
+
+def _tool_page(body: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "tools": body["items"],
+        "next_cursor": body.get("next_cursor"),
+        "limit": body.get("limit", len(body["items"])),
+    }
 
 
 if __name__ == "__main__":
