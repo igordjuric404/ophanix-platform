@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -230,6 +231,98 @@ class ToolGatewayInvocationPhase3Tests(unittest.TestCase):
         self.assertEqual(second.status_code, 409, second.text)
         self.assertEqual(second.json()["error"]["code"], "idempotency_conflict")
         self.assertEqual(len(executor.calls), 1)
+
+    def test_api_reports_idempotency_persistence_failure_after_success(self) -> None:
+        self._grant_permission()
+        executor = FakeInvocationExecutor(result={"claim_status": "open"})
+        self.app.state.tool_gateway_executor = executor
+
+        with patch(
+            "product_platform.api.app.ToolInvocationIdempotencyRepository.complete_invocation",
+            side_effect=RuntimeError("database unavailable"),
+        ):
+            response = self.client.post(
+                "/api/v1/tools/claims.lookup/invoke",
+                headers={
+                    **self._headers(request_id="req-idem-persist-fail"),
+                    "Idempotency-Key": "idem-persist-fail-1",
+                },
+                json={"payload": {"claim_id": "claim_123"}},
+            )
+
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.headers["Idempotency-Persistence"], "failed")
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "idempotency_persistence_failed",
+        )
+        self.assertIn("outcome is unknown", response.json()["error"]["message"])
+        self.assertEqual(len(executor.calls), 1)
+
+        row = self.database.connect().execute(
+            """
+            SELECT status, response_status_code, response_body_json
+            FROM tool_invocation_idempotency_records
+            WHERE idempotency_key = ?
+            """,
+            ("idem-persist-fail-1",),
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["status"], "in_progress")
+        self.assertIsNone(row["response_status_code"])
+        self.assertIsNone(row["response_body_json"])
+
+        retry = self.client.post(
+            "/api/v1/tools/claims.lookup/invoke",
+            headers={
+                **self._headers(request_id="req-idem-persist-fail-retry"),
+                "Idempotency-Key": "idem-persist-fail-1",
+            },
+            json={"payload": {"claim_id": "claim_123"}},
+        )
+
+        self.assertEqual(retry.status_code, 409, retry.text)
+        self.assertEqual(retry.json()["error"]["code"], "idempotency_in_progress")
+        self.assertEqual(len(executor.calls), 1)
+
+    def test_api_reports_idempotency_persistence_failure_after_upstream_error(self) -> None:
+        self._grant_permission()
+        self.app.state.tool_gateway_executor = SecretLeakingErrorExecutor()
+
+        with patch(
+            "product_platform.api.app.ToolInvocationIdempotencyRepository.complete_invocation",
+            side_effect=RuntimeError("database unavailable"),
+        ):
+            response = self.client.post(
+                "/api/v1/tools/claims.lookup/invoke",
+                headers={
+                    **self._headers(request_id="req-idem-persist-fail-error"),
+                    "Idempotency-Key": "idem-persist-fail-error-1",
+                },
+                json={"payload": {"claim_id": "claim_123"}},
+            )
+
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.headers["Idempotency-Persistence"], "failed")
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "idempotency_persistence_failed",
+        )
+        self.assertNotIn("secret-token-123", response.text)
+        self.assertNotIn("raw-secret", response.text)
+
+        row = self.database.connect().execute(
+            """
+            SELECT status, response_status_code, response_body_json
+            FROM tool_invocation_idempotency_records
+            WHERE idempotency_key = ?
+            """,
+            ("idem-persist-fail-error-1",),
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["status"], "in_progress")
+        self.assertIsNone(row["response_status_code"])
+        self.assertIsNone(row["response_body_json"])
 
     def test_api_stale_idempotency_record_returns_terminal_unknown_without_executing(self) -> None:
         self._grant_permission()

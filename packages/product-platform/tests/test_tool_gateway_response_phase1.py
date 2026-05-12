@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 from fastapi.testclient import TestClient
@@ -46,8 +47,10 @@ class ToolGatewayResponsePhase1Tests(unittest.TestCase):
         self.assertEqual(policy["max_response_bytes"], 32768)
         self.assertEqual(policy["expose_to_agent"], 1)
         self.assertEqual(policy["strict_output_validation"], 1)
-        self.assertIn("email", policy["redaction_rules_json"])
-        self.assertIn("ssn", policy["redaction_rules_json"])
+        redaction_rules = json.loads(policy["redaction_rules_json"])
+        self.assertIn("email", redaction_rules["redact_keys"])
+        self.assertIn("ssn", redaction_rules["redact_keys"])
+        self.assertTrue(redaction_rules["redact_patterns"])
 
     def test_unit_invalid_max_response_size_is_rejected(self) -> None:
         with self.assertRaises(ValidationError):

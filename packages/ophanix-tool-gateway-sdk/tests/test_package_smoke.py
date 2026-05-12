@@ -17,11 +17,11 @@ class PackageSmokeTests(unittest.TestCase):
 
     def test_examples_compile(self) -> None:
         package_root = Path(__file__).resolve().parents[1]
-
-        py_compile.compile(
-            str(package_root / "examples" / "async_worker_example.py"),
-            doraise=True,
-        )
+        examples = sorted((package_root / "examples").glob("*.py"))
+        self.assertGreater(len(examples), 0)
+        for example in examples:
+            with self.subTest(example=example.name):
+                py_compile.compile(str(example), doraise=True)
 
 
 if __name__ == "__main__":

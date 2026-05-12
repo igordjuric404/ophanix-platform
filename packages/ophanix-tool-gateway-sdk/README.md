@@ -36,6 +36,8 @@ Use `https://` gateway URLs outside local development. Plain `http://` is accept
 ## Sync Usage
 
 ```python
+from uuid import uuid4
+
 from ophanix_tool_gateway import (
     EnvironmentTokenProvider,
     OphanixToolGatewayClient,
@@ -56,7 +58,12 @@ with OphanixToolGatewayClient(
                 or "SDK and gateway contract versions do not match"
             )
         tools = client.list_all_tools()
-        result = client.call_tool("claims.lookup", {"claim_id": "claim_123"})
+        operation_id = uuid4().hex
+        result = client.call_tool(
+            "claims.lookup",
+            {"claim_id": "claim_123"},
+            idempotency_key=f"claims.lookup:{operation_id}",
+        )
     except ToolDeniedError as exc:
         print(f"Denied by gateway policy: {exc.reason_code}")
     except ToolAuthenticationError:
@@ -65,7 +72,7 @@ with OphanixToolGatewayClient(
         print(f"Gateway call failed: {exc.code or exc.status_code}")
     else:
         print([tool.name for tool in tools])
-        print(result.result)
+        print(result.body)
 ```
 
 ## API Reference
@@ -106,6 +113,9 @@ Common constructor options:
   before JSON parsing. Custom injected clients must expose `stream()`;
   buffered custom clients are rejected even if
   `allow_buffered_custom_http_client=True` is supplied.
+- HTTP proxy environment variables are ignored by the built-in clients
+  (`trust_env=False`). Inject an explicitly configured `httpx.Client` or
+  `httpx.AsyncClient` when a deployment must use an approved proxy.
 - `cache_tools`: opt-in discovery cache, default `False`.
 - `cache_ttl_seconds`: cache TTL when `cache_tools=True`, default `300.0`.
 - `max_cache_entries`: maximum process-local discovery cache entries when
@@ -157,7 +167,10 @@ missing result raises `ToolGatewayError` with `code="tool_not_visible"` because
 the SDK cannot safely distinguish a nonexistent tool from a tool hidden by
 authorization.
 
-`ToolCallResult.raw`, `ToolDefinition.raw`, and `GatewayCompatibility.raw` are
+`ToolCallResult.body` returns the upstream tool body when the gateway result uses
+the standard execution envelope; `ToolCallResult.result` keeps the full gateway
+result for compatibility and diagnostics. `ToolCallResult.raw`,
+`ToolDefinition.raw`, and `GatewayCompatibility.raw` are
 diagnostic snapshots of gateway responses, not stable extension APIs.
 `ToolCallResult.decision` is a coarse agent-facing summary and intentionally
 excludes internal policy IDs. Operators should use Product Platform audit and
@@ -177,8 +190,12 @@ async with AsyncOphanixToolGatewayClient(
     token_provider=EnvironmentTokenProvider(),
 ) as client:
     tool = await client.get_tool("claims.lookup")
-    result = await client.call_tool(tool.name, {"claim_id": "claim_123"})
-    print(result.request_id, result.result)
+    result = await client.call_tool(
+        tool.name,
+        {"claim_id": "claim_123"},
+        idempotency_key="claim-123-refresh-2026-05-11T09:00Z",
+    )
+    print(result.request_id, result.body)
 ```
 
 ## Framework-Style Example
@@ -227,9 +244,17 @@ text.
 
 Discovery requests retry transient `408`, `429`, and `5xx` responses by default with
 bounded exponential backoff, `Retry-After` support, and jitter. Tool invocation
-requests retry transient transport, `408`, `429`, and `5xx` failures only when
-the caller supplies `idempotency_key`; the same key is sent on every attempt so
-the gateway can replay a completed result or reject a conflicting payload.
+requests retry transient transport, throttling, gateway availability failures,
+and `idempotency_in_progress` responses only when the caller supplies
+`idempotency_key`; the same key is sent on every attempt so the gateway can
+replay a completed result or reject a conflicting payload. The SDK does not
+retry terminal gateway execution failures such as `upstream_error`,
+`upstream_timeout`, `upstream_circuit_open`, or replayed idempotency responses,
+because using the same key would replay the stored terminal response rather
+than safely re-execute the upstream operation. It also does not retry
+`idempotency_persistence_failed`; that response means the gateway could not
+store the replay record after execution and the upstream outcome must be
+reconciled before using a new key.
 
 The SDK validates payloads as strict JSON objects, rejects non-finite numbers,
 non-string object keys, cyclic Python payloads, and payloads nested deeper than
@@ -353,9 +378,11 @@ curl -sS -X POST "$OPHANIX_BASE_URL/api/v1/agents/agent_claims_demo/credentials"
 ```
 
 The response includes the raw token once. Store it in a local secret store or
-`OPHANIX_GATEWAY_TOKEN`; do not commit it. Exact endpoint names may differ in
-private operator builds, so verify the local API shape against your deployment
-before writing automation.
+`OPHANIX_GATEWAY_TOKEN`; do not commit it. The endpoints above are the supported
+Product Platform issuance flow for the `0.1.x` SDK line. Private operator
+automation may wrap these calls, but it should preserve the same token response,
+scope binding, expiry, rotation, and revocation semantics before being used by
+SDK consumers.
 
 ## Stability
 
@@ -436,8 +463,9 @@ python3 scripts/validate_release.py --require-dependency-audit
 The release check builds a wheel and sdist, verifies that both artifacts contain
 `ophanix_tool_gateway/__init__.py`, `ophanix_tool_gateway/sdk.py`, and
 `ophanix_tool_gateway/py.typed`, rejects local/generated files such as SQLite
-databases and `__pycache__`, verifies parity with the product-platform vendored
-SDK copy, installs the built wheel with runtime dependencies into a temporary
+databases and `__pycache__`, verifies full package-file parity with the
+product-platform vendored SDK copy, installs the built wheel with runtime
+dependencies into a temporary
 target, writes a local CycloneDX SBOM with artifact hashes and direct runtime
 dependency components, and runs `twine check` over the generated artifacts.
 For final release hardening, also run:
@@ -454,6 +482,17 @@ must keep those paths green before release.
 
 `--strict-git` additionally requires a clean SDK package worktree and an exact
 release tag matching `v<project.version>` unless `--expected-tag` is supplied.
+When a custom expected tag is supplied, it must still include the package
+version, for example `ophanix-tool-gateway-sdk-v0.1.0`.
+
+After package-index upload, verify the published artifact from a clean install
+environment:
+
+```bash
+python3 scripts/validate_release.py --verify-index-install --skip-twine-check
+```
+
+Use `--index-url` with the same command when validating a private package index.
 
 Publishing is intentionally separate from local artifact validation. A release
 owner must publish only artifacts produced by the validated workflow, preserve

@@ -53,6 +53,9 @@ and correlation IDs when possible.
 - Rotate gateway credentials before expiry and after suspected exposure.
 - Keep `max_payload_bytes`, `max_response_bytes`, and request timeouts bounded
   for production agents.
+- The SDK-owned HTTP clients ignore process proxy environment variables by
+  default. Configure and inject an explicit HTTPX client when a controlled
+  egress proxy is required.
 - Do not implement automatic retries for mutating tool calls unless the gateway
   and tool contract provide idempotency semantics.
 - Treat SDK diagnostic redaction as best-effort. It covers common structured

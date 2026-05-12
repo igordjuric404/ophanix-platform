@@ -74,6 +74,30 @@ SDK_USER_AGENT = f"ophanix-tool-gateway-python/{SDK_VERSION}"
 DEFAULT_GATEWAY_TOKEN_ENV_VAR = "OPHANIX_GATEWAY_TOKEN"
 RETRYABLE_DISCOVERY_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
 RETRYABLE_TOOL_CALL_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+TERMINAL_TOOL_CALL_ERROR_CODES = frozenset(
+    {
+        "executor_error",
+        "path_parameter_missing",
+        "query_parameter_not_allowed",
+        "schema_validation_failed",
+        "tool_call_denied",
+        "unsafe_query_payload",
+        "unsafe_upstream_url",
+        "unsupported_query_payload",
+        "upstream_auth_config_invalid",
+        "upstream_auth_mode_unsupported",
+        "upstream_auth_secret_invalid",
+        "upstream_auth_secret_unavailable",
+        "upstream_circuit_open",
+        "upstream_connection_error",
+        "upstream_error",
+        "upstream_response_too_large",
+        "upstream_target_missing",
+        "upstream_target_unhealthy",
+        "upstream_timeout",
+        "upstream_url_too_large",
+    }
+)
 DEFAULT_DISCOVERY_RETRY_MAX_SLEEP_SECONDS = 5.0
 DEFAULT_DISCOVERY_RETRY_JITTER_RATIO = 0.2
 DEFAULT_TOOL_CALL_RETRY_MAX_SLEEP_SECONDS = 5.0
@@ -256,6 +280,14 @@ class ToolCallResult:
     reason_code: str | None = None
     decision: dict[str, Any] | None = None
     raw: Mapping[str, Any] = field(default_factory=dict)
+
+    @property
+    def body(self) -> Any | None:
+        """Return the upstream tool body when the gateway result uses the execution envelope."""
+
+        if isinstance(self.result, Mapping) and "body" in self.result:
+            return self.result["body"]
+        return self.result
 
 
 @dataclass(frozen=True)
@@ -523,7 +555,10 @@ class OphanixToolGatewayClient:
             http_client,
             allow_buffered_custom_http_client=config.allow_buffered_custom_http_client,
         )
-        self._http_client: Any = http_client or httpx.Client(timeout=self.timeout_seconds)
+        self._http_client: Any = http_client or httpx.Client(
+            timeout=self.timeout_seconds,
+            trust_env=False,
+        )
 
     def close(self) -> None:
         """Close the underlying HTTP client if this SDK instance created it."""
@@ -1232,7 +1267,10 @@ class AsyncOphanixToolGatewayClient:
             http_client,
             allow_buffered_custom_http_client=config.allow_buffered_custom_http_client,
         )
-        self._http_client: Any = http_client or httpx.AsyncClient(timeout=self.timeout_seconds)
+        self._http_client: Any = http_client or httpx.AsyncClient(
+            timeout=self.timeout_seconds,
+            trust_env=False,
+        )
 
     async def close(self) -> None:
         """Close the underlying HTTP client if this SDK instance created it."""
@@ -2202,25 +2240,39 @@ def _raise_gateway_error(
 ) -> None:
     error = _optional_mapping(body.get("error")) or {}
     code = error.get("code") or body.get("code") or body.get("reason_code")
+    code_text = str(code) if code is not None else None
     if status_code == 401:
         raise ToolAuthenticationError(
             "Tool Gateway authentication failed.",
             status_code=status_code,
-            code=str(code) if code is not None else None,
+            code=code_text,
             request_id=_optional_string(body.get("request_id")),
             correlation_id=_optional_string(body.get("correlation_id")),
             retry_after_seconds=retry_after_seconds,
             response_body=body,
         )
     raise ToolGatewayError(
-        f"Tool Gateway returned HTTP {status_code}.",
+        _gateway_http_error_message(error, status_code, code=code_text),
         status_code=status_code,
-        code=str(code) if code is not None else None,
+        code=code_text,
         request_id=_optional_string(body.get("request_id")),
         correlation_id=_optional_string(body.get("correlation_id")),
         retry_after_seconds=retry_after_seconds,
         response_body=body,
     )
+
+
+def _gateway_http_error_message(
+    error: Mapping[str, Any],
+    status_code: int,
+    *,
+    code: str | None,
+) -> str:
+    if code == "idempotency_persistence_failed":
+        message = error.get("message")
+        if isinstance(message, str) and message.strip():
+            return _sanitize_text(message)
+    return f"Tool Gateway returned HTTP {status_code}."
 
 
 def _send_limited_sync_request(
@@ -2557,8 +2609,17 @@ def _should_retry_tool_call_response(
 ) -> bool:
     if attempts >= max_retries:
         return False
+    if response.headers.get("Idempotency-Replayed", "").strip().lower() == "true":
+        return False
+    if response.headers.get("Idempotency-Persistence", "").strip().lower() == "failed":
+        return False
+    error_code = _gateway_error_code(body)
+    if error_code == "idempotency_persistence_failed":
+        return False
+    if error_code in TERMINAL_TOOL_CALL_ERROR_CODES:
+        return False
     if response.status_code == 409:
-        return _gateway_error_code(body) == "idempotency_in_progress"
+        return error_code == "idempotency_in_progress"
     return response.status_code in RETRYABLE_TOOL_CALL_STATUS_CODES
 
 

@@ -397,7 +397,7 @@ class ToolPolicyDecisionService:
                 correlation_id=correlation_id,
             )
             try:
-                hook_result = self.policy_hook.evaluate(context)
+                hook_result = ToolPolicyHookResult.model_validate(self.policy_hook.evaluate(context))
             except Exception:
                 return self._persist(
                     agent_id=agent["id"],

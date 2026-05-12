@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 
 from fastapi.testclient import TestClient
@@ -10,7 +11,12 @@ from product_platform.agents.models import CredentialScopeRequest
 from product_platform.api.settings import Settings
 from product_platform.db.seed import DEMO_ADMIN_USER_ID, DEMO_ENV_ID, DEMO_ORG_ID, seed_demo_data
 from product_platform.db.testing import create_migrated_test_database
-from product_platform.tool_gateway.invocation import ToolExecutionError, ToolExecutionResult
+from product_platform.tool_gateway.invocation import (
+    AsyncHttpToolInvocationExecutor,
+    HttpToolInvocationExecutor,
+    ToolExecutionError,
+    ToolExecutionResult,
+)
 from product_platform.tool_gateway.models import (
     AgentToolPermissionGrantRequest,
     ToolDefinitionCreateRequest,
@@ -89,6 +95,24 @@ class ToolGatewayForwardingPhase1Tests(unittest.TestCase):
             database=self.database,
         )
         self.client = TestClient(self.app, raise_server_exceptions=False)
+
+    def test_owned_upstream_executor_clients_ignore_environment_proxy_defaults(self) -> None:
+        executor = HttpToolInvocationExecutor(repository=object())
+        try:
+            self.assertFalse(executor.http_client.trust_env)
+            self.assertFalse(executor.http_client.follow_redirects)
+        finally:
+            executor.close()
+
+        async def exercise_async_executor() -> None:
+            async_executor = AsyncHttpToolInvocationExecutor(repository=object())
+            try:
+                self.assertFalse(async_executor.http_client.trust_env)
+                self.assertFalse(async_executor.http_client.follow_redirects)
+            finally:
+                await async_executor.close()
+
+        asyncio.run(exercise_async_executor())
 
     def _insert_agent(self, connection) -> None:
         now = "2026-05-01T00:00:00+00:00"

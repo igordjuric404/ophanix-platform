@@ -32,6 +32,28 @@ from product_platform.tool_gateway.models import (
 from product_platform.tool_gateway.schemas import validate_tool_contract_schema
 
 
+DEFAULT_RESPONSE_REDACTION_RULES = {
+    "redact_keys": [
+        "address",
+        "authorization",
+        "api_key",
+        "credential",
+        "email",
+        "password",
+        "phone",
+        "secret",
+        "ssn",
+        "token",
+        "key",
+    ],
+    "redact_patterns": [
+        r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}",
+        r"(?i)\b(?:api[-_\s]?key|authorization|password|secret|token)\s*[:=]\s*['\"]?[^,'\"\s]{8,}",
+        r"(?i)\b(?:ssn|social[-_\s]?security[-_\s]?number)\s*[:=]\s*['\"]?\d{3}-?\d{2}-?\d{4}\b",
+    ],
+}
+
+
 class ToolDefinitionNotFoundError(ValueError):
     """Raised when a tool definition is not visible in tenant scope."""
 
@@ -639,26 +661,7 @@ class ToolRegistryRepository:
                 self.environment_id,
                 tool_id,
                 32_768,
-                json.dumps(
-                    {
-                        "redact_keys": [
-                            "address",
-                            "authorization",
-                            "api_key",
-                            "credential",
-                            "email",
-                            "password",
-                            "phone",
-                            "secret",
-                            "ssn",
-                            "token",
-                            "key",
-                        ],
-                        "redact_patterns": [],
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
+                json.dumps(DEFAULT_RESPONSE_REDACTION_RULES, sort_keys=True, separators=(",", ":")),
                 1,
                 0,
                 1,

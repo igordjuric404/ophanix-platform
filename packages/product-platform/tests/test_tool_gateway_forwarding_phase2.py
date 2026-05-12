@@ -350,6 +350,31 @@ class ToolGatewayForwardingPhase2Tests(unittest.TestCase):
 
         self.assertEqual(context.exception.code, "unsafe_query_payload")
 
+    def test_unit_get_target_allows_non_secret_query_key_containing_key(self) -> None:
+        with self.database.transaction():
+            tool = self._create_active_tool(self.repository)
+            self.repository.create_upstream_target(
+                tool["id"],
+                ToolUpstreamTargetCreateRequest(
+                    base_url="https://claims.internal.example",
+                    path_template="/v1/claims",
+                    method="GET",
+                    auth_mode="none",
+                    timeout_ms=1200,
+                    health_url="https://claims.internal.example/health",
+                    query_parameter_allowlist=["monkey"],
+                ),
+            )
+            http_client = RecordingHTTPClient()
+            HttpToolInvocationExecutor(self.repository, http_client=http_client).execute(
+                tool=tool,
+                payload={"monkey": "visible"},
+                decision=self._decision(tool_id=tool["id"]),
+                principal=self._principal(),
+            )
+
+        self.assertEqual(http_client.calls[0]["params"], {"monkey": "visible"})
+
     def test_unit_bearer_upstream_auth_uses_secret_reference_without_exposing_secret(self) -> None:
         with self.database.transaction():
             tool = self._create_active_tool(self.repository)
@@ -408,6 +433,35 @@ class ToolGatewayForwardingPhase2Tests(unittest.TestCase):
                 )
 
         self.assertEqual(context.exception.code, "upstream_auth_secret_unavailable")
+
+    def test_unit_upstream_auth_rejects_header_control_characters_in_secret(self) -> None:
+        with self.database.transaction():
+            tool = self._create_active_tool(self.repository)
+            self.repository.create_upstream_target(
+                tool["id"],
+                ToolUpstreamTargetCreateRequest(
+                    base_url="https://claims.internal.example",
+                    path_template="/v1/claims/{claim_id}",
+                    method="POST",
+                    auth_mode="bearer",
+                    auth_config_json={"secret_ref": "secref_forward"},
+                    timeout_ms=1200,
+                    health_url="https://claims.internal.example/health",
+                ),
+            )
+            with self.assertRaises(ToolExecutionError) as context:
+                HttpToolInvocationExecutor(
+                    self.repository,
+                    http_client=RecordingHTTPClient(),
+                    secret_provider=StaticSecretProvider({"secref_forward": "token\r\nX-Test: injected"}),
+                ).execute(
+                    tool=tool,
+                    payload={"claim_id": "claim_123"},
+                    decision=self._decision(tool_id=tool["id"]),
+                    principal=self._principal(),
+                )
+
+        self.assertEqual(context.exception.code, "upstream_auth_secret_invalid")
 
     def test_unit_streaming_response_cap_blocks_body_without_content_length(self) -> None:
         with self.database.transaction():

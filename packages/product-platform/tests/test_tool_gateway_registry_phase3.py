@@ -178,6 +178,21 @@ class ToolGatewayRegistryPhase3Tests(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
         self.assertIn("Input schema is required", response.json()["message"])
 
+    def test_api_create_rejects_non_draft_status(self) -> None:
+        body = {
+            **self._tool_body(name="claims.active_create", input_schema_json=None),
+            "status": "active",
+        }
+
+        response = self.client.post(
+            "/api/v1/tools",
+            headers=self._headers(),
+            json=body,
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("created as draft", response.text)
+
     def test_integration_lifecycle_changes_emit_audit_events(self) -> None:
         created = self._create_tool()
         patched = self.client.patch(

@@ -11,6 +11,7 @@ import unittest
 from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -98,6 +99,7 @@ class ToolGatewayInstalledSdkContractTests(unittest.TestCase):
                 environment="test",
                 build_sha="test-sha",
                 build_time="2026-05-01T00:00:00Z",
+                dev_login_allowed_emails=["admin@example.com"],
                 session_secret="test-secret",
             ),
             database=self.database,
@@ -185,6 +187,204 @@ class ToolGatewayInstalledSdkContractTests(unittest.TestCase):
                 self.assertEqual(replay.request_id, first.request_id)
                 self.assertEqual(len(self.executor.calls), 1)
 
+    def test_installed_wheel_sdk_does_not_retry_persisted_upstream_failure(self) -> None:
+        failing_executor = _FailingToolExecutor()
+        self.app.state.tool_gateway_executor = failing_executor
+        with _installed_sdk_module(self.standalone_root) as installed_sdk:
+            sdk_client = installed_sdk.OphanixToolGatewayClient(
+                base_url="http://testserver",
+                token_provider=installed_sdk.StaticTokenProvider("wheel-contract-token"),
+                http_client=_TestClientGatewayHTTPClient(self.client),
+                allow_insecure_http=True,
+                invocation_retry_backoff_seconds=0.0,
+                invocation_retry_jitter_ratio=0.0,
+            )
+
+            with self.assertRaises(installed_sdk.ToolGatewayError) as first_error:
+                sdk_client.call_tool(
+                    "claims.lookup",
+                    {"claim_id": "claim_123"},
+                    idempotency_key="wheel-upstream-failure-idem",
+                )
+            with self.assertRaises(installed_sdk.ToolGatewayError) as replay_error:
+                sdk_client.call_tool(
+                    "claims.lookup",
+                    {"claim_id": "claim_123"},
+                    idempotency_key="wheel-upstream-failure-idem",
+                )
+
+        self.assertEqual(first_error.exception.code, "upstream_error")
+        self.assertEqual(replay_error.exception.code, "upstream_error")
+        self.assertEqual(len(failing_executor.calls), 1)
+
+    def test_readme_quickstart_issues_credential_and_invokes_tool_over_http(self) -> None:
+        with _installed_sdk_module(self.standalone_root) as installed_sdk:
+            with _running_uvicorn(self.app) as base_url:
+                with httpx.Client(base_url=base_url, timeout=5.0, trust_env=False) as operator:
+                    admin_token = self._operator_login(operator)
+                    headers = self._operator_headers(admin_token)
+                    scope = "claims.quickstart_lookup:read"
+                    tool_name = "claims.quickstart_lookup"
+
+                    created_tool = operator.post(
+                        "/api/v1/tools",
+                        headers=headers,
+                        json={
+                            "name": tool_name,
+                            "display_name": "Claims Quickstart Lookup",
+                            "description": "README quickstart e2e fixture.",
+                            "owner_team": "quickstart-platform",
+                            "required_scope": scope,
+                            "input_schema_json": VALID_INPUT_SCHEMA,
+                        },
+                    )
+                    self.assertEqual(created_tool.status_code, 201, created_tool.text)
+                    tool = created_tool.json()
+                    self.assertEqual(tool["status"], "draft")
+
+                    activated_tool = operator.post(
+                        f"/api/v1/tools/{tool['id']}/activate",
+                        headers=headers,
+                        json={"reason": "ready for SDK quickstart e2e"},
+                    )
+                    self.assertEqual(activated_tool.status_code, 200, activated_tool.text)
+
+                    created_agent = operator.post(
+                        "/api/v1/agents/registration-drafts",
+                        headers=headers,
+                        json={
+                            "name": "Quickstart SDK Agent",
+                            "description": "Uses the public SDK quickstart path.",
+                            "framework": "langgraph",
+                            "runtime_type": "service",
+                            "owner_user_id": DEMO_ADMIN_USER_ID,
+                            "sponsor_user_id": DEMO_ADMIN_USER_ID,
+                        },
+                    )
+                    self.assertEqual(created_agent.status_code, 201, created_agent.text)
+                    agent_id = created_agent.json()["id"]
+
+                    patched_agent = operator.patch(
+                        f"/api/v1/agents/registration-drafts/{agent_id}",
+                        headers=headers,
+                        json={
+                            "capabilities": [
+                                {
+                                    "capability_name": scope,
+                                    "resource_type": "tool",
+                                }
+                            ]
+                        },
+                    )
+                    self.assertEqual(patched_agent.status_code, 200, patched_agent.text)
+
+                    identity = operator.post(
+                        f"/api/v1/agents/registration-drafts/{agent_id}/identity",
+                        headers=headers,
+                    )
+                    self.assertEqual(identity.status_code, 200, identity.text)
+                    self.assertTrue(identity.json()["identity"]["did"].startswith("did:mesh:"))
+
+                    submitted = operator.post(
+                        f"/api/v1/agents/registration-drafts/{agent_id}/submit",
+                        headers=headers,
+                    )
+                    self.assertEqual(submitted.status_code, 200, submitted.text)
+
+                    approved = operator.post(
+                        f"/api/v1/agents/{agent_id}/approve",
+                        headers=headers,
+                        json={"reason": "approve quickstart e2e agent"},
+                    )
+                    self.assertEqual(approved.status_code, 200, approved.text)
+
+                    activated_agent = operator.post(
+                        f"/api/v1/agents/{agent_id}/activate",
+                        headers=headers,
+                        json={"reason": "activate quickstart e2e agent"},
+                    )
+                    self.assertEqual(activated_agent.status_code, 200, activated_agent.text)
+
+                    permission = operator.post(
+                        f"/api/v1/agents/{agent_id}/tool-permissions",
+                        headers=headers,
+                        json={
+                            "tool_id": tool["id"],
+                            "scope": scope,
+                            "granted_reason": "SDK quickstart e2e needs claim lookup.",
+                        },
+                    )
+                    self.assertEqual(permission.status_code, 201, permission.text)
+
+                    issued = operator.post(
+                        f"/api/v1/agents/{agent_id}/credentials",
+                        headers=headers,
+                        json={
+                            "credential_type": "bearer",
+                            "issuer": "readme-quickstart-e2e",
+                            "ttl_seconds": 900,
+                            "issued_for": "sdk-readme-quickstart",
+                            "scopes": [
+                                {
+                                    "scope": scope,
+                                    "resource_type": "tool",
+                                    "resource_id": tool_name,
+                                }
+                            ],
+                        },
+                    )
+                    self.assertEqual(issued.status_code, 201, issued.text)
+                    issued_payload = issued.json()
+                    self.assertTrue(issued_payload["bearer_token"].startswith("Bearer "))
+                    gateway_token = issued_payload["token"]
+                    self.assertNotIn(gateway_token, str(issued_payload["credential"]))
+
+                with patch.dict("os.environ", {"OPHANIX_GATEWAY_TOKEN": gateway_token}):
+                    sdk_client = installed_sdk.OphanixToolGatewayClient(
+                        base_url=base_url,
+                        token_provider=installed_sdk.EnvironmentTokenProvider(),
+                        allow_insecure_http=True,
+                        invocation_retry_backoff_seconds=0.0,
+                        invocation_retry_jitter_ratio=0.0,
+                    )
+
+                    compatibility = sdk_client.check_compatibility()
+                    tools = sdk_client.list_all_tools()
+                    first = sdk_client.call_tool(
+                        tool_name,
+                        {"claim_id": "claim_123"},
+                        idempotency_key="readme-quickstart-claim-123",
+                    )
+                    replay = sdk_client.call_tool(
+                        tool_name,
+                        {"claim_id": "claim_123"},
+                        idempotency_key="readme-quickstart-claim-123",
+                    )
+
+                self.assertTrue(compatibility.compatible)
+                self.assertEqual([tool.name for tool in tools], [tool_name])
+                self.assertEqual(first.body, {"ok": True})
+                self.assertEqual(replay.request_id, first.request_id)
+                quickstart_calls = [
+                    call for call in self.executor.calls if call["tool"] == tool_name
+                ]
+                self.assertEqual(len(quickstart_calls), 1)
+
+    def _operator_login(self, client: httpx.Client) -> str:
+        response = client.post(
+            "/api/v1/auth/dev-login",
+            json={"email": "admin@example.com", "roles": ["Platform Admin"]},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        return str(response.json()["access_token"])
+
+    def _operator_headers(self, token: str) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {token}",
+            "X-Environment-ID": DEMO_ENV_ID,
+            "X-Correlation-ID": "corr-readme-quickstart-e2e",
+        }
+
 
 class _FakeToolExecutor:
     def __init__(self) -> None:
@@ -197,6 +397,21 @@ class _FakeToolExecutor:
             body={"ok": True},
             latency_ms=1.0,
             upstream_status_code=200,
+        )
+
+
+class _FailingToolExecutor:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def execute(self, *, tool, payload, decision, principal) -> ToolExecutionResult:
+        self.calls.append({"tool": tool["name"], "payload": payload, "agent_id": principal.agent_id})
+        return ToolExecutionResult(
+            status="failed",
+            body={"message": "temporary upstream outage"},
+            latency_ms=1.0,
+            upstream_status_code=503,
+            error={"code": "upstream_error", "message": "Upstream returned status 503."},
         )
 
 

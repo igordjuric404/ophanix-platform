@@ -68,6 +68,15 @@ class ToolDefinitionCreateRequest(BaseModel):
             raise ValueError(f"status must be one of: {supported}.")
         return status
 
+    @model_validator(mode="after")
+    def _require_draft_create(self) -> "ToolDefinitionCreateRequest":
+        if self.status != "draft":
+            raise ValueError(
+                "new tools must be created as draft; use lifecycle endpoints to activate, "
+                "disable, or retire tools."
+            )
+        return self
+
 
 class ToolDefinitionPatchRequest(BaseModel):
     """Patch mutable tool contract fields."""
@@ -701,7 +710,30 @@ def _looks_like_inline_secret_key(key: str, value: str) -> bool:
     lowered_value = value.lower()
     if lowered_key != "secret_ref":
         return False
-    return lowered_value.startswith(("bearer ", "sk-", "pk_", "eyj")) or len(value) > 256
+    if len(value) > 256 or any(character.isspace() for character in value):
+        return True
+    if lowered_value.startswith(
+        (
+            "bearer ",
+            "eyj",
+            "ghp_",
+            "github_pat_",
+            "glpat-",
+            "pk-",
+            "pk_",
+            "sk-",
+            "sk_",
+            "xoxa-",
+            "xoxb-",
+            "xoxp-",
+            "xoxr-",
+            "xoxs-",
+        )
+    ):
+        return True
+    if value.startswith(("AKIA", "ASIA", "-----BEGIN ")):
+        return True
+    return bool(re.fullmatch(r"[A-Za-z0-9+/]{32,}={0,2}", value))
 
 
 def _validate_redaction_pattern(pattern: str) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 from collections.abc import Callable
 from collections.abc import Mapping
@@ -12,6 +13,7 @@ import ophanix_tool_gateway as sdk
 
 from ophanix_tool_gateway import (
     AsyncGatewayHttpClient,
+    AsyncOphanixToolGatewayClient,
     GatewayCompatibility,
     OphanixToolGatewayClient,
     StaticTokenProvider,
@@ -77,6 +79,52 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
 
         self.assertEqual(result.request_id, "req-sdk")
         self.assertEqual(result.result, {"status": "succeeded"})
+        self.assertEqual(result.body, {"status": "succeeded"})
+
+    def test_call_tool_body_unwraps_gateway_execution_envelope(self) -> None:
+        client = _client(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "request_id": "req-sdk",
+                    "correlation_id": "corr-sdk",
+                    "tool_name": "claims.lookup",
+                    "reason_code": "allowed",
+                    "result": {
+                        "status": "succeeded",
+                        "body": {"claim_status": "open"},
+                        "upstream_status_code": 200,
+                    },
+                    "error": None,
+                },
+            )
+        )
+
+        result = client.call_tool("claims.lookup", {"claim_id": "claim_123"})
+
+        self.assertEqual(result.body, {"claim_status": "open"})
+
+    def test_owned_http_clients_ignore_environment_proxy_defaults(self) -> None:
+        client = OphanixToolGatewayClient(
+            base_url="https://gateway.example.com",
+            token_provider=StaticTokenProvider("token"),
+        )
+        try:
+            self.assertFalse(client._http_client.trust_env)
+        finally:
+            client.close()
+
+        async def exercise_async_client() -> None:
+            async_client = AsyncOphanixToolGatewayClient(
+                base_url="https://gateway.example.com",
+                token_provider=StaticTokenProvider("token"),
+            )
+            try:
+                self.assertFalse(async_client._http_client.trust_env)
+            finally:
+                await async_client.close()
+
+        asyncio.run(exercise_async_client())
 
     def test_call_tool_sends_idempotency_key_and_retries_retryable_status(self) -> None:
         calls: list[httpx.Request] = []
@@ -131,6 +179,143 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
 
         self.assertEqual(calls, 1)
         self.assertEqual(raised.exception.code, "try_again")
+
+    def test_call_tool_does_not_retry_idempotency_persistence_failure(self) -> None:
+        calls = 0
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(
+                503,
+                headers={"Idempotency-Persistence": "failed"},
+                json={
+                    "request_id": "req-idem-persist-fail",
+                    "correlation_id": "corr-idem-persist-fail",
+                    "tool_name": "claims.lookup",
+                    "reason_code": "idempotency_persistence_failed",
+                    "result": None,
+                    "error": {
+                        "code": "idempotency_persistence_failed",
+                        "message": "Tool execution completed, but the outcome is unknown.",
+                    },
+                },
+            )
+
+        client = _client(handler)
+        client.invocation_retry_backoff_seconds = 0.0
+        client.invocation_retry_jitter_ratio = 0.0
+
+        with self.assertRaises(ToolGatewayError) as raised:
+            client.call_tool(
+                "claims.lookup",
+                {"claim_id": "claim_123"},
+                idempotency_key="idem-sdk-persist-fail",
+            )
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(raised.exception.code, "idempotency_persistence_failed")
+        self.assertIn("outcome is unknown", str(raised.exception))
+
+    def test_call_tool_does_not_retry_terminal_upstream_execution_failure(self) -> None:
+        calls = 0
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(
+                502,
+                json={
+                    "request_id": "req-upstream-error",
+                    "correlation_id": "corr-upstream-error",
+                    "tool_name": "claims.lookup",
+                    "reason_code": "allowed",
+                    "result": None,
+                    "error": {
+                        "code": "upstream_error",
+                        "message": "Upstream returned status 503.",
+                    },
+                },
+            )
+
+        client = _client(handler)
+        client.invocation_retry_backoff_seconds = 0.0
+        client.invocation_retry_jitter_ratio = 0.0
+
+        with self.assertRaises(ToolGatewayError) as raised:
+            client.call_tool(
+                "claims.lookup",
+                {"claim_id": "claim_123"},
+                idempotency_key="idem-terminal-upstream-error",
+            )
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(raised.exception.code, "upstream_error")
+
+    def test_call_tool_does_not_retry_replayed_retryable_response(self) -> None:
+        calls = 0
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(
+                503,
+                headers={"Idempotency-Replayed": "true"},
+                json={"error": {"code": "try_again"}},
+            )
+
+        client = _client(handler)
+        client.invocation_retry_backoff_seconds = 0.0
+        client.invocation_retry_jitter_ratio = 0.0
+
+        with self.assertRaises(ToolGatewayError) as raised:
+            client.call_tool(
+                "claims.lookup",
+                {"claim_id": "claim_123"},
+                idempotency_key="idem-replayed-retryable",
+            )
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(raised.exception.code, "try_again")
+
+    def test_async_call_tool_does_not_retry_terminal_upstream_execution_failure(self) -> None:
+        calls = 0
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(
+                502,
+                json={
+                    "request_id": "req-async-upstream-error",
+                    "correlation_id": "corr-async-upstream-error",
+                    "tool_name": "claims.lookup",
+                    "reason_code": "allowed",
+                    "result": None,
+                    "error": {
+                        "code": "upstream_error",
+                        "message": "Upstream returned status 503.",
+                    },
+                },
+            )
+
+        async def exercise() -> None:
+            client = _async_client(handler)
+            client.invocation_retry_backoff_seconds = 0.0
+            client.invocation_retry_jitter_ratio = 0.0
+            try:
+                with self.assertRaises(ToolGatewayError) as raised:
+                    await client.call_tool(
+                        "claims.lookup",
+                        {"claim_id": "claim_123"},
+                        idempotency_key="idem-async-terminal-upstream-error",
+                    )
+            finally:
+                await client.close()
+            self.assertEqual(raised.exception.code, "upstream_error")
+
+        asyncio.run(exercise())
+        self.assertEqual(calls, 1)
 
     def test_call_tool_rejects_invalid_idempotency_key_locally(self) -> None:
         client = _client(lambda _request: httpx.Response(200, json={}))
@@ -566,6 +751,16 @@ def _client(
         cache_tools=cache_tools,
         event_hook=event_hook,
         raise_event_hook_errors=raise_event_hook_errors,
+    )
+
+
+def _async_client(
+    handler: Callable[[httpx.Request], httpx.Response],
+) -> AsyncOphanixToolGatewayClient:
+    return AsyncOphanixToolGatewayClient(
+        base_url="https://gateway.example.test",
+        token_provider=StaticTokenProvider("sdk-token"),
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
 
 

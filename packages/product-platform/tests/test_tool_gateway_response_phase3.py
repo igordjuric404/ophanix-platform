@@ -69,6 +69,30 @@ class ToolGatewayResponsePhase3Tests(unittest.TestCase):
         self.assertEqual(result.body, {"token": "[redacted]", "safe": "ok"})
         self.assertTrue(result.redaction_applied)
 
+    def test_unit_secret_like_text_values_are_redacted_by_default_patterns(self) -> None:
+        result = process_tool_execution_response(
+            {"output_schema_json": None},
+            {
+                "max_response_bytes": 32768,
+                "redaction_rules_json": {
+                    "redact_keys": [],
+                    "redact_patterns": [
+                        r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}",
+                        r"(?i)\b(?:api[-_\s]?key|authorization|password|secret|token)\s*[:=]\s*['\"]?[^,'\"\s]{8,}",
+                    ],
+                },
+                "expose_to_agent": 1,
+                "strict_output_validation": 1,
+            },
+            ToolExecutionResult(
+                status="succeeded",
+                body="token=secret-token-123 and Bearer abcdefghijk",
+            ),
+        )
+
+        self.assertEqual(result.body, "[redacted] and [redacted]")
+        self.assertTrue(result.redaction_applied)
+
     def test_unit_disabled_response_policy_is_not_applied(self) -> None:
         result = process_tool_execution_response(
             {"output_schema_json": None},

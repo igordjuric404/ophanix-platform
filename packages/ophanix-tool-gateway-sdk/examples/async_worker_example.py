@@ -16,7 +16,7 @@ from ophanix_tool_gateway import (
 )
 
 
-async def handle_claim_job(claim_id: str) -> dict[str, Any]:
+async def handle_claim_job(claim_id: str, job_id: str) -> dict[str, Any]:
     config = ToolGatewayClientConfig(
         timeout_seconds=5.0,
         max_payload_bytes=64_000,
@@ -40,14 +40,22 @@ async def handle_claim_job(claim_id: str) -> dict[str, Any]:
             result = await client.call_tool(
                 "claims.lookup",
                 {"claim_id": claim_id},
-                correlation_id=f"claim-job:{claim_id}",
+                correlation_id=f"claim-job:{job_id}",
+                idempotency_key=f"claims.lookup:{job_id}",
             )
         except ToolDeniedError:
             return {"status": "denied", "claim_id": claim_id}
         except ToolGatewayError as exc:
             return {"status": "gateway_error", "code": exc.code, "claim_id": claim_id}
-        return {"status": "ok", "result": result.result}
+        return {"status": "ok", "result": result.body}
 
 
 if __name__ == "__main__":
-    print(asyncio.run(handle_claim_job(os.environ.get("CLAIM_ID", "claim_123"))))
+    print(
+        asyncio.run(
+            handle_claim_job(
+                os.environ.get("CLAIM_ID", "claim_123"),
+                os.environ.get("JOB_ID", "local-demo-job-1"),
+            )
+        )
+    )

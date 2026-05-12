@@ -50,6 +50,11 @@ class ErrorHook:
         raise RuntimeError("policy backend unavailable")
 
 
+class MalformedHook:
+    def evaluate(self, context: ToolPolicyHookContext) -> dict[str, str]:
+        return {"matched_policy_id": "policy_without_decision"}
+
+
 class ToolGatewayDecisionPhase3Tests(unittest.TestCase):
     def setUp(self) -> None:
         self.database = create_migrated_test_database()
@@ -186,6 +191,26 @@ class ToolGatewayDecisionPhase3Tests(unittest.TestCase):
                 {"claim_id": "claim_123"},
                 request_id="req-policy-error",
                 correlation_id="corr-policy-error",
+            )
+
+        self.assertEqual(decision.decision, "deny")
+        self.assertEqual(decision.reason_code, "policy_error")
+        self.assertIsNone(decision.matched_policy_id)
+
+    def test_unit_malformed_policy_result_returns_policy_error_deny(self) -> None:
+        with self.database.transaction():
+            self._seed_allowed_fixture()
+            decision = ToolPolicyDecisionService(
+                self.connection,
+                DEMO_ORG_ID,
+                DEMO_ENV_ID,
+                policy_hook=MalformedHook(),
+            ).evaluate_tool_call(
+                self._principal(),
+                "claims.lookup",
+                {"claim_id": "claim_123"},
+                request_id="req-policy-malformed",
+                correlation_id="corr-policy-malformed",
             )
 
         self.assertEqual(decision.decision, "deny")

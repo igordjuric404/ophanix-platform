@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -397,6 +398,14 @@ class ToolInvocationIdempotencyStaleError(ValueError):
     """Raised when a prior invocation's outcome is no longer knowable."""
 
 
+@dataclass(frozen=True)
+class IdempotencyCleanupResult:
+    """Summary of one idempotency replay-record cleanup pass."""
+
+    deleted_records: int
+    marked_failed_unknown: int
+
+
 class ToolInvocationIdempotencyRepository:
     """Persistence for idempotent Tool Gateway invocation replay records."""
 
@@ -623,22 +632,46 @@ def purge_tool_invocation_idempotency_records(
     connection: Connection,
     *,
     retention_seconds: int = DEFAULT_IDEMPOTENCY_REPLAY_RETENTION_SECONDS,
+    in_progress_ttl_seconds: int = DEFAULT_IDEMPOTENCY_IN_PROGRESS_TTL_SECONDS,
     now: str | None = None,
-) -> int:
-    """Delete replay records older than the configured replay retention window."""
+) -> IdempotencyCleanupResult:
+    """Mark stale in-progress replay rows and delete terminal rows beyond retention."""
 
     if retention_seconds <= 0:
         raise ValueError("retention_seconds must be greater than zero.")
-    cutoff = _iso_minus_seconds(now or utc_now_iso(), retention_seconds)
+    if in_progress_ttl_seconds <= 0:
+        raise ValueError("in_progress_ttl_seconds must be greater than zero.")
+    cleanup_time = now or utc_now_iso()
+    stale_cutoff = _iso_minus_seconds(cleanup_time, in_progress_ttl_seconds)
+    stale_cursor = connection.execute(
+        """
+        UPDATE tool_invocation_idempotency_records
+        SET status = ?,
+            error_code = ?,
+            updated_at = ?
+        WHERE status = 'in_progress'
+          AND updated_at < ?
+        """,
+        (
+            "failed_unknown",
+            "idempotency_outcome_unknown",
+            cleanup_time,
+            stale_cutoff,
+        ),
+    )
+    retention_cutoff = _iso_minus_seconds(cleanup_time, retention_seconds)
     cursor = connection.execute(
         """
         DELETE FROM tool_invocation_idempotency_records
         WHERE status IN ('completed', 'failed_unknown', 'expired')
           AND updated_at < ?
         """,
-        (cutoff,),
+        (retention_cutoff,),
     )
-    return max(0, int(getattr(cursor, "rowcount", 0)))
+    return IdempotencyCleanupResult(
+        deleted_records=max(0, int(getattr(cursor, "rowcount", 0))),
+        marked_failed_unknown=max(0, int(getattr(stale_cursor, "rowcount", 0))),
+    )
 
 
 def _idempotency_record_is_stale(row: Row, in_progress_ttl_seconds: int) -> bool:

@@ -98,11 +98,15 @@ def main() -> None:
                 parser.error("--retention-seconds must be greater than zero")
             runner.apply_all()
             with runner.connection:
-                deleted = purge_tool_invocation_idempotency_records(
+                result = purge_tool_invocation_idempotency_records(
                     runner.connection,
                     retention_seconds=retention_seconds,
+                    in_progress_ttl_seconds=(
+                        settings.tool_gateway_idempotency_in_progress_ttl_seconds
+                    ),
                 )
-            print(f"Deleted idempotency records: {deleted}")
+            print(f"Marked stale idempotency records unknown: {result.marked_failed_unknown}")
+            print(f"Deleted idempotency records: {result.deleted_records}")
             return
         parser.error("db command requires migrate, rollback, seed, reset-demo, or cleanup-idempotency")
 

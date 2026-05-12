@@ -29,6 +29,14 @@ FORBIDDEN_ARTIFACT_MARKERS = (
     ".pyc",
     "node_modules/",
 )
+GENERATED_ARTIFACT_NAMES = {
+    "ophanix-tool-gateway-sdk.cdx.json",
+    "release-manifest.json",
+}
+GENERATED_ARTIFACT_PATTERNS = (
+    re.compile(r"^ophanix_tool_gateway_sdk-[^-]+-(?:py3-none-any\.whl|.+\.tar\.gz)$"),
+    re.compile(r"^ophanix_tool_gateway_sdk-[^-]+\.tar\.gz$"),
+)
 
 
 def main() -> int:
@@ -56,6 +64,15 @@ def main() -> int:
     parser.add_argument(
         "--expected-tag",
         help="Expected release tag. Defaults to v<project.version> when --strict-git is used.",
+    )
+    parser.add_argument(
+        "--verify-index-install",
+        action="store_true",
+        help="After artifact validation, install the exact package version from the configured package index.",
+    )
+    parser.add_argument(
+        "--index-url",
+        help="Package index URL used with --verify-index-install. Defaults to pip's configured index.",
     )
     args = parser.parse_args()
 
@@ -91,6 +108,8 @@ def main() -> int:
             strict_git=args.strict_git,
             twine_check_skipped=args.skip_twine_check,
         )
+        if args.verify_index_install:
+            _validate_index_install(package_root, index_url=args.index_url)
         print(f"Release artifacts validated in {artifact_dir}")
     return 0
 
@@ -105,8 +124,9 @@ class _artifact_directory:
         if self.requested is not None:
             self.path = self.requested.resolve()
             if self.path.exists():
-                shutil.rmtree(self.path)
-            self.path.mkdir(parents=True)
+                _clean_artifact_directory(self.path)
+            else:
+                self.path.mkdir(parents=True)
             return self.path
         self._temporary = tempfile.TemporaryDirectory(prefix="ophanix-sdk-release-")
         self.path = Path(self._temporary.name)
@@ -140,6 +160,10 @@ def _validate_git_state(package_root: Path, *, expected_tag: str | None) -> None
         raise SystemExit("SDK release validation requires a clean SDK package worktree.")
     version_value = _project_version(package_root)
     expected = expected_tag or f"v{version_value}"
+    if not _tag_matches_version(expected, version_value):
+        raise SystemExit(
+            f"Expected release tag {expected!r} must include package version {version_value!r}."
+        )
     tag = subprocess.run(
         ["git", "describe", "--tags", "--exact-match"],
         cwd=repo_root,
@@ -150,6 +174,34 @@ def _validate_git_state(package_root: Path, *, expected_tag: str | None) -> None
         raise SystemExit(f"SDK release must be built from tag {expected}.")
 
 
+def _tag_matches_version(tag: str, version: str) -> bool:
+    return tag == f"v{version}" or tag.endswith(f"-v{version}") or tag.endswith(f"/v{version}")
+
+
+def _clean_artifact_directory(path: Path) -> None:
+    if not path.is_dir():
+        raise SystemExit(f"Artifact output path exists but is not a directory: {path}")
+    children = sorted(path.iterdir())
+    unexpected = [child.name for child in children if not _is_generated_artifact(child)]
+    if unexpected:
+        raise SystemExit(
+            "Artifact output directory contains non-release files; choose an empty directory "
+            f"or remove: {', '.join(unexpected[:10])}"
+        )
+    for child in children:
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+
+def _is_generated_artifact(path: Path) -> bool:
+    return path.is_file() and (
+        path.name in GENERATED_ARTIFACT_NAMES
+        or any(pattern.fullmatch(path.name) for pattern in GENERATED_ARTIFACT_PATTERNS)
+    )
+
+
 def _project_version(package_root: Path) -> str:
     with (package_root / "pyproject.toml").open("rb") as handle:
         metadata = tomllib.load(handle)
@@ -157,6 +209,15 @@ def _project_version(package_root: Path) -> str:
     if not isinstance(version_value, str) or not version_value:
         raise SystemExit("pyproject.toml is missing project.version")
     return version_value
+
+
+def _project_name(package_root: Path) -> str:
+    with (package_root / "pyproject.toml").open("rb") as handle:
+        metadata = tomllib.load(handle)
+    name_value = metadata.get("project", {}).get("name")
+    if not isinstance(name_value, str) or not name_value:
+        raise SystemExit("pyproject.toml is missing project.name")
+    return name_value
 
 
 def _run_module(module: str, args: list[str], cwd: Path, *, missing_hint: str) -> None:
@@ -252,14 +313,58 @@ def _validate_installed_wheel(wheel: Path) -> None:
 
 def _validate_vendored_sdk_parity(package_root: Path) -> None:
     repo_root = package_root.parents[1]
-    standalone = package_root / "src" / "ophanix_tool_gateway" / "sdk.py"
-    vendored = repo_root / "packages" / "product-platform" / "src" / "ophanix_tool_gateway" / "sdk.py"
-    if not vendored.exists():
-        raise SystemExit("Product-platform vendored SDK copy is missing.")
-    if standalone.read_bytes() != vendored.read_bytes():
+    standalone_root = package_root / "src"
+    vendored_root = repo_root / "packages" / "product-platform" / "src"
+    mismatches: list[str] = []
+    missing: list[str] = []
+    for relative_path in EXPECTED_PACKAGE_FILES:
+        standalone = standalone_root / relative_path
+        vendored = vendored_root / relative_path
+        if not standalone.exists() or not vendored.exists():
+            missing.append(relative_path)
+            continue
+        if standalone.read_bytes() != vendored.read_bytes():
+            mismatches.append(relative_path)
+    if missing:
         raise SystemExit(
-            "Standalone SDK and product-platform vendored SDK copy differ; "
-            "sync packages/product-platform/src/ophanix_tool_gateway/sdk.py before release."
+            "Standalone SDK or product-platform vendored copy is missing: "
+            + ", ".join(sorted(missing))
+        )
+    if mismatches:
+        raise SystemExit(
+            "Standalone SDK and product-platform vendored SDK package differ; sync: "
+            + ", ".join(sorted(mismatches))
+        )
+
+
+def _validate_index_install(package_root: Path, *, index_url: str | None) -> None:
+    with tempfile.TemporaryDirectory(prefix="ophanix-sdk-index-install-") as target:
+        requirement = f"{_project_name(package_root)}=={_project_version(package_root)}"
+        command = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--target",
+            target,
+            requirement,
+        ]
+        if index_url:
+            command.extend(["--index-url", index_url])
+        _run(command, cwd=package_root)
+        _run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; "
+                    f"sys.path.insert(0, {target!r}); "
+                    "import ophanix_tool_gateway as sdk; "
+                    f"assert sdk.__version__ == {_project_version(package_root)!r}; "
+                    "assert sdk.OphanixToolGatewayClient"
+                ),
+            ],
+            cwd=package_root,
         )
 
 

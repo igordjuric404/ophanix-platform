@@ -113,15 +113,23 @@ class ToolGatewayUpstreamPhase1Tests(unittest.TestCase):
         self.assertEqual(target.auth_config_json, {"secret_ref": "secref_upstream_claims"})
 
     def test_unit_auth_config_rejects_inline_secret_material(self) -> None:
-        with self.assertRaises(ValidationError) as context:
-            ToolUpstreamTargetCreateRequest(
-                base_url="https://claims.internal.example",
-                path_template="/claims",
-                auth_mode="bearer",
-                auth_config_json={"secret_ref": "Bearer raw-token"},
-            )
+        for secret_ref in [
+            "Bearer raw-token",
+            "ghp_abcd1234abcd1234",
+            "xoxb-abcd1234abcd1234",
+            "AKIAABCDEFGHIJKLMNOP",
+            "abcdefghijklmnopqrstuvwxyzABCDEF",
+        ]:
+            with self.subTest(secret_ref=secret_ref):
+                with self.assertRaises(ValidationError) as context:
+                    ToolUpstreamTargetCreateRequest(
+                        base_url="https://claims.internal.example",
+                        path_template="/claims",
+                        auth_mode="bearer",
+                        auth_config_json={"secret_ref": secret_ref},
+                    )
 
-        self.assertIn("opaque secret reference", str(context.exception))
+                self.assertIn("opaque secret reference", str(context.exception))
 
     def test_unit_auth_config_rejects_invalid_header_prefix(self) -> None:
         with self.assertRaises(ValidationError) as context:

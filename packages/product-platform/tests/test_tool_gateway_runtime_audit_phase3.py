@@ -130,7 +130,7 @@ class ToolGatewayRuntimeAuditPhase3Tests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404, response.text)
 
-    def test_idempotency_cleanup_removes_only_old_terminal_records(self) -> None:
+    def test_idempotency_cleanup_marks_stale_in_progress_and_removes_old_terminal_records(self) -> None:
         with self.database.transaction() as connection:
             self._insert_cleanup_agent(connection)
             tool = ToolRegistryRepository(connection, DEMO_ORG_ID, DEMO_ENV_ID).create_tool(
@@ -223,25 +223,34 @@ class ToolGatewayRuntimeAuditPhase3Tests(unittest.TestCase):
             )
 
         with self.database.transaction() as connection:
-            deleted = purge_tool_invocation_idempotency_records(
+            result = purge_tool_invocation_idempotency_records(
                 connection,
                 retention_seconds=24 * 60 * 60,
+                in_progress_ttl_seconds=60 * 60,
                 now="2026-05-12T00:00:00+00:00",
             )
 
         rows = self.database.connect().execute(
             """
-            SELECT id
+            SELECT id, status, error_code
             FROM tool_invocation_idempotency_records
             WHERE id LIKE ?
             ORDER BY id
             """,
             ("toolidem_cleanup_%",),
         ).fetchall()
-        self.assertEqual(deleted, 1)
+        self.assertEqual(result.deleted_records, 1)
+        self.assertEqual(result.marked_failed_unknown, 1)
         self.assertEqual(
-            [row["id"] for row in rows],
-            ["toolidem_cleanup_in_progress", "toolidem_cleanup_recent"],
+            [(row["id"], row["status"], row["error_code"]) for row in rows],
+            [
+                (
+                    "toolidem_cleanup_in_progress",
+                    "failed_unknown",
+                    "idempotency_outcome_unknown",
+                ),
+                ("toolidem_cleanup_recent", "completed", None),
+            ],
         )
 
     def _headers(self) -> dict[str, str]:

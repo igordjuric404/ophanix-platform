@@ -37,9 +37,21 @@ SENSITIVE_ASSIGNMENT_RE = re.compile(
     r"(?P<value>bearer\s+[^\s,;]+|\"[^\"]*\"|'[^']*'|[^\s,;]+)",
     re.IGNORECASE,
 )
-SECRET_LIKE_QUERY_KEY_TOKENS = {
+SECRET_LIKE_QUERY_KEY_NAMES = {
     "api_key",
     "apikey",
+    "access_token",
+    "authorization",
+    "client_secret",
+    "credential",
+    "key",
+    "password",
+    "private_key",
+    "refresh_token",
+    "secret",
+    "token",
+}
+SECRET_LIKE_QUERY_KEY_SEGMENTS = {
     "authorization",
     "credential",
     "password",
@@ -256,7 +268,7 @@ class HttpToolInvocationExecutor:
     ) -> None:
         self.repository = repository
         self._owns_http_client = http_client is None
-        self.http_client = http_client or httpx.Client()
+        self.http_client = http_client or httpx.Client(follow_redirects=False, trust_env=False)
         self.secret_provider = secret_provider
         self.fail_closed_unhealthy = fail_closed_unhealthy
         self.max_response_bytes = max_response_bytes
@@ -378,7 +390,7 @@ class AsyncHttpToolInvocationExecutor:
     ) -> None:
         self.repository = repository
         self._owns_http_client = http_client is None
-        self.http_client = http_client or httpx.AsyncClient()
+        self.http_client = http_client or httpx.AsyncClient(follow_redirects=False, trust_env=False)
         self.secret_provider = secret_provider
         self.fail_closed_unhealthy = fail_closed_unhealthy
         self.max_response_bytes = max_response_bytes
@@ -739,7 +751,7 @@ def _request_payload_kwargs(
                     message="Payload field is not allowed as a query parameter for this tool target.",
                     status_code=422,
                 )
-            if any(token in normalized_key for token in SECRET_LIKE_QUERY_KEY_TOKENS):
+            if _is_secret_like_query_key(normalized_key):
                 raise ToolExecutionError(
                     code="unsafe_query_payload",
                     message="GET and DELETE tool payloads must not place credential-like fields in query parameters.",
@@ -790,11 +802,13 @@ def _upstream_auth_headers(target: Any, secret_provider: Any | None) -> dict[str
         )
     secret_value = _retrieve_upstream_secret(secret_provider, secret_ref)
     if auth_mode == "bearer":
+        _validate_upstream_header_value(secret_value, field="upstream bearer secret")
         return {"Authorization": f"Bearer {secret_value}"}
     if auth_mode == "api_key":
         header_name = str(auth_config.get("header_name") or "X-API-Key").strip()
         header_prefix = str(auth_config.get("header_prefix") or "").strip()
         header_value = f"{header_prefix} {secret_value}" if header_prefix else secret_value
+        _validate_upstream_header_value(header_value, field="upstream API key secret")
         return {header_name: header_value}
     raise ToolExecutionError(
         code="upstream_auth_mode_unsupported",
@@ -827,6 +841,15 @@ def _retrieve_upstream_secret(secret_provider: Any | None, secret_ref: str) -> s
     return secret_value
 
 
+def _validate_upstream_header_value(value: str, *, field: str) -> None:
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ToolExecutionError(
+            code="upstream_auth_secret_invalid",
+            message=f"Configured {field} contains unsupported header control characters.",
+            status_code=502,
+        )
+
+
 def _target_json_mapping(target: Any, key: str) -> dict[str, Any]:
     value = _target_optional_value(target, key)
     if value is None:
@@ -849,6 +872,18 @@ def _target_optional_value(target: Any, key: str) -> Any | None:
 
 def _normalize_key(key: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_")
+
+
+def _is_secret_like_query_key(normalized_key: str) -> bool:
+    if normalized_key in SECRET_LIKE_QUERY_KEY_NAMES:
+        return True
+    segments = [segment for segment in normalized_key.split("_") if segment]
+    if any(segment in SECRET_LIKE_QUERY_KEY_SEGMENTS for segment in segments):
+        return True
+    return segments[-1:] == ["key"] and any(
+        segment in {"access", "api", "client", "private", "secret"}
+        for segment in segments[:-1]
+    )
 
 
 def _redact_sensitive_assignment(match: re.Match[str]) -> str:

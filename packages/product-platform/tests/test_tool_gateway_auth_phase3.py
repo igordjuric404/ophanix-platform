@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -323,6 +325,44 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
         self.assertEqual(second.json()["code"], "TOOL_GATEWAY_RATE_LIMITED")
         self.assertEqual(second.headers["Retry-After"], "60")
 
+    def test_api_gateway_rate_limit_hashes_authorization_bucket_with_secret(self) -> None:
+        app = create_app(
+            Settings(
+                app_name="Ophanix Test Platform",
+                environment="test",
+                build_sha="test-sha",
+                build_time="2026-05-01T00:00:00Z",
+                session_secret="test-secret",
+                tool_gateway_rate_limit_window_seconds=60,
+                tool_gateway_rate_limit_max_requests=100,
+            ),
+            database=self.database,
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get(
+            "/api/v1/gateway/tools",
+            headers=self._headers(self.raw_token),
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        row = self.database.connect().execute(
+            "SELECT key_hash FROM tool_gateway_rate_limit_windows"
+        ).fetchone()
+        self.assertIsNotNone(row)
+        old_token_digest = hashlib.sha256(self.raw_token.encode("utf-8")).hexdigest()
+        old_key_hash = hashlib.sha256(f"authorization:{old_token_digest}".encode("utf-8")).hexdigest()
+        new_token_digest = hmac.new(
+            b"test-secret",
+            self.raw_token.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        new_key_hash = hashlib.sha256(
+            f"authorization_hmac:{new_token_digest}".encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(row["key_hash"], new_key_hash)
+        self.assertNotEqual(row["key_hash"], old_key_hash)
+
     def test_api_gateway_rate_limit_is_shared_across_app_instances(self) -> None:
         settings = Settings(
             app_name="Ophanix Test Platform",
@@ -537,6 +577,16 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
                     self._production_settings(),
                     database=self.database,
                 )
+
+    def test_api_requires_upstream_allowlist_in_non_local_environments(self) -> None:
+        with self.assertRaisesRegex(ValueError, "UPSTREAM_HOST_ALLOWLIST"):
+            create_app(
+                self._production_settings(
+                    environment="staging",
+                    tool_gateway_upstream_host_allowlist=[],
+                ),
+                database=self.database,
+            )
 
     def test_api_rejects_disabled_gateway_safety_limits_in_production(self) -> None:
         with self.assertRaisesRegex(ValueError, "production safety limits"):

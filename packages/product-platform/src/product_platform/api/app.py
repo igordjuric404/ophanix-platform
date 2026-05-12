@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import inspect
 import json
+import logging
 import os
 import re
 import time
@@ -645,6 +647,7 @@ from product_platform.workflows.worker import WORKFLOW_JOB_TYPE
 
 MAX_TRACE_ID_LENGTH = 128
 TRACE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:/@+-]+$")
+LOGGER = logging.getLogger(__name__)
 
 
 def _request_context_from_request(request: Request) -> RequestContext:
@@ -764,10 +767,10 @@ def _validate_production_settings(settings: Settings) -> None:
             raise ValueError("Legacy gateway token hash acceptance is not allowed in production.")
         if _bool_env("OPHANIX_ALLOW_UNRESOLVED_UPSTREAM_HOSTS", False):
             raise ValueError("Unresolved upstream hosts are not allowed in production.")
-        if not settings.tool_gateway_upstream_host_allowlist:
-            raise ValueError(
-                "OPHANIX_TOOL_GATEWAY_UPSTREAM_HOST_ALLOWLIST must be configured in production."
-            )
+    if not settings.tool_gateway_upstream_host_allowlist:
+        raise ValueError(
+            "OPHANIX_TOOL_GATEWAY_UPSTREAM_HOST_ALLOWLIST must be configured in non-local environments."
+        )
     if not settings.gateway_token_hash_pepper:
         raise ValueError("OPHANIX_GATEWAY_TOKEN_HASH_PEPPER must be set in production.")
     positive_gateway_limits = {
@@ -810,7 +813,7 @@ def _is_tool_gateway_runtime_path(path: str) -> bool:
     )
 
 
-def _gateway_rate_limit_key(request: Request) -> str:
+def _gateway_rate_limit_key(request: Request, *, secret: str) -> str:
     authorization = request.headers.get("Authorization", "")
     client_host = request.client.host if request.client else "unknown"
     if authorization:
@@ -818,8 +821,8 @@ def _gateway_rate_limit_key(request: Request) -> str:
             token = parse_bearer_authorization(authorization)
         except GatewayAuthenticationError:
             return f"client:{client_host}:invalid_authorization"
-        digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
-        return f"authorization:{digest}"
+        digest = hmac.new(secret.encode("utf-8"), token.encode("utf-8"), hashlib.sha256).hexdigest()
+        return f"authorization_hmac:{digest}"
     return f"client:{client_host}"
 
 
@@ -833,7 +836,10 @@ def _tool_gateway_rate_limit_result(
     window_seconds = int(settings.tool_gateway_rate_limit_window_seconds)
     if max_requests <= 0 or window_seconds <= 0:
         return False, 0
-    key = _gateway_rate_limit_key(request)
+    key = _gateway_rate_limit_key(
+        request,
+        secret=settings.gateway_token_hash_pepper or settings.session_secret,
+    )
     client_host = request.client.host if request.client else "unknown"
     overflow_key = f"client:{client_host}:overflow"
     max_keys = int(getattr(settings, "tool_gateway_rate_limit_max_keys", 10_000))
@@ -1220,12 +1226,17 @@ def create_app(
 
     @app.exception_handler(Exception)
     async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
+        details = (
+            {"error_type": exc.__class__.__name__}
+            if _is_local_environment(resolved_settings.environment)
+            else {}
+        )
         return _error_response(
             request,
             status_code=500,
             code="INTERNAL_ERROR",
             message="Internal server error.",
-            details={"error_type": exc.__class__.__name__},
+            details=details,
         )
 
     def _version_info() -> VersionInfo:
@@ -3705,20 +3716,61 @@ def create_app(
                 response_body: dict[str, Any],
                 *,
                 error_code: str | None = None,
-            ) -> None:
+            ) -> bool:
                 if idempotency_record_id is None:
-                    return
-                with _audit_database().transaction() as idem_connection:
-                    ToolInvocationIdempotencyRepository(
-                        idem_connection,
-                        principal.organization_id,
-                        principal.environment_id,
-                    ).complete_invocation(
-                        idempotency_record_id,
-                        response_status_code=status_code,
-                        response_body=response_body,
-                        error_code=error_code,
+                    return True
+                try:
+                    with _audit_database().transaction() as idem_connection:
+                        ToolInvocationIdempotencyRepository(
+                            idem_connection,
+                            principal.organization_id,
+                            principal.environment_id,
+                        ).complete_invocation(
+                            idempotency_record_id,
+                            response_status_code=status_code,
+                            response_body=response_body,
+                            error_code=error_code,
+                        )
+                except Exception:
+                    LOGGER.exception(
+                        "Failed to persist Tool Gateway idempotency response.",
+                        extra={
+                            "idempotency_record_id": idempotency_record_id,
+                            "request_id": context.request_id,
+                            "correlation_id": correlation_id,
+                            "tool_name": tool_name,
+                        },
                     )
+                    return False
+                return True
+
+            def _idempotency_persistence_failure_response(
+                *,
+                status_code: int = 503,
+            ) -> JSONResponse:
+                return JSONResponse(
+                    status_code=status_code,
+                    content=jsonable_encoder(
+                        ToolInvocationResponse(
+                            request_id=context.request_id,
+                            correlation_id=correlation_id,
+                            tool_name=tool_name,
+                            decision=_tool_invocation_decision_summary(decision),
+                            reason_code="idempotency_persistence_failed",
+                            result=None,
+                            error={
+                                "code": "idempotency_persistence_failed",
+                                "message": (
+                                    "Tool execution completed, but the gateway could not "
+                                    "persist the idempotency replay record; the outcome is "
+                                    "unknown for retries. Reconcile the upstream operation "
+                                    "before using a new idempotency key."
+                                ),
+                            },
+                        )
+                    ),
+                    headers={"Idempotency-Persistence": "failed"},
+                )
 
             executor = getattr(app.state, "tool_gateway_executor", None)
             if executor is None:
@@ -3778,11 +3830,12 @@ def create_app(
                         error={"code": exc.code, "message": safe_message},
                     )
                 )
-                _store_idempotency_response(
+                if not _store_idempotency_response(
                     exc.status_code,
                     response_body,
                     error_code=exc.code,
-                )
+                ):
+                    return _idempotency_persistence_failure_response()
                 return JSONResponse(
                     status_code=exc.status_code,
                     content=response_body,
@@ -3811,7 +3864,12 @@ def create_app(
                         },
                     )
                 )
-                _store_idempotency_response(502, response_body, error_code="executor_error")
+                if not _store_idempotency_response(
+                    502,
+                    response_body,
+                    error_code="executor_error",
+                ):
+                    return _idempotency_persistence_failure_response()
                 return JSONResponse(
                     status_code=502,
                     content=response_body,
@@ -3870,11 +3928,12 @@ def create_app(
                             },
                         )
                     )
-                    _store_idempotency_response(
+                    if not _store_idempotency_response(
                         exc.status_code,
                         response_body,
                         error_code=exc.code,
-                    )
+                    ):
+                        return _idempotency_persistence_failure_response()
                     return JSONResponse(
                         status_code=exc.status_code,
                         content=response_body,
@@ -3916,7 +3975,8 @@ def create_app(
                         error=_tool_execution_error_body(execution.error),
                     )
                 )
-                _store_idempotency_response(502, response_body, error_code=error_code)
+                if not _store_idempotency_response(502, response_body, error_code=error_code):
+                    return _idempotency_persistence_failure_response()
                 return JSONResponse(
                     status_code=502,
                     content=response_body,
@@ -3954,7 +4014,8 @@ def create_app(
                 result=result,
                 error=None,
             )
-            _store_idempotency_response(200, jsonable_encoder(response_model))
+            if not _store_idempotency_response(200, jsonable_encoder(response_model)):
+                return _idempotency_persistence_failure_response()
             return response_model
         except ToolSchemaValidationError as exc:
             return _schema_validation_error_response(request, exc)

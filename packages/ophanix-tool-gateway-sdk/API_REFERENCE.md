@@ -55,8 +55,10 @@ Methods:
 ### `AsyncOphanixToolGatewayClient`
 
 Async client with the same constructor options and method names. `call_tool`,
-`check_compatibility`, `list_tools`, `list_all_tools`, `get_tool`, and `close`
-are awaitable.
+`check_compatibility`, `list_tools`, `list_all_tools`, `get_tool`,
+`aclear_tool_cache`, and `close` are awaitable. Prefer
+`await client.aclear_tool_cache()` in async runtimes so cache mutation uses the
+async lock.
 
 ### `ToolGatewayClientConfig`
 
@@ -108,15 +110,18 @@ be 4096 characters or fewer.
   `status`, `required_scope`, optional input/output schemas, and immutable raw
   response metadata.
 - `ToolCallResult`: `request_id`, `correlation_id`, `tool_name`, `result`,
-  `reason_code`, optional `decision`, and immutable raw response metadata.
+  `body`, `reason_code`, optional `decision`, and immutable raw response
+  metadata. `body` unwraps the standard gateway execution envelope when present.
 - `GatewayCompatibility`: `compatible`, `sdk_version`,
   `expected_gateway_contract_version`, `gateway_contract_version`,
   `min_sdk_version`, `min_sdk_version_satisfied`, `incompatibility_reason`,
   and immutable raw response metadata.
 
 `raw` fields are diagnostic snapshots rather than stable extension contracts.
-`ToolCallResult.decision` is a coarse agent-facing summary and does not include
-internal policy IDs.
+Successful `ToolCallResult.raw` values may include the full agent-facing tool
+response, so do not log them unless your application has already classified that
+payload as safe. `ToolCallResult.decision` is a coarse agent-facing summary and
+does not include internal policy IDs.
 
 ## Errors
 
@@ -149,7 +154,15 @@ Sanitized `response_body` values redact common credential and PII-like keys:
 
 Invocation retries are gated by `idempotency_key`. Without a key, `call_tool`
 does not retry transient failures because the SDK cannot prove that the upstream
-operation is safe to repeat.
+operation is safe to repeat. With a key, retries are still limited to transport,
+gateway availability/throttling, and `idempotency_in_progress` cases. Terminal
+execution failures returned by the gateway, such as `upstream_error`,
+`upstream_timeout`, `upstream_circuit_open`, and idempotency replays, are not
+retried automatically because the gateway would replay the stored terminal
+response for the same key instead of safely re-executing the upstream operation.
+`idempotency_persistence_failed` is never retried automatically because it means
+the upstream outcome may already have happened and must be reconciled before
+issuing a new idempotency key.
 
 `check_compatibility()` reports incompatible when the gateway contract version
 does not match or when the gateway `min_sdk_version` is higher than the installed
