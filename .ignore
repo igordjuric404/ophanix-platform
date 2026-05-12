@@ -1,0 +1,3 @@
+# Historical SDK-AUDIT issue inventories are intentionally hidden from routine
+# search so future agents do not treat stale findings as current context.
+docs/product-platform-worktree/execution-logs/DO-NOT-READ-SDK-AUDIT-ARCHIVE/

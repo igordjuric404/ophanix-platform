@@ -25,11 +25,11 @@ It is not ready to be scored as an 8+ serious production pilot from repository e
 
 Strict current scores:
 
-| Category | Current score | Prior score from `13-sdk-review-remediation.md` | Direction | MVP interpretation |
-| --- | ---: | ---: | --- | --- |
-| Implementation quality | 6.8/10 | 8.1/10 | Lowered | Functional but fragile MVP. Core behavior exists and tests pass, but idempotency/retry semantics, duplicated SDK source, and coverage gaps cap confidence. |
-| Ease of use | 6.7/10 | 8.3/10 | Lowered | A competent engineer can adopt it in a few hours in a controlled environment, but install evidence, credential issuance ambiguity, and API/documentation rough edges can force source-level debugging. |
-| Security and reliability | 6.4/10 | 8.3/10 | Lowered | Safe defaults are much better than earlier versions, but replay/retry semantics, manual cleanup, egress assumptions, retention, and operational-state hashing keep this below a broad external MVP threshold. |
+| Category                 | Current score | Prior score from `13-sdk-review-remediation.md` | Direction | MVP interpretation                                                                                                                                                                                            |
+| ------------------------ | ------------: | ----------------------------------------------: | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Implementation quality   |        6.8/10 |                                          8.1/10 | Lowered   | Functional but fragile MVP. Core behavior exists and tests pass, but idempotency/retry semantics, duplicated SDK source, and coverage gaps cap confidence.                                                    |
+| Ease of use              |        6.7/10 |                                          8.3/10 | Lowered   | A competent engineer can adopt it in a few hours in a controlled environment, but install evidence, credential issuance ambiguity, and API/documentation rough edges can force source-level debugging.        |
+| Security and reliability |        6.4/10 |                                          8.3/10 | Lowered   | Safe defaults are much better than earlier versions, but replay/retry semantics, manual cleanup, egress assumptions, retention, and operational-state hashing keep this below a broad external MVP threshold. |
 
 Final assessment: credible for supervised internal pilot or a closely supported design partner; not yet a clean self-serve external MVP. To reach a credible `7`, fix or clearly document idempotent retry semantics, close package install/provenance evidence, add cleanup scheduling guidance, and strengthen tests around real gateway replay behavior. To reach `8`, add end-to-end release provenance, broader async/integration coverage, stronger operational runbooks, and remove the source-copy drift risk.
 
@@ -1003,15 +1003,15 @@ Earlier in the same log, after Pass 16, scores were:
 
 ## 5. Issues Grouped By Category
 
-| Category | Issues |
-| --- | --- |
-| Runtime behavior and reliability | SDK-AUDIT-003, SDK-AUDIT-004, SDK-AUDIT-005, SDK-AUDIT-006, SDK-AUDIT-008, SDK-AUDIT-016, SDK-AUDIT-017, SDK-AUDIT-027, SDK-AUDIT-037 |
-| Security and privacy | SDK-AUDIT-007, SDK-AUDIT-009, SDK-AUDIT-010, SDK-AUDIT-011, SDK-AUDIT-012, SDK-AUDIT-013, SDK-AUDIT-014, SDK-AUDIT-030, SDK-AUDIT-035, SDK-AUDIT-036, SDK-AUDIT-040 |
-| Public API and developer experience | SDK-AUDIT-018, SDK-AUDIT-019, SDK-AUDIT-020, SDK-AUDIT-021, SDK-AUDIT-029, SDK-AUDIT-031, SDK-AUDIT-038, SDK-AUDIT-039 |
-| Testing | SDK-AUDIT-025, SDK-AUDIT-026, SDK-AUDIT-027, SDK-AUDIT-028 |
-| Packaging and release | SDK-AUDIT-001, SDK-AUDIT-002, SDK-AUDIT-023, SDK-AUDIT-024, SDK-AUDIT-028, SDK-AUDIT-032, SDK-AUDIT-033, SDK-AUDIT-034 |
-| Maintainability | SDK-AUDIT-022, SDK-AUDIT-023, SDK-AUDIT-024 |
-| Documentation | SDK-AUDIT-001, SDK-AUDIT-003, SDK-AUDIT-029, SDK-AUDIT-030, SDK-AUDIT-031, SDK-AUDIT-035 |
+| Category                            | Issues                                                                                                                                                              |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Runtime behavior and reliability    | SDK-AUDIT-003, SDK-AUDIT-004, SDK-AUDIT-005, SDK-AUDIT-006, SDK-AUDIT-008, SDK-AUDIT-016, SDK-AUDIT-017, SDK-AUDIT-027, SDK-AUDIT-037                               |
+| Security and privacy                | SDK-AUDIT-007, SDK-AUDIT-009, SDK-AUDIT-010, SDK-AUDIT-011, SDK-AUDIT-012, SDK-AUDIT-013, SDK-AUDIT-014, SDK-AUDIT-030, SDK-AUDIT-035, SDK-AUDIT-036, SDK-AUDIT-040 |
+| Public API and developer experience | SDK-AUDIT-018, SDK-AUDIT-019, SDK-AUDIT-020, SDK-AUDIT-021, SDK-AUDIT-029, SDK-AUDIT-031, SDK-AUDIT-038, SDK-AUDIT-039                                              |
+| Testing                             | SDK-AUDIT-025, SDK-AUDIT-026, SDK-AUDIT-027, SDK-AUDIT-028                                                                                                          |
+| Packaging and release               | SDK-AUDIT-001, SDK-AUDIT-002, SDK-AUDIT-023, SDK-AUDIT-024, SDK-AUDIT-028, SDK-AUDIT-032, SDK-AUDIT-033, SDK-AUDIT-034                                              |
+| Maintainability                     | SDK-AUDIT-022, SDK-AUDIT-023, SDK-AUDIT-024                                                                                                                         |
+| Documentation                       | SDK-AUDIT-001, SDK-AUDIT-003, SDK-AUDIT-029, SDK-AUDIT-030, SDK-AUDIT-031, SDK-AUDIT-035                                                                            |
 
 ## 6. Critical And High-Severity Blockers
 
@@ -1070,29 +1070,29 @@ These high issues are enough to prevent an `8+` score. SDK-AUDIT-003 also preven
 
 ## 9. Prior Findings Status Table
 
-| Prior finding from `13-sdk-review-remediation.md` | Current status | Evidence / challenge |
-| --- | --- | --- |
-| SDK discovery used operator endpoint | Fixed | SDK uses `/api/v1/gateway/tools`; product route exists and is gateway-authenticated. |
-| Gateway discovery exposed operator shape | Fixed | `GatewayToolDefinitionResponse` excludes org/environment/creator metadata. |
-| Weak SDK input validation and non-local HTTP default | Mostly fixed | Strict JSON, token, URL, header, finite-number validation is present; non-local HTTP rejected by default. |
-| `get_tool()` first-page only | Fixed | `get_tool()` and `list_all_tools()` paginate. |
-| Static token repr exposed token | Fixed | `StaticTokenProvider.token` uses `repr=False`. |
-| SDK exceptions retained raw bodies | Mostly fixed | Error bodies are sanitized; successful `raw` fields remain potentially sensitive. See SDK-AUDIT-035. |
-| Missing env token provider/list_all/cache invalidation | Fixed with caveats | `EnvironmentTokenProvider`, `list_all_tools()`, and cache clearing exist; async clear docs are inconsistent. |
-| Loose payload and base URL boundaries | Fixed | Strict payload and base URL validation exist. |
-| Non-finite config and unsafe exception messages | Mostly fixed | Numeric validation and generic messages exist; `idempotency_persistence_failed` exposes sanitized server message intentionally. |
-| Discovery ignored `Retry-After` | Fixed | Retry-After parsing and caps exist. |
-| SDK embedded only in product-platform | Mostly fixed | Standalone package exists; product source still carries a vendored copy with drift risk. |
-| Resource-scoped credential grants flattened | Fixed | Discovery and invocation check structured tool resource grants. |
-| Discovery cache crossed credential rotations | Fixed | Cache partitioning by token fingerprint exists. |
-| Missing async SDK | Implemented with residual gaps | Async client exists; coverage/docs have gaps. |
-| Package buildability and external docs weak | Improved | Local package tests and release validator pass; PyPI discoverability/provenance remain unresolved. |
-| Optional response fields under-validated | Fixed | Optional mapping fields are rejected if malformed. |
-| Sync client async token-provider misuse unclear | Fixed | Sync token-provider guard exists. |
-| Redaction missed common secret shapes | Improved | Expanded redaction exists, still best-effort. |
-| Production developer docs incomplete | Improved but still not self-serve | Credential issuance and published-package evidence remain gaps. |
-| Release validation not repeatable | Improved | `validate_release.py` exists and passed locally. Target-index install validation is missing. |
-| Sync/async constructor validation duplicated | Partially fixed | `_client_config()` centralizes config validation; runtime sync/async logic remains mirrored. |
+| Prior finding from `13-sdk-review-remediation.md`      | Current status                    | Evidence / challenge                                                                                                            |
+| ------------------------------------------------------ | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| SDK discovery used operator endpoint                   | Fixed                             | SDK uses `/api/v1/gateway/tools`; product route exists and is gateway-authenticated.                                            |
+| Gateway discovery exposed operator shape               | Fixed                             | `GatewayToolDefinitionResponse` excludes org/environment/creator metadata.                                                      |
+| Weak SDK input validation and non-local HTTP default   | Mostly fixed                      | Strict JSON, token, URL, header, finite-number validation is present; non-local HTTP rejected by default.                       |
+| `get_tool()` first-page only                           | Fixed                             | `get_tool()` and `list_all_tools()` paginate.                                                                                   |
+| Static token repr exposed token                        | Fixed                             | `StaticTokenProvider.token` uses `repr=False`.                                                                                  |
+| SDK exceptions retained raw bodies                     | Mostly fixed                      | Error bodies are sanitized; successful `raw` fields remain potentially sensitive. See SDK-AUDIT-035.                            |
+| Missing env token provider/list_all/cache invalidation | Fixed with caveats                | `EnvironmentTokenProvider`, `list_all_tools()`, and cache clearing exist; async clear docs are inconsistent.                    |
+| Loose payload and base URL boundaries                  | Fixed                             | Strict payload and base URL validation exist.                                                                                   |
+| Non-finite config and unsafe exception messages        | Mostly fixed                      | Numeric validation and generic messages exist; `idempotency_persistence_failed` exposes sanitized server message intentionally. |
+| Discovery ignored `Retry-After`                        | Fixed                             | Retry-After parsing and caps exist.                                                                                             |
+| SDK embedded only in product-platform                  | Mostly fixed                      | Standalone package exists; product source still carries a vendored copy with drift risk.                                        |
+| Resource-scoped credential grants flattened            | Fixed                             | Discovery and invocation check structured tool resource grants.                                                                 |
+| Discovery cache crossed credential rotations           | Fixed                             | Cache partitioning by token fingerprint exists.                                                                                 |
+| Missing async SDK                                      | Implemented with residual gaps    | Async client exists; coverage/docs have gaps.                                                                                   |
+| Package buildability and external docs weak            | Improved                          | Local package tests and release validator pass; PyPI discoverability/provenance remain unresolved.                              |
+| Optional response fields under-validated               | Fixed                             | Optional mapping fields are rejected if malformed.                                                                              |
+| Sync client async token-provider misuse unclear        | Fixed                             | Sync token-provider guard exists.                                                                                               |
+| Redaction missed common secret shapes                  | Improved                          | Expanded redaction exists, still best-effort.                                                                                   |
+| Production developer docs incomplete                   | Improved but still not self-serve | Credential issuance and published-package evidence remain gaps.                                                                 |
+| Release validation not repeatable                      | Improved                          | `validate_release.py` exists and passed locally. Target-index install validation is missing.                                    |
+| Sync/async constructor validation duplicated           | Partially fixed                   | `_client_config()` centralizes config validation; runtime sync/async logic remains mirrored.                                    |
 
 ## 10. Scoring Matrix
 
@@ -1380,43 +1380,43 @@ Remaining concerns:
 
 Previously highest-risk findings changed as follows:
 
-| Issue | Status after passes | Notes |
-| --- | --- | --- |
-| SDK-AUDIT-001 | Still open | Public package-index installability still needs target-index validation. The validator now has `--verify-index-install`, but this pass did not prove the index path. |
-| SDK-AUDIT-002 | Partially open | Release validation is stronger, but final PyPI/provenance loop still requires trusted publishing or hash-linked post-publish evidence. |
-| SDK-AUDIT-003 | Resolved for current SDK behavior | SDK no longer retries terminal/replayed gateway execution failures and docs now describe exact retry scope. |
-| SDK-AUDIT-004 | Open | Idempotency still starts after policy/schema validation. This remains a contract semantics concern. |
-| SDK-AUDIT-005 | Open | Unknown outcome after idempotency completion persistence failure remains inherent without a reconciliation API. |
-| SDK-AUDIT-006 | Open | Cleanup command exists, but no scheduler/deployment automation was added in this pass. |
-| SDK-AUDIT-007 | Open | Replay body retention still depends on cleanup execution. |
-| SDK-AUDIT-009 | Resolved | Rate-limit authorization buckets now use keyed HMAC before operational-state hashing. |
-| SDK-AUDIT-011 | Partially mitigated | Non-local allowlists are now required; deployment egress policy remains external. |
-| SDK-AUDIT-012 | Resolved | Upstream host allowlist required in all non-local environments. |
-| SDK-AUDIT-013 | Partially mitigated | Inline-secret detection is stronger; structured secret-ref grammar remains future work. |
-| SDK-AUDIT-014 | Resolved | Retrieved secrets with header control characters now fail closed. |
-| SDK-AUDIT-015 | Resolved | Query secret detection is segment-aware and allows harmless keys containing `key`. |
-| SDK-AUDIT-016 | Resolved | Malformed policy hook return values fail closed as `policy_error`. |
-| SDK-AUDIT-020 | Partially resolved | Async cache-clear docs now identify `aclear_tool_cache()`. Code still keeps both methods for compatibility. |
-| SDK-AUDIT-023 | Resolved | Release validator checks full expected package-file parity. |
-| SDK-AUDIT-025 | Partially mitigated | Added async retry-semantic test. Full async parity matrix remains future work. |
-| SDK-AUDIT-026 | Resolved | Smoke test compiles all example files. |
-| SDK-AUDIT-027 | Resolved for retry/replay case | Installed-wheel gateway contract now covers persisted upstream failure replay. |
-| SDK-AUDIT-028 | Partially mitigated | Optional post-publish index install validation added; actual package index still must be verified. |
-| SDK-AUDIT-029 | Resolved | README quickstart now generates opaque idempotency key. |
-| SDK-AUDIT-030 | Partially mitigated | LangGraph fallback no longer embeds `claim_id`; examples still use human-readable job/workflow IDs where caller-provided. |
-| SDK-AUDIT-031 | Improved | README now documents supported `0.1.x` Product Platform issuance flow rather than warning endpoint names may differ. |
-| SDK-AUDIT-032 | Resolved | Expected tags must include package version. |
-| SDK-AUDIT-033 | Resolved | Release validator no longer recursively deletes arbitrary existing output directories. |
-| SDK-AUDIT-035 | Resolved in docs | API reference now warns against logging successful `raw` snapshots. |
-| SDK-AUDIT-036 | Resolved | Generic `error_type` detail is local/test only. |
+| Issue         | Status after passes               | Notes                                                                                                                                                                |
+| ------------- | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| SDK-AUDIT-001 | Still open                        | Public package-index installability still needs target-index validation. The validator now has `--verify-index-install`, but this pass did not prove the index path. |
+| SDK-AUDIT-002 | Partially open                    | Release validation is stronger, but final PyPI/provenance loop still requires trusted publishing or hash-linked post-publish evidence.                               |
+| SDK-AUDIT-003 | Resolved for current SDK behavior | SDK no longer retries terminal/replayed gateway execution failures and docs now describe exact retry scope.                                                          |
+| SDK-AUDIT-004 | Open                              | Idempotency still starts after policy/schema validation. This remains a contract semantics concern.                                                                  |
+| SDK-AUDIT-005 | Open                              | Unknown outcome after idempotency completion persistence failure remains inherent without a reconciliation API.                                                      |
+| SDK-AUDIT-006 | Open                              | Cleanup command exists, but no scheduler/deployment automation was added in this pass.                                                                               |
+| SDK-AUDIT-007 | Open                              | Replay body retention still depends on cleanup execution.                                                                                                            |
+| SDK-AUDIT-009 | Resolved                          | Rate-limit authorization buckets now use keyed HMAC before operational-state hashing.                                                                                |
+| SDK-AUDIT-011 | Partially mitigated               | Non-local allowlists are now required; deployment egress policy remains external.                                                                                    |
+| SDK-AUDIT-012 | Resolved                          | Upstream host allowlist required in all non-local environments.                                                                                                      |
+| SDK-AUDIT-013 | Partially mitigated               | Inline-secret detection is stronger; structured secret-ref grammar remains future work.                                                                              |
+| SDK-AUDIT-014 | Resolved                          | Retrieved secrets with header control characters now fail closed.                                                                                                    |
+| SDK-AUDIT-015 | Resolved                          | Query secret detection is segment-aware and allows harmless keys containing `key`.                                                                                   |
+| SDK-AUDIT-016 | Resolved                          | Malformed policy hook return values fail closed as `policy_error`.                                                                                                   |
+| SDK-AUDIT-020 | Partially resolved                | Async cache-clear docs now identify `aclear_tool_cache()`. Code still keeps both methods for compatibility.                                                          |
+| SDK-AUDIT-023 | Resolved                          | Release validator checks full expected package-file parity.                                                                                                          |
+| SDK-AUDIT-025 | Partially mitigated               | Added async retry-semantic test. Full async parity matrix remains future work.                                                                                       |
+| SDK-AUDIT-026 | Resolved                          | Smoke test compiles all example files.                                                                                                                               |
+| SDK-AUDIT-027 | Resolved for retry/replay case    | Installed-wheel gateway contract now covers persisted upstream failure replay.                                                                                       |
+| SDK-AUDIT-028 | Partially mitigated               | Optional post-publish index install validation added; actual package index still must be verified.                                                                   |
+| SDK-AUDIT-029 | Resolved                          | README quickstart now generates opaque idempotency key.                                                                                                              |
+| SDK-AUDIT-030 | Partially mitigated               | LangGraph fallback no longer embeds `claim_id`; examples still use human-readable job/workflow IDs where caller-provided.                                            |
+| SDK-AUDIT-031 | Improved                          | README now documents supported `0.1.x` Product Platform issuance flow rather than warning endpoint names may differ.                                                 |
+| SDK-AUDIT-032 | Resolved                          | Expected tags must include package version.                                                                                                                          |
+| SDK-AUDIT-033 | Resolved                          | Release validator no longer recursively deletes arbitrary existing output directories.                                                                               |
+| SDK-AUDIT-035 | Resolved in docs                  | API reference now warns against logging successful `raw` snapshots.                                                                                                  |
+| SDK-AUDIT-036 | Resolved                          | Generic `error_type` detail is local/test only.                                                                                                                      |
 
 Updated strict scores after remediation:
 
-| Category | Previous current score | Updated score | Direction | Reason |
-| --- | ---: | ---: | --- | --- |
-| Implementation quality | 6.8/10 | 7.4/10 | Raised | The main retry/idempotency mismatch is fixed, integration tests now cover it, and release/source-copy guards are stronger. Remaining caps: idempotency scope, persistence-failure reconciliation, source-copy design, and incomplete async parity. |
-| Ease of use | 6.7/10 | 7.3/10 | Raised | Docs now describe exact retry scope, supported credential issuance, async cache clearing, safer examples, and raw logging risk. Remaining cap: public package-index installability still unverified from this environment. |
-| Security and reliability | 6.4/10 | 7.2/10 | Raised | Keyed rate-limit buckets, non-local upstream allowlists, fail-closed policy hook validation, secret header validation, and safer retry semantics materially improve reliability/security. Remaining caps: cleanup scheduling, replay retention, egress enforcement, provenance, and unknown-outcome reconciliation. |
+| Category                 | Previous current score | Updated score | Direction | Reason                                                                                                                                                                                                                                                                                                              |
+| ------------------------ | ---------------------: | ------------: | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Implementation quality   |                 6.8/10 |        7.4/10 | Raised    | The main retry/idempotency mismatch is fixed, integration tests now cover it, and release/source-copy guards are stronger. Remaining caps: idempotency scope, persistence-failure reconciliation, source-copy design, and incomplete async parity.                                                                  |
+| Ease of use              |                 6.7/10 |        7.3/10 | Raised    | Docs now describe exact retry scope, supported credential issuance, async cache clearing, safer examples, and raw logging risk. Remaining cap: public package-index installability still unverified from this environment.                                                                                          |
+| Security and reliability |                 6.4/10 |        7.2/10 | Raised    | Keyed rate-limit buckets, non-local upstream allowlists, fail-closed policy hook validation, secret header validation, and safer retry semantics materially improve reliability/security. Remaining caps: cleanup scheduling, replay retention, egress enforcement, provenance, and unknown-outcome reconciliation. |
 
 ## 20. Final Validation After Iterative Remediation
 
