@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from sqlite3 import Row
+from product_platform.db.postgres import Row
 from typing import Any
 
 from pydantic import BaseModel, Field

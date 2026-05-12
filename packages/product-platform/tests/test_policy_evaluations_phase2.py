@@ -34,9 +34,10 @@ class PolicyEvaluationAPITests(unittest.TestCase):
             seed_demo_data(connection)
             connection.execute(
                 """
-                INSERT OR IGNORE INTO environments
+                INSERT INTO environments
                     (id, organization_id, name, slug, type, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT DO NOTHING
                 """,
                 ("env_second", "org_default", "Second", "second", "development", now, now),
             )

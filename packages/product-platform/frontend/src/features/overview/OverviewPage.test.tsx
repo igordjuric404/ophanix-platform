@@ -25,7 +25,7 @@ describe("OverviewPage", () => {
         if (url.endsWith("/system/dependencies")) {
           return new Response(
             JSON.stringify([
-              { name: "database", required: true, status: "healthy", details: "sqlite ready" },
+              { name: "database", required: true, status: "healthy", details: "postgresql ready" },
               { name: "worker", required: true, status: "degraded", details: "queue idle" }
             ]),
             { headers: { "Content-Type": "application/json" }, status: 200 }

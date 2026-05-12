@@ -10,7 +10,8 @@ from product_platform import create_app
 from product_platform.api.dependencies import ReadinessProbes, create_default_dependency_registry
 from product_platform.api.models import DependencyStatus
 from product_platform.api.settings import Settings
-from product_platform.db.migrator import MigrationRunner, is_supported_database_url
+from product_platform.db.migrator import is_supported_database_url
+from product_platform.db.testing import create_test_database
 from product_platform.deployment.artifacts import LocalArtifactStore
 
 
@@ -29,36 +30,27 @@ def _healthy_probe(name: str):
     return probe
 
 
-def _migrated_database_url(temp_dir: str) -> str:
-    database_path = Path(temp_dir) / "cloud-preview.db"
-    database_url = f"sqlite:///{database_path}"
-    runner = MigrationRunner.from_settings(Settings(database_url=database_url))
-    try:
-        runner.apply_all()
-    finally:
-        runner.connection.close()
-    return database_url
-
-
 class MVPCloudDeploymentPhase2Tests(unittest.TestCase):
     def test_api_readiness_fails_when_required_cloud_services_missing(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
+        database = create_test_database()
+        try:
             app = create_app(
                 Settings(
                     environment="staging",
                     deployment_mode="cloud",
-                    database_url=_migrated_database_url(temp_dir),
+                    database_url=database.database_url,
                     redis_url=None,
                     object_storage_bucket=None,
                     secret_manager_ref=None,
                     session_secret="test-secret",
-                    allow_sqlite_in_production=True,
                     gateway_token_hash_pepper="test-pepper",
                 )
             )
             client = TestClient(app, raise_server_exceptions=False)
 
             response = client.get("/ready")
+        finally:
+            database.close()
 
         self.assertEqual(response.status_code, 503)
         dependencies = {item["name"]: item for item in response.json()["dependencies"]}
@@ -90,17 +82,17 @@ class MVPCloudDeploymentPhase2Tests(unittest.TestCase):
         self.assertIn("postgresql database is not ready or migrations are missing", dependencies["database"]["message"])
 
     def test_api_readiness_reports_unreachable_configured_redis(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
+        database = create_test_database()
+        try:
             settings = Settings(
                 environment="staging",
                 deployment_mode="cloud",
-                database_url=_migrated_database_url(temp_dir),
+                database_url=database.database_url,
                 redis_url="redis://127.0.0.1:1/0",
                 object_storage_bucket="ophanix-product-artifacts",
                 object_storage_endpoint="https://object-storage.example.com",
                 secret_manager_ref="projects/ophanix/secrets/product-platform",
                 session_secret="test-secret",
-                allow_sqlite_in_production=True,
                 gateway_token_hash_pepper="test-pepper",
             )
             registry = create_default_dependency_registry(
@@ -116,6 +108,8 @@ class MVPCloudDeploymentPhase2Tests(unittest.TestCase):
             )
 
             response = client.get("/ready")
+        finally:
+            database.close()
 
         dependencies = {item["name"]: item for item in response.json()["dependencies"]}
         self.assertEqual(response.status_code, 503)
@@ -123,17 +117,17 @@ class MVPCloudDeploymentPhase2Tests(unittest.TestCase):
         self.assertIn("not reachable", dependencies["redis"]["message"])
 
     def test_api_readiness_reports_configured_unchecked_secret_manager(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
+        database = create_test_database()
+        try:
             settings = Settings(
                 environment="staging",
                 deployment_mode="cloud",
-                database_url=_migrated_database_url(temp_dir),
+                database_url=database.database_url,
                 redis_url="redis://redis.example.com:6379/0",
                 object_storage_bucket="ophanix-product-artifacts",
                 object_storage_endpoint="https://object-storage.example.com",
                 secret_manager_ref="projects/ophanix/secrets/product-platform",
                 session_secret="test-secret",
-                allow_sqlite_in_production=True,
                 gateway_token_hash_pepper="test-pepper",
             )
             registry = create_default_dependency_registry(
@@ -149,6 +143,8 @@ class MVPCloudDeploymentPhase2Tests(unittest.TestCase):
             )
 
             response = client.get("/ready")
+        finally:
+            database.close()
 
         dependencies = {item["name"]: item for item in response.json()["dependencies"]}
         self.assertEqual(response.status_code, 503)
@@ -167,17 +163,17 @@ class MVPCloudDeploymentPhase2Tests(unittest.TestCase):
         self.assertTrue(database_url.startswith("postgresql://"))
 
     def test_api_readiness_passes_when_cloud_services_configured(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
+        database = create_test_database()
+        try:
             settings = Settings(
                 environment="staging",
                 deployment_mode="cloud",
-                database_url=_migrated_database_url(temp_dir),
+                database_url=database.database_url,
                 redis_url="redis://redis.example.com:6379/0",
                 object_storage_bucket="ophanix-product-artifacts",
                 object_storage_endpoint="https://object-storage.example.com",
                 secret_manager_ref="projects/ophanix/secrets/product-platform",
                 session_secret="test-secret",
-                allow_sqlite_in_production=True,
                 gateway_token_hash_pepper="test-pepper",
             )
             registry = create_default_dependency_registry(
@@ -194,6 +190,8 @@ class MVPCloudDeploymentPhase2Tests(unittest.TestCase):
             )
 
             response = client.get("/ready")
+        finally:
+            database.close()
 
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["status"], "ready")

@@ -6,7 +6,7 @@ import base64
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
-from sqlite3 import Connection, Row
+from product_platform.db.postgres import Connection, Row
 from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric import ed25519

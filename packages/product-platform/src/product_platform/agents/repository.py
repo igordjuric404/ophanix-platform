@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
-from sqlite3 import Connection, Row
+from product_platform.db.postgres import Connection, Row
 
 from product_platform.agents.models import (
     AgentCapabilityRequest,

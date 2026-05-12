@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 import json
 from pathlib import Path
-from sqlite3 import Connection, Row
+from product_platform.db.postgres import Connection, Row
 from typing import Any
 
 from product_platform.db.ids import generate_id

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from sqlite3 import Connection
+from product_platform.db.postgres import Connection
 
 from fastapi import Request
 

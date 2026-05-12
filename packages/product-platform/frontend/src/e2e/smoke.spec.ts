@@ -31,7 +31,7 @@ test("dev login and top-level navigation smoke", async ({ page }) => {
   await page.route("**/api/v1/system/dependencies", async (route) => {
     await route.fulfill({
       contentType: "application/json",
-      json: [{ name: "database", status: "healthy", details: "sqlite ready" }]
+      json: [{ name: "database", status: "healthy", details: "postgresql ready" }]
     });
   });
   await page.route("**/api/v1/version", async (route) => {

@@ -1,7 +1,7 @@
 # Product Platform Local Demo
 
 This compose stack runs the Demo Lab with the static frontend, product API,
-worker health loop, demo seed/init service, Redis, Postgres service parity, a
+worker health loop, demo seed/init service, Redis, PostgreSQL, a
 sample MCP service, and sample support/refund/research agents.
 
 ## Start
@@ -100,6 +100,7 @@ If Demo Lab prerequisites are degraded, run the reset from the UI or reseed:
 docker compose --env-file .env -f docker-compose.demo.yml run --rm migrate-seed db seed
 ```
 
-The current local demo command path uses SQLite inside the `product_api_data`
-volume. The Postgres container is included for local service parity and future
-cloud-aligned work.
+The local demo command path uses the `postgres` service as the product database.
+The `product_postgres_data` volume holds local database state; use
+`docker compose --env-file .env -f docker-compose.demo.yml down --volumes` to
+reset it completely.

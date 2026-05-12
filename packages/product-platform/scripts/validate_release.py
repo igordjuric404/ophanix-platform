@@ -25,7 +25,6 @@ EXPECTED_PACKAGE_FILES = (
 )
 FORBIDDEN_ARTIFACT_MARKERS = (
     ".db",
-    ".sqlite",
     "__pycache__",
     ".pyc",
     "node_modules/",

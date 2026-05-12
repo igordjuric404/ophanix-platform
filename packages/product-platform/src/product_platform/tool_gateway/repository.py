@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from sqlite3 import Connection, IntegrityError, Row
+from product_platform.db.postgres import Connection, IntegrityError, Row
 from typing import Any
 
 from product_platform.db.ids import generate_id
@@ -548,12 +548,13 @@ class ToolRegistryRepository:
     def _create_default_response_policy(self, *, tool_id: str, created_at: str) -> None:
         self.connection.execute(
             """
-            INSERT OR IGNORE INTO tool_response_policies (
+            INSERT INTO tool_response_policies (
                 id, organization_id, environment_id, tool_id, max_response_bytes,
                 redaction_rules_json, expose_to_agent, store_full_response,
                 strict_output_validation, status, created_at, updated_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT DO NOTHING
             """,
             (
                 generate_id("toolresp"),

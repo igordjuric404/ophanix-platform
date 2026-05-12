@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from sqlite3 import Connection
+from product_platform.db.postgres import Connection
 from typing import cast
 
 from product_platform.agents.credentials import hash_credential_token
@@ -265,12 +265,13 @@ def _seed_agent(
 ) -> None:
     connection.execute(
         """
-        INSERT OR IGNORE INTO agents (
+        INSERT INTO agents (
             id, organization_id, environment_id, name, description, framework,
             runtime_type, endpoint_url, owner_user_id, sponsor_user_id, status,
             trust_score, trust_tier, credential_status, created_at, updated_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT DO NOTHING
         """,
         (
             agent_id,
@@ -320,12 +321,13 @@ def _seed_tool(
     tool_id = existing["id"] if existing is not None else DIRECT_HTTP_TOOL_ID
     connection.execute(
         """
-        INSERT OR IGNORE INTO tool_definitions (
+        INSERT INTO tool_definitions (
             id, organization_id, environment_id, name, display_name, description,
             owner_team, status, required_scope, input_schema_json, output_schema_json,
             created_by, created_at, updated_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT DO NOTHING
         """,
         (
             tool_id,
@@ -364,11 +366,12 @@ def _seed_tool(
     )
     connection.execute(
         """
-        INSERT OR IGNORE INTO tool_definition_versions (
+        INSERT INTO tool_definition_versions (
             id, tool_id, version, input_schema_json, output_schema_json,
             required_scope, change_summary, created_by, created_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT DO NOTHING
         """,
         (
             DIRECT_HTTP_TOOL_VERSION_ID if tool_id == DIRECT_HTTP_TOOL_ID else f"toolver_direct_http_{tool_id}",
@@ -415,12 +418,13 @@ def _seed_named_tool(
     output_schema_json = json.dumps(output_schema, sort_keys=True)
     connection.execute(
         """
-        INSERT OR IGNORE INTO tool_definitions (
+        INSERT INTO tool_definitions (
             id, organization_id, environment_id, name, display_name, description,
             owner_team, status, required_scope, input_schema_json, output_schema_json,
             created_by, created_at, updated_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT DO NOTHING
         """,
         (
             resolved_tool_id,
@@ -463,11 +467,12 @@ def _seed_named_tool(
     )
     connection.execute(
         """
-        INSERT OR IGNORE INTO tool_definition_versions (
+        INSERT INTO tool_definition_versions (
             id, tool_id, version, input_schema_json, output_schema_json,
             required_scope, change_summary, created_by, created_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT DO NOTHING
         """,
         (
             version_id if resolved_tool_id == tool_id else f"toolver_direct_http_{resolved_tool_id}",
@@ -502,11 +507,12 @@ def _seed_upstream_target(
     health_url = health_url or f"{base_url.rstrip('/')}/health"
     connection.execute(
         """
-        INSERT OR IGNORE INTO tool_upstream_targets (
+        INSERT INTO tool_upstream_targets (
             id, organization_id, environment_id, tool_id, base_url, path_template,
             method, auth_mode, timeout_ms, status, created_at, updated_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT DO NOTHING
         """,
         (
             target_id,
@@ -539,11 +545,12 @@ def _seed_upstream_target(
     )
     connection.execute(
         """
-        INSERT OR IGNORE INTO tool_upstream_health_checks (
+        INSERT INTO tool_upstream_health_checks (
             id, target_id, health_url, expected_status, interval_seconds,
             last_status, last_checked_at, last_error, enabled
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT DO NOTHING
         """,
         (
             f"health_{target_id}",
@@ -579,11 +586,12 @@ def _seed_credential(
     token_hash = hash_credential_token(token)
     connection.execute(
         """
-        INSERT OR IGNORE INTO agent_credentials (
+        INSERT INTO agent_credentials (
             id, agent_id, credential_type, token_hash, issuer, status,
             issued_at, expires_at, revoked_at, last_used_at, metadata_json
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT DO NOTHING
         """,
         (
             credential_id,
@@ -606,10 +614,11 @@ def _seed_credential(
     stored_credential_id = stored["id"] if stored is not None else credential_id
     connection.execute(
         """
-        INSERT OR IGNORE INTO credential_scopes (
+        INSERT INTO credential_scopes (
             id, credential_id, scope, resource_type, resource_id
         )
         VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT DO NOTHING
         """,
         (
             scope_id,
@@ -632,12 +641,13 @@ def _seed_allowed_permission(
 ) -> None:
     connection.execute(
         """
-        INSERT OR IGNORE INTO agent_tool_permissions (
+        INSERT INTO agent_tool_permissions (
             id, organization_id, environment_id, agent_id, tool_id, scope, status,
             granted_by, granted_reason, granted_at, revoked_by, revoked_reason,
             revoked_at, expires_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT DO NOTHING
         """,
         (
             "perm_direct_http_allowed",

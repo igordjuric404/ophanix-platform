@@ -125,6 +125,7 @@ from product_platform.agents.identity import AgentIdentityAdapter
 from product_platform.agents.lifecycle import AgentLifecycleTransitionError
 from product_platform.agents.simulation import simulate_registration_action
 from product_platform.db.connection import Database
+from product_platform.db.migrator import is_supported_database_url
 from product_platform.db.seed import seed_demo_data
 from product_platform.compliance.models import (
     AuditExportRequest,
@@ -713,6 +714,8 @@ def _is_local_environment(environment: str) -> bool:
 
 
 def _validate_production_settings(settings: Settings) -> None:
+    if not is_supported_database_url(settings.database_url):
+        raise ValueError("OPHANIX_DATABASE_URL must be a postgresql:// URL.")
     if _is_local_environment(settings.environment):
         return
     is_production = settings.environment.strip().lower() == "production"
@@ -725,11 +728,6 @@ def _validate_production_settings(settings: Settings) -> None:
     )
     if enable_dev_login:
         raise ValueError("Development login must be disabled in production.")
-    if settings.database_url.startswith("sqlite:///") and not settings.allow_sqlite_in_production:
-        raise ValueError(
-            "SQLite is not supported for production without "
-            "OPHANIX_ALLOW_SQLITE_IN_PRODUCTION=true."
-        )
     if is_production:
         if not is_supported_secret_manager_ref(settings.secret_manager_ref):
             raise ValueError(
@@ -987,7 +985,7 @@ def create_app(
     if (
         database is None
         and not _is_local_environment(resolved_settings.environment)
-        and resolved_settings.database_url == "sqlite:///ophanix_product.db"
+        and not is_supported_database_url(resolved_settings.database_url)
     ):
         raise ValueError("A configured database is required outside local/test environments.")
     registry = dependency_registry or create_default_dependency_registry(resolved_settings)
@@ -1235,16 +1233,16 @@ def create_app(
             return existing
         if (
             not _is_local_environment(resolved_settings.environment)
-            and resolved_settings.database_url == "sqlite:///ophanix_product.db"
+            and not is_supported_database_url(resolved_settings.database_url)
         ):
             raise RuntimeError("A configured database is required outside local/test environments.")
-        database_url = (
-            "sqlite:///:memory:"
-            if resolved_settings.environment.strip().lower() == "test"
-            else resolved_settings.database_url
-        )
-        created = Database(database_url)
-        created.migrate()
+        if resolved_settings.environment.strip().lower() == "test":
+            from product_platform.db.testing import create_migrated_test_database
+
+            created = create_migrated_test_database()
+        else:
+            created = Database(resolved_settings.database_url)
+            created.migrate()
         if _is_local_environment(resolved_settings.environment):
             with created.transaction() as connection:
                 seed_demo_data(connection)

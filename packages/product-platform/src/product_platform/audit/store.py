@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from sqlite3 import Connection, Row
+from product_platform.db.postgres import Connection, Row
 
 from product_platform.audit.events import AuditEventEnvelope
 from product_platform.audit.hash_chain import (

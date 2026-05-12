@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlite3 import Row
+from product_platform.db.postgres import Row
 
 from product_platform.agents.credentials import AgentCredentialRepository
 from product_platform.agents.repository import AgentRegistryRepository

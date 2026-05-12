@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from sqlite3 import Connection
+from product_platform.db.postgres import Connection
 from typing import Any
 
 from product_platform.db.time import utc_now_iso
@@ -36,7 +36,7 @@ CUSTOMER_SUPPORT_REFUND_SCENARIO: dict[str, Any] = {
         },
         {
             "key": "database",
-            "label": "SQLite database",
+            "label": "PostgreSQL database",
             "required": True,
             "health_endpoint": "/ready",
             "evidence_route": "/settings",

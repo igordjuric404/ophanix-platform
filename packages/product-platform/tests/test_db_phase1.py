@@ -1,23 +1,23 @@
 from __future__ import annotations
 
-import os
-import sqlite3
-import tempfile
 import unittest
-from uuid import uuid4
-from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 from product_platform.api.settings import Settings
-from product_platform.db.connection import Database
 from product_platform.db.migrator import (
     MigrationRunner,
     connect_database,
     database_backend_from_url,
-    database_path_from_url,
     is_supported_database_url,
 )
 from product_platform.db.repositories import OrganizationRepository
 from product_platform.db.seed import DEMO_ENV_ID, DEMO_ORG_ID, DEMO_ADMIN_USER_ID, seed_demo_data
+from product_platform.db.testing import (
+    column_names,
+    create_test_database,
+    postgres_url_with_schema,
+    table_names,
+    test_postgres_url as _test_postgres_url,
+)
 from product_platform.db.time import utc_now_iso
 from product_platform.tool_gateway.models import ToolDefinitionCreateRequest
 from product_platform.tool_gateway.repository import ToolRegistryRepository
@@ -93,40 +93,31 @@ ALL_EXPECTED_MIGRATIONS = [*EXPECTED_MIGRATIONS, *FEATURE_MIGRATIONS]
 
 
 class DatabaseMigrationPhase1Tests(unittest.TestCase):
-    def test_database_url_parsing_supports_sqlite_and_postgres(self) -> None:
-        self.assertEqual(database_path_from_url(":memory:"), ":memory:")
-        self.assertEqual(database_path_from_url("sqlite:///:memory:"), ":memory:")
-        self.assertEqual(database_path_from_url("sqlite:///local.db"), "local.db")
-        self.assertEqual(database_backend_from_url("sqlite:///local.db"), "sqlite")
+    def test_database_url_parsing_supports_postgres_only(self) -> None:
         self.assertEqual(
             database_backend_from_url("postgresql://ophanix:secret@db.example.com:5432/ophanix"),
             "postgresql",
         )
-        self.assertTrue(is_supported_database_url("sqlite:///local.db"))
-        self.assertTrue(is_supported_database_url("sqlite:///:memory:"))
         self.assertTrue(
             is_supported_database_url(
                 "postgresql://ophanix:secret@db.example.com:5432/ophanix"
             )
         )
 
-        with self.assertRaisesRegex(ValueError, "Only sqlite:/// URLs"):
-            database_path_from_url("postgresql://ophanix:secret@db.example.com:5432/ophanix")
-        self.assertFalse(is_supported_database_url("mysql://db.example.com/ophanix"))
+        self.assertFalse(is_supported_database_url("file:///local.db"))
+        self.assertFalse(is_supported_database_url("memory://local"))
+        self.assertFalse(is_supported_database_url("unsupported://db.example.com/ophanix"))
+        with self.assertRaisesRegex(ValueError, "postgresql://"):
+            database_backend_from_url("file:///local.db")
 
     def test_migration_applies_to_empty_database(self) -> None:
-        connection = sqlite3.connect(":memory:")
+        database = create_test_database(migrate=False)
+        connection = database.connect()
         try:
-            connection.row_factory = sqlite3.Row
             runner = MigrationRunner(connection)
 
             applied = runner.apply_all()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(applied, ALL_EXPECTED_MIGRATIONS)
             self.assertIn("organizations", tables)
@@ -239,31 +230,23 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertIn("tool_runtime_actions", tables)
             self.assertIn("tool_runtime_action_events", tables)
             self.assertIn("tool_invocation_idempotency_records", tables)
-            upstream_columns = {
-                row["name"]
-                for row in connection.execute("PRAGMA table_info(tool_upstream_targets)").fetchall()
-            }
+            upstream_columns = column_names(connection, "tool_upstream_targets")
             self.assertIn("auth_config_json", upstream_columns)
             self.assertIn("query_parameter_allowlist_json", upstream_columns)
             self.assertEqual(runner.applied_versions(), ALL_EXPECTED_MIGRATIONS)
         finally:
-            connection.close()
+            database.close()
 
     def test_migration_can_be_rolled_back(self) -> None:
-        connection = sqlite3.connect(":memory:")
+        database = create_test_database(migrate=False)
+        connection = database.connect()
         try:
-            connection.row_factory = sqlite3.Row
             runner = MigrationRunner(connection)
             runner.apply_all()
 
             for index, migration in enumerate(reversed(FEATURE_MIGRATIONS), start=1):
                 rolled_back = runner.rollback_last()
-                tables = {
-                    row["name"]
-                    for row in connection.execute(
-                        "SELECT name FROM sqlite_master WHERE type = 'table'"
-                    ).fetchall()
-                }
+                tables = table_names(connection)
 
                 self.assertEqual(rolled_back, migration)
                 self.assertEqual(
@@ -271,12 +254,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
                     ALL_EXPECTED_MIGRATIONS[:-index],
                 )
                 if migration == "0058":
-                    upstream_columns = {
-                        row["name"]
-                        for row in connection.execute(
-                            "PRAGMA table_info(tool_upstream_targets)"
-                        ).fetchall()
-                    }
+                    upstream_columns = column_names(connection, "tool_upstream_targets")
                     self.assertNotIn("auth_config_json", upstream_columns)
                     self.assertNotIn("query_parameter_allowlist_json", upstream_columns)
                 if migration == "0059":
@@ -309,12 +287,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
                     self.assertIn("artifact_links", tables)
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0049")
             self.assertNotIn("artifact_attestations", tables)
@@ -323,12 +296,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-1])
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0048")
             self.assertNotIn("artifacts", tables)
@@ -337,12 +305,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-2])
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0047")
             self.assertNotIn("workflow_logs", tables)
@@ -351,12 +314,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-3])
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0046")
             self.assertNotIn("compliance_reports", tables)
@@ -366,12 +324,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-4])
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0045")
             self.assertNotIn("compliance_violations", tables)
@@ -379,12 +332,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-5])
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0044")
             self.assertNotIn("control_frameworks", tables)
@@ -395,12 +343,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-6])
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0043")
             self.assertNotIn("audit_exports", tables)
@@ -408,12 +351,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-7])
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0042")
             self.assertNotIn("policy_evaluations", tables)
@@ -421,12 +359,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-8])
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0041")
             self.assertNotIn("demo_reset_runs", tables)
@@ -435,12 +368,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-9])
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0040")
             self.assertNotIn("demo_runs", tables)
@@ -450,12 +378,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-10])
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0039")
             self.assertNotIn("demo_scenarios", tables)
@@ -464,12 +387,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-11])
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0038")
             self.assertNotIn("workflow_definitions", tables)
@@ -477,12 +395,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-12])
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0037")
             self.assertNotIn("integration_health_checks", tables)
@@ -490,12 +403,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-13])
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0036")
             self.assertNotIn("provider_credentials", tables)
@@ -503,12 +411,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-14])
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0035")
             self.assertNotIn("framework_agents", tables)
@@ -516,12 +419,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-15])
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0034")
             self.assertNotIn("integration_instances", tables)
@@ -529,12 +427,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-16])
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0033")
             self.assertNotIn("integrations", tables)
@@ -543,12 +436,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(runner.applied_versions(), EXPECTED_MIGRATIONS[:-17])
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0032")
             self.assertNotIn("rollout_events", tables)
@@ -592,12 +480,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0031")
             self.assertNotIn("chaos_runs", tables)
@@ -639,12 +522,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0030")
             self.assertNotIn("chaos_experiments", tables)
@@ -685,12 +563,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0029")
             self.assertNotIn("incidents", tables)
@@ -731,12 +604,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0028")
             self.assertNotIn("cost_budgets", tables)
@@ -777,12 +645,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0027")
             self.assertNotIn("slo_objectives", tables)
@@ -824,12 +687,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0026")
             self.assertNotIn("plugin_reviews", tables)
@@ -875,12 +733,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0025")
             self.assertNotIn("plugin_installations", tables)
@@ -921,12 +774,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0024")
             self.assertNotIn("plugin_policy_results", tables)
@@ -965,12 +813,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0023")
             self.assertNotIn("plugins", tables)
@@ -1007,12 +850,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0022")
             self.assertNotIn("sandbox_profiles", tables)
@@ -1053,12 +891,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0021")
             self.assertNotIn("sagas", tables)
@@ -1095,12 +928,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0020")
             self.assertNotIn("runtime_ring_rules", tables)
@@ -1133,12 +961,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0019")
             self.assertNotIn("runtime_ring_decisions", tables)
@@ -1169,12 +992,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0018")
             self.assertNotIn("runtime_sessions", tables)
@@ -1206,12 +1024,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0017")
             self.assertNotIn("mcp_tool_calls", tables)
@@ -1246,12 +1059,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0016")
             self.assertNotIn("mcp_scan_runs", tables)
@@ -1299,12 +1107,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0015")
             self.assertNotIn("mcp_tools", tables)
@@ -1348,12 +1151,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0014")
             self.assertNotIn("mcp_servers", tables)
@@ -1394,12 +1192,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0013")
             self.assertNotIn("protocol_bridges", tables)
@@ -1438,12 +1231,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0012")
             self.assertNotIn("mesh_messages", tables)
@@ -1478,12 +1266,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0011")
             self.assertNotIn("trust_thresholds", tables)
@@ -1504,12 +1287,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0010")
             self.assertNotIn("trust_cards", tables)
@@ -1528,12 +1306,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0009")
             self.assertNotIn("trust_scores", tables)
@@ -1551,12 +1324,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0008")
             self.assertNotIn("policy_bindings", tables)
@@ -1573,12 +1341,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0007")
             self.assertNotIn("policy_lint_results", tables)
@@ -1594,12 +1357,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             )
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0006")
             self.assertNotIn("policies", tables)
@@ -1611,12 +1369,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(runner.applied_versions(), ["0001", "0002", "0003", "0004", "0005"])
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0005")
             self.assertNotIn("discovery_findings", tables)
@@ -1627,12 +1380,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(runner.applied_versions(), ["0001", "0002", "0003", "0004"])
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0004")
             self.assertNotIn("discovery_targets", tables)
@@ -1642,12 +1390,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(runner.applied_versions(), ["0001", "0002", "0003"])
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0003")
             self.assertNotIn("agent_credentials", tables)
@@ -1656,12 +1399,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(runner.applied_versions(), ["0001", "0002"])
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0002")
             self.assertNotIn("agents", tables)
@@ -1669,156 +1407,133 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertEqual(runner.applied_versions(), ["0001"])
 
             rolled_back = runner.rollback_last()
-            tables = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
+            tables = table_names(connection)
 
             self.assertEqual(rolled_back, "0001")
             self.assertNotIn("organizations", tables)
             self.assertNotIn("schema_migrations", tables)
         finally:
-            connection.close()
+            database.close()
 
-    def test_local_test_database_can_be_created_and_migrated(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            database_path = os.path.join(tmpdir, "test_product.db")
-            settings = Settings(database_url=f"sqlite:///{database_path}")
-            runner = MigrationRunner.from_settings(settings)
+    def test_local_postgres_database_can_be_created_and_migrated(self) -> None:
+        database = create_test_database(migrate=False)
+        try:
+            runner = MigrationRunner.from_settings(Settings(database_url=database.database_url))
 
             applied = runner.apply_all()
             runner.connection.close()
-            reopened = connect_database(f"sqlite:///{database_path}")
+            reopened = connect_database(database.database_url)
             try:
                 count = reopened.execute(
                     "SELECT COUNT(*) AS count FROM schema_migrations"
                 ).fetchone()["count"]
             finally:
                 reopened.close()
+        finally:
+            database.close()
 
         self.assertEqual(applied, ALL_EXPECTED_MIGRATIONS)
         self.assertEqual(count, len(ALL_EXPECTED_MIGRATIONS))
 
-    def test_postgres_database_can_be_created_migrated_and_used_when_configured(self) -> None:
-        database_url = os.environ.get("OPHANIX_TEST_POSTGRES_URL")
-        if not database_url:
-            self.skipTest("OPHANIX_TEST_POSTGRES_URL is not configured.")
-
+    def test_postgres_database_can_be_created_migrated_and_used(self) -> None:
+        database_url = _test_postgres_url()
+        schema_name = "ophanix_test_explicit_schema"
+        create_url = postgres_url_with_schema(database_url, schema_name)
+        database = create_test_database(migrate=False)
         try:
-            import psycopg
-        except ImportError:
-            self.skipTest("psycopg is not installed.")
+            self.assertIn(schema_name, create_url)
+            applied = database.migrate()
+            with database.transaction() as connection:
+                seed_demo_data(connection)
+                now = utc_now_iso()
+                connection.execute(
+                    """
+                    INSERT INTO agents (
+                        id, organization_id, environment_id, name, description,
+                        framework, runtime_type, endpoint_url, owner_user_id,
+                        sponsor_user_id, status, trust_score, trust_tier,
+                        credential_status, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "agent_postgres",
+                        DEMO_ORG_ID,
+                        DEMO_ENV_ID,
+                        "Postgres Test Agent",
+                        "Postgres backend verification fixture.",
+                        "test",
+                        "http",
+                        None,
+                        DEMO_ADMIN_USER_ID,
+                        DEMO_ADMIN_USER_ID,
+                        "active",
+                        90,
+                        "trusted",
+                        "issued",
+                        now,
+                        now,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO agent_credentials (
+                        id, agent_id, credential_type, token_hash, issuer,
+                        status, issued_at, expires_at, metadata_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "cred_postgres",
+                        "agent_postgres",
+                        "gateway_token",
+                        "postgres-token-hash",
+                        "test",
+                        "active",
+                        now,
+                        "2099-01-01T00:00:00+00:00",
+                        "{}",
+                    ),
+                )
+                tool = ToolRegistryRepository(
+                    connection, DEMO_ORG_ID, DEMO_ENV_ID
+                ).create_tool(
+                    ToolDefinitionCreateRequest(
+                        name="postgres.lookup",
+                        display_name="Postgres Lookup",
+                        owner_team="platform",
+                        required_scope="tools:postgres.lookup",
+                        status="active",
+                    ),
+                    created_by=DEMO_ADMIN_USER_ID,
+                )
+                idempotency = ToolInvocationIdempotencyRepository(
+                    connection, DEMO_ORG_ID, DEMO_ENV_ID
+                )
+                created, idempotency_row = idempotency.begin_invocation(
+                    credential_id="cred_postgres",
+                    tool_id=tool["id"],
+                    idempotency_key="postgres-test-key",
+                    request_hash="request-hash",
+                    request_id="req_postgres",
+                    correlation_id=None,
+                )
+                completed = idempotency.complete_invocation(
+                    idempotency_row["id"],
+                    response_status_code=200,
+                    response_body={"ok": True},
+                )
 
-        schema_name = f"ophanix_test_{uuid4().hex}"
-        admin_connection = psycopg.connect(database_url, autocommit=True)
-        try:
-            admin_connection.execute(f'CREATE SCHEMA "{schema_name}"')
-            schema_url = _postgres_url_with_schema(database_url, schema_name)
-
-            database = Database(schema_url)
-            try:
-                applied = database.migrate()
-                with database.transaction() as connection:
-                    seed_demo_data(connection)
-                    now = utc_now_iso()
-                    connection.execute(
-                        """
-                        INSERT INTO agents (
-                            id, organization_id, environment_id, name, description,
-                            framework, runtime_type, endpoint_url, owner_user_id,
-                            sponsor_user_id, status, trust_score, trust_tier,
-                            credential_status, created_at, updated_at
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            "agent_postgres",
-                            DEMO_ORG_ID,
-                            DEMO_ENV_ID,
-                            "Postgres Test Agent",
-                            "Postgres backend verification fixture.",
-                            "test",
-                            "http",
-                            None,
-                            DEMO_ADMIN_USER_ID,
-                            DEMO_ADMIN_USER_ID,
-                            "active",
-                            90,
-                            "trusted",
-                            "issued",
-                            now,
-                            now,
-                        ),
-                    )
-                    connection.execute(
-                        """
-                        INSERT INTO agent_credentials (
-                            id, agent_id, credential_type, token_hash, issuer,
-                            status, issued_at, expires_at, metadata_json
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            "cred_postgres",
-                            "agent_postgres",
-                            "gateway_token",
-                            "postgres-token-hash",
-                            "test",
-                            "active",
-                            now,
-                            "2099-01-01T00:00:00+00:00",
-                            "{}",
-                        ),
-                    )
-                    tool = ToolRegistryRepository(
-                        connection, DEMO_ORG_ID, DEMO_ENV_ID
-                    ).create_tool(
-                        ToolDefinitionCreateRequest(
-                            name="postgres.lookup",
-                            display_name="Postgres Lookup",
-                            owner_team="platform",
-                            required_scope="tools:postgres.lookup",
-                            status="active",
-                        ),
-                        created_by=DEMO_ADMIN_USER_ID,
-                    )
-                    idempotency = ToolInvocationIdempotencyRepository(
-                        connection, DEMO_ORG_ID, DEMO_ENV_ID
-                    )
-                    created, idempotency_row = idempotency.begin_invocation(
-                        credential_id="cred_postgres",
-                        tool_id=tool["id"],
-                        idempotency_key="postgres-test-key",
-                        request_hash="request-hash",
-                        request_id="req_postgres",
-                        correlation_id=None,
-                    )
-                    completed = idempotency.complete_invocation(
-                        idempotency_row["id"],
-                        response_status_code=200,
-                        response_body={"ok": True},
-                    )
-
-                row = OrganizationRepository(database.connect()).get(DEMO_ORG_ID)
-                migration_count = database.connect().execute(
-                    "SELECT COUNT(*) AS count FROM schema_migrations"
-                ).fetchone()["count"]
-                response_policy = ToolRegistryRepository(
-                    database.connect(), DEMO_ORG_ID, DEMO_ENV_ID
-                ).get_response_policy(tool["id"])
-                upstream_columns = {
-                    row["name"]
-                    for row in database.connect().execute(
-                        "PRAGMA table_info(tool_upstream_targets)"
-                    ).fetchall()
-                }
-            finally:
-                database.close()
+            row = OrganizationRepository(database.connect()).get(DEMO_ORG_ID)
+            migration_count = database.connect().execute(
+                "SELECT COUNT(*) AS count FROM schema_migrations"
+            ).fetchone()["count"]
+            response_policy = ToolRegistryRepository(
+                database.connect(), DEMO_ORG_ID, DEMO_ENV_ID
+            ).get_response_policy(tool["id"])
+            upstream_columns = column_names(database.connect(), "tool_upstream_targets")
         finally:
-            admin_connection.execute(f'DROP SCHEMA IF EXISTS "{schema_name}" CASCADE')
-            admin_connection.close()
+            database.close()
 
         self.assertEqual(applied, ALL_EXPECTED_MIGRATIONS)
         self.assertEqual(migration_count, len(ALL_EXPECTED_MIGRATIONS))
@@ -1829,23 +1544,5 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
         self.assertEqual(completed["response_status_code"], 200)
         self.assertIn("auth_config_json", upstream_columns)
         self.assertIn("query_parameter_allowlist_json", upstream_columns)
-
-
-def _postgres_url_with_schema(database_url: str, schema_name: str) -> str:
-    parsed = urlparse(database_url)
-    query_items = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    query_items["options"] = f"-c search_path={schema_name}"
-    return urlunparse(
-        (
-            parsed.scheme,
-            parsed.netloc,
-            parsed.path,
-            parsed.params,
-            urlencode(query_items, quote_via=quote),
-            parsed.fragment,
-        )
-    )
-
-
 if __name__ == "__main__":
     unittest.main()

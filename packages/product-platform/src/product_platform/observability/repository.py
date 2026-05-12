@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from sqlite3 import Connection, Row
+from product_platform.db.postgres import Connection, Row
 
 from product_platform.db.ids import generate_id
 from product_platform.db.time import utc_now_iso

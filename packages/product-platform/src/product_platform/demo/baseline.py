@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlite3 import Connection
+from product_platform.db.postgres import Connection
 
 from product_platform.db.time import utc_now_iso
 from product_platform.demo.catalog import CUSTOMER_SUPPORT_REFUND_SCENARIO

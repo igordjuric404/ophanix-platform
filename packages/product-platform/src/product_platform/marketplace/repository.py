@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from sqlite3 import Connection, IntegrityError, Row
+from product_platform.db.postgres import Connection, IntegrityError, Row
 from typing import Any
 
 from product_platform.db.ids import generate_id

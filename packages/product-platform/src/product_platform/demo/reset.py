@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from sqlite3 import Connection, Row
+from product_platform.db.postgres import Connection, Row
 from typing import Any
 
 from product_platform.audit.events import AuditEventEnvelope
@@ -316,14 +316,14 @@ class DemoEnvironmentResetService:
             "agents": _count(
                 self.connection,
                 "agents",
-                "organization_id = ? AND environment_id = ? AND id LIKE 'agent_demo_%'",
-                (self.organization_id, self.environment_id),
+                "organization_id = ? AND environment_id = ? AND id LIKE ?",
+                (self.organization_id, self.environment_id, "agent_demo_%"),
             ),
             "mcp_servers": _count(
                 self.connection,
                 "mcp_servers",
-                "organization_id = ? AND environment_id = ? AND id LIKE 'mcp_demo_%'",
-                (self.organization_id, self.environment_id),
+                "organization_id = ? AND environment_id = ? AND id LIKE ?",
+                (self.organization_id, self.environment_id, "mcp_demo_%"),
             ),
         }
 

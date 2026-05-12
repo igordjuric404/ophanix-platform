@@ -5,7 +5,7 @@ Status: operational baseline for production adoption planning.
 ## Required Production Configuration
 
 - `OPHANIX_SESSION_SECRET`: non-default high-entropy value.
-- `OPHANIX_DATABASE_URL`: managed production database URL. SQLite is rejected in production.
+- `OPHANIX_DATABASE_URL`: managed PostgreSQL database URL.
 - `OPHANIX_SECRET_MANAGER_REF`: `env` or `env:<ENV_VAR_PREFIX>` in this worktree.
 - `OPHANIX_GATEWAY_TOKEN_HASH_PEPPER`: high-entropy pepper stored outside source control.
 - `OPHANIX_TOOL_GATEWAY_UPSTREAM_HOST_ALLOWLIST`: comma-separated approved upstream hosts or wildcard patterns.
@@ -65,5 +65,5 @@ Production startup rejects legacy gateway-token hash acceptance and unresolved u
 - Quarterly token rotation drill.
 - Quarterly upstream secret rotation drill.
 - Load test before every broad rollout.
-- Multi-worker limiter and SQLite-contention test until production DB support lands.
+- Multi-worker limiter and PostgreSQL contention/load test before broad rollout.
 - Release dry-run including `--strict-git`, SBOM, manifest, and clean install verification.

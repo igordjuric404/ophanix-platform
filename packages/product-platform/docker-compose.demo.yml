@@ -5,7 +5,7 @@ x-product-platform-env: &product-platform-env
   OPHANIX_ENVIRONMENT: ${OPHANIX_ENVIRONMENT:-local-demo}
   OPHANIX_BUILD_SHA: ${OPHANIX_BUILD_SHA:-local-demo}
   OPHANIX_BUILD_TIME: ${OPHANIX_BUILD_TIME:-local}
-  OPHANIX_DATABASE_URL: ${OPHANIX_DATABASE_URL:-sqlite:////data/ophanix_product.db}
+  OPHANIX_DATABASE_URL: ${OPHANIX_DATABASE_URL:-postgresql://ophanix:ophanix-local@postgres:5432/ophanix_product}
   OPHANIX_DEFAULT_ORGANIZATION_ID: ${OPHANIX_DEFAULT_ORGANIZATION_ID:-org_default}
   OPHANIX_DEV_LOGIN_ALLOWED_EMAILS: ${OPHANIX_DEV_LOGIN_ALLOWED_EMAILS:-admin@example.com,demo@example.com}
   OPHANIX_SESSION_SECRET: ${OPHANIX_SESSION_SECRET:-replace-with-a-long-local-secret}
@@ -97,6 +97,8 @@ services:
     depends_on:
       migrate-seed:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     healthcheck:

@@ -69,7 +69,7 @@ Docker demo URLs:
 For local validation, these defaults are sufficient:
 
 ```text
-OPHANIX_DATABASE_URL=sqlite:///ophanix_product.db
+OPHANIX_DATABASE_URL=postgresql://ophanix:ophanix-local@127.0.0.1:5432/ophanix_product
 OPHANIX_DEFAULT_ORGANIZATION_ID=org_default
 OPHANIX_DEV_LOGIN_ALLOWED_EMAILS=admin@example.com,demo@example.com
 OPHANIX_SESSION_SECRET=replace-with-a-long-local-secret

@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import re
-from sqlite3 import Connection, IntegrityError, Row
+from product_platform.db.postgres import Connection, IntegrityError, Row
 
 from product_platform.artifacts.models import (
     ArtifactAttestationCreateRequest,

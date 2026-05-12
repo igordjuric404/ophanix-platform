@@ -10,7 +10,7 @@ Run the local platform without manual migrations, seeding, or server setup:
 ./start.sh
 ```
 
-The script starts the API, worker loop, sample MCP/agent services, SQLite migrations/seed, and a local frontend proxy.
+The script starts the API, worker loop, sample MCP/agent services, PostgreSQL migrations/seed, and a local frontend proxy.
 
 Open `http://127.0.0.1:3000` and sign in with `admin@example.com`.
 
@@ -34,23 +34,23 @@ python3 -m product_platform.cli --host 127.0.0.1 --port 8088
 
 ## Database Migrations
 
-Database migrations support SQLite for local/single-node use and PostgreSQL for
-real MVP deployments. Set `OPHANIX_DATABASE_URL` to a `sqlite:///...` URL, a
-`postgresql://...` URL, or use the default local `sqlite:///ophanix_product.db`.
-
-```bash
-PYTHONPATH=src OPHANIX_DATABASE_URL=sqlite:///ophanix_product.db python3 -m product_platform.cli db migrate
-PYTHONPATH=src OPHANIX_DATABASE_URL=sqlite:///ophanix_product.db python3 -m product_platform.cli db rollback
-PYTHONPATH=src OPHANIX_DATABASE_URL=sqlite:///ophanix_product.db python3 -m product_platform.cli db seed
-PYTHONPATH=src OPHANIX_DATABASE_URL=sqlite:///ophanix_product.db python3 -m product_platform.cli db reset-demo
-```
-
-For the checked-in local Postgres service:
+Database migrations support PostgreSQL only. Local development, tests, cloud
+preview, staging, and production all use a `postgresql://...` URL. The default
+local URL is `postgresql://ophanix:ophanix-local@127.0.0.1:5432/ophanix_product`.
 
 ```bash
 docker compose -f docker-compose.demo.yml up -d postgres
 export OPHANIX_DATABASE_URL=postgresql://ophanix:ophanix-local@127.0.0.1:5432/ophanix_product
 PYTHONPATH=src python3 -m product_platform.cli db migrate
+PYTHONPATH=src python3 -m product_platform.cli db rollback
+PYTHONPATH=src python3 -m product_platform.cli db seed
+PYTHONPATH=src python3 -m product_platform.cli db reset-demo
+```
+
+For the full checked-in local stack:
+
+```bash
+docker compose -f docker-compose.demo.yml up --build
 ```
 
 ## Tool Gateway Python SDK
@@ -116,20 +116,21 @@ GET and DELETE upstream targets do not automatically serialize arbitrary payload
 
 Upstream base URLs must use HTTPS and reject credentials, query strings, fragments, metadata hosts, loopback addresses, private/link-local/reserved IP literals, and hostnames that resolve to forbidden addresses during validation. Production must set `OPHANIX_TOOL_GATEWAY_UPSTREAM_HOST_ALLOWLIST` to approved exact hostnames or wildcard patterns such as `*.partner.example.com`; target writes and runtime invocation reject hosts outside that allowlist. Unresolved upstream hostnames fail closed outside local/test environments, and `OPHANIX_ALLOW_UNRESOLVED_UPSTREAM_HOSTS=true` is rejected in production. Runtime invocation revalidates the persisted base URL before forwarding. Keep egress firewall rules in place as the final SSRF boundary.
 
-Production app startup fails when `OPHANIX_SESSION_SECRET` is left at the development default, development login is explicitly enabled, SQLite is configured without `OPHANIX_ALLOW_SQLITE_IN_PRODUCTION=true`, `OPHANIX_SECRET_MANAGER_REF` is missing or unsupported, `OPHANIX_GATEWAY_TOKEN_HASH_PEPPER` is missing, legacy gateway-token hash acceptance is enabled, unresolved upstream hosts are allowed, `OPHANIX_TOOL_GATEWAY_UPSTREAM_HOST_ALLOWLIST` is empty, any Tool Gateway safety limit is zero or negative, or no database is configured. API docs, `/openapi.json`, and `/api/openapi.json` are enabled by default only in local/test environments; set `OPHANIX_ENABLE_API_DOCS=true` intentionally if an internal environment needs them. `/api/v1/system/config` returns `docs_url: null` when docs are disabled.
+Production app startup fails when `OPHANIX_SESSION_SECRET` is left at the development default, development login is explicitly enabled, `OPHANIX_DATABASE_URL` is not a PostgreSQL URL, `OPHANIX_SECRET_MANAGER_REF` is missing or unsupported, `OPHANIX_GATEWAY_TOKEN_HASH_PEPPER` is missing, legacy gateway-token hash acceptance is enabled, unresolved upstream hosts are allowed, `OPHANIX_TOOL_GATEWAY_UPSTREAM_HOST_ALLOWLIST` is empty, any Tool Gateway safety limit is zero or negative, or no database is configured. API docs, `/openapi.json`, and `/api/openapi.json` are enabled by default only in local/test environments; set `OPHANIX_ENABLE_API_DOCS=true` intentionally if an internal environment needs them. `/api/v1/system/config` returns `docs_url: null` when docs are disabled.
 
 Gateway credential token hashes use `OPHANIX_GATEWAY_TOKEN_HASH_PEPPER` when set. Operators can label the current pepper with `OPHANIX_GATEWAY_TOKEN_HASH_PEPPER_ID`, accept old peppers during rotation with `OPHANIX_GATEWAY_TOKEN_HASH_PREVIOUS_PEPPERS` entries like `old-key:old-pepper`, and temporarily allow legacy unpeppered hashes with `OPHANIX_GATEWAY_TOKEN_HASH_ACCEPT_LEGACY=true` only outside production. Production startup rejects legacy hash acceptance.
 
-PostgreSQL is the preferred backend for real MVP deployments. The repository layer keeps SQLite-compatible row and placeholder semantics internally, while `postgresql://` URLs use a psycopg-backed adapter and the same migrations. SQLite remains acceptable for local demos, internal SDK evaluation, and small single-node MVP deployments with controlled traffic when `OPHANIX_ALLOW_SQLITE_IN_PRODUCTION=true` is set intentionally. For AWS, use Postgres unless you intentionally choose the single-node SQLite path with durable storage and backups.
+PostgreSQL is the only supported product-platform database backend. The
+repository layer uses psycopg against PostgreSQL in every environment; local
+development starts a Postgres 16 container through `docker-compose.demo.yml`.
 
 Direct HTTP examples and deterministic fixture tokens are local-only demonstrations. Production agents should use the SDK so token handling, payload validation, timeouts, error redaction, discovery pagination, and typed errors stay consistent.
 
 MVP support boundary: this package can support controlled internal or design
 partner SDK pilots where operators own tokens, upstream allowlists, ingress
 limits, and incident response. It is not an enterprise production certification.
-Durable idempotency, SDK-gated retries, local circuit breaking, PostgreSQL
-runtime support, artifact SBOM generation, and explicit SQLite single-node
-deployment posture are implemented. Cursor pagination, multi-worker/load evidence, and
+Durable idempotency, SDK-gated retries, local circuit breaking, PostgreSQL-only
+runtime support, and artifact SBOM generation are implemented. Cursor pagination, multi-worker/load evidence, and
 external package-index publication remain post-MVP hardening.
 
 The standalone package README in `../ophanix-tool-gateway-sdk/README.md` contains the fuller API reference, troubleshooting guide, retry options, and concurrency notes.
@@ -160,7 +161,7 @@ python3 scripts/validate_release.py
 ```
 
 The validator builds a wheel and source distribution, checks required package
-files and type markers, rejects generated/local artifacts such as SQLite
+files and type markers, rejects generated/local artifacts such as database
 databases and `__pycache__`, installs the wheel into a temporary target, imports
 the product package and vendored SDK, writes a local CycloneDX SBOM with
 artifact hashes, and runs `twine check`.

@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from sqlite3 import Row
+from product_platform.db.postgres import Row
 from typing import Any, Iterable
 
 from product_platform.runtime.sagas import SagaNotFoundError, SagaRepository

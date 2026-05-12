@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 FRONTEND_DIR="$ROOT_DIR/frontend"
-DB_PATH="$ROOT_DIR/ophanix_product.db"
+DEFAULT_DATABASE_URL="postgresql://ophanix:ophanix-local@127.0.0.1:5432/ophanix_product"
 API_HOST="${API_HOST:-127.0.0.1}"
 API_PORT="${API_PORT:-8088}"
 FRONTEND_HOST="${FRONTEND_HOST:-127.0.0.1}"
@@ -18,8 +18,9 @@ Usage: ./start.sh [--local|--docker]
 Starts the Ophanix Product Platform with no manual setup.
 
 Modes:
-  --local   Run API, worker, demo services, SQLite migration/seed, and frontend proxy.
-            This is the default and does not require Docker.
+  --local   Run API, worker, demo services, PostgreSQL migration/seed, and frontend proxy.
+            This is the default. It uses OPHANIX_DATABASE_URL or the local
+            PostgreSQL URL from docker-compose.demo.yml.
   --docker  Run the full Docker Compose demo stack.
 
 Environment overrides:
@@ -51,7 +52,7 @@ done
 cd "$ROOT_DIR"
 
 export PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
-export OPHANIX_DATABASE_URL="${OPHANIX_DATABASE_URL:-sqlite:///$DB_PATH}"
+export OPHANIX_DATABASE_URL="${OPHANIX_DATABASE_URL:-$DEFAULT_DATABASE_URL}"
 export OPHANIX_ENVIRONMENT="${OPHANIX_ENVIRONMENT:-local-demo}"
 export OPHANIX_BUILD_SHA="${OPHANIX_BUILD_SHA:-local-script}"
 export OPHANIX_BUILD_TIME="${OPHANIX_BUILD_TIME:-local}"
@@ -150,6 +151,51 @@ require_frontend_dependencies() {
     echo "  npm install" >&2
     exit 1
   fi
+}
+
+ensure_postgres_ready() {
+  python3 - <<'PY'
+import os
+import sys
+
+try:
+    import psycopg
+except ImportError:
+    print("Missing psycopg. Install product-platform dependencies first.", file=sys.stderr)
+    raise SystemExit(1)
+
+try:
+    with psycopg.connect(os.environ["OPHANIX_DATABASE_URL"], connect_timeout=2):
+        pass
+except Exception:
+    raise SystemExit(1)
+PY
+}
+
+start_local_postgres_if_needed() {
+  if ensure_postgres_ready; then
+    return
+  fi
+  if command -v docker >/dev/null 2>&1; then
+    log "Starting local PostgreSQL service..."
+    docker compose -f docker-compose.demo.yml up -d postgres
+    for _ in $(seq 1 30); do
+      if ensure_postgres_ready; then
+        return
+      fi
+      sleep 1
+    done
+  fi
+  cat >&2 <<EOF
+PostgreSQL is not reachable at OPHANIX_DATABASE_URL:
+  $OPHANIX_DATABASE_URL
+
+Start the local database with:
+  docker compose -f docker-compose.demo.yml up -d postgres
+
+or set OPHANIX_DATABASE_URL to a reachable PostgreSQL database.
+EOF
+  exit 1
 }
 
 wait_for_url() {
@@ -306,6 +352,7 @@ run_docker() {
 run_local() {
   require_python_dependencies
   require_frontend_dependencies
+  start_local_postgres_if_needed
 
   log "Applying migrations..."
   python3 -m product_platform.cli db migrate

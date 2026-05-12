@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from sqlite3 import Connection, Row
+from product_platform.db.postgres import Connection, Row
 from typing import Any
 
 from agent_discovery.models import AgentStatus, DiscoveredAgent

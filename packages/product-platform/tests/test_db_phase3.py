@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import re
-import sqlite3
 import unittest
 from datetime import datetime
 
+from product_platform.db.postgres import DatabaseIntegrityError
 from product_platform.db.ids import generate_id
 from product_platform.db.repositories import OrganizationRepository
 from product_platform.db.testing import create_migrated_test_database
@@ -31,7 +31,7 @@ class DatabasePhase3Tests(unittest.TestCase):
                 repository = OrganizationRepository(connection)
                 repository.create(organization_id="org_one", name="One", slug="duplicate")
                 repository.create(organization_id="org_two", name="Two", slug="duplicate")
-        except sqlite3.IntegrityError as exc:
+        except DatabaseIntegrityError as exc:
             self.assertIn("UNIQUE", str(exc).upper())
         else:
             self.fail("Expected duplicate organization slug to violate a unique constraint.")
@@ -55,4 +55,3 @@ class DatabasePhase3Tests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from sqlite3 import Connection, Row
+from product_platform.db.postgres import Connection, Row
 
 from pydantic import BaseModel, Field
 

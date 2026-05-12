@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import socket
-import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
@@ -17,6 +16,7 @@ from product_platform.db.migrator import (
     database_backend_from_url,
     is_supported_database_url,
 )
+from product_platform.db.postgres import DatabaseError
 
 DependencyCheck = Callable[[], DependencyStatus]
 SettingsProbe = Callable[[Settings], DependencyStatus]
@@ -228,9 +228,7 @@ def _probe_database(settings: Settings) -> DependencyStatus:
             name="database",
             status="unhealthy",
             required=True,
-            message=(
-                "OPHANIX_DATABASE_URL must be a sqlite:/// or postgresql:// URL."
-            ),
+            message="OPHANIX_DATABASE_URL must be a postgresql:// URL.",
         )
     backend = database_backend_from_url(settings.database_url)
     try:
@@ -241,7 +239,7 @@ def _probe_database(settings: Settings) -> DependencyStatus:
             ).fetchone()
         finally:
             connection.close()
-    except sqlite3.Error as exc:
+    except DatabaseError as exc:
         return DependencyStatus(
             name="database",
             status="unhealthy",
@@ -403,7 +401,7 @@ def _probe_event_store(settings: Settings) -> DependencyStatus:
             ).fetchone()
         finally:
             connection.close()
-    except sqlite3.Error as exc:
+    except DatabaseError as exc:
         return DependencyStatus(
             name="event_store",
             status="unhealthy",
@@ -432,7 +430,7 @@ def _probe_model_provider(settings: Settings) -> DependencyStatus:
             ).fetchone()
         finally:
             connection.close()
-    except sqlite3.Error as exc:
+    except DatabaseError as exc:
         return DependencyStatus(
             name="model_provider",
             status="not_configured",

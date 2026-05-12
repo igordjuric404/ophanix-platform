@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from sqlite3 import Row
+from product_platform.db.postgres import Row
 
 from product_platform.audit.events import AuditEventEnvelope
 from product_platform.audit.events import trust_change_event

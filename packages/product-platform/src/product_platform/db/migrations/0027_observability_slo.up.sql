@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS slo_objectives (
     target_id TEXT NOT NULL,
     sli TEXT NOT NULL,
     target_value REAL NOT NULL,
-    window TEXT NOT NULL,
+    "window" TEXT NOT NULL,
     status TEXT NOT NULL,
     created_by TEXT NOT NULL,
     created_at TEXT NOT NULL,

@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+DEFAULT_POSTGRES_URL = "postgresql://ophanix:ophanix-local@127.0.0.1:5432/ophanix_product"
+
 
 def _csv_env(name: str, default: str) -> list[str]:
     raw = os.environ.get(name, default)
@@ -58,10 +60,7 @@ class Settings:
         default_factory=lambda: os.environ.get("OPHANIX_DEFAULT_ORGANIZATION_ID", "org_default")
     )
     database_url: str = field(
-        default_factory=lambda: os.environ.get("OPHANIX_DATABASE_URL", "sqlite:///ophanix_product.db")
-    )
-    allow_sqlite_in_production: bool = field(
-        default_factory=lambda: _bool_env("OPHANIX_ALLOW_SQLITE_IN_PRODUCTION", False)
+        default_factory=lambda: os.environ.get("OPHANIX_DATABASE_URL", DEFAULT_POSTGRES_URL)
     )
     dev_login_allowed_emails: list[str] = field(
         default_factory=_dev_login_allowed_emails

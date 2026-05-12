@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import unittest
-from tempfile import TemporaryDirectory
 
 from fastapi.testclient import TestClient
 
@@ -12,7 +11,7 @@ from product_platform.api.dependencies import (
     static_dependency,
 )
 from product_platform.api.settings import Settings
-from product_platform.db.migrator import MigrationRunner
+from product_platform.db.testing import create_test_database
 
 
 def _settings() -> Settings:
@@ -101,12 +100,9 @@ class ProductApiShellPhase3Tests(unittest.TestCase):
         self.assertEqual(payload[1]["status"], "unhealthy")
 
     def test_local_dependency_registry_reports_unconfigured_optional_services(self) -> None:
-        with TemporaryDirectory() as directory:
-            settings = Settings(
-                database_url=f"sqlite:///{directory}/ophanix.db",
-                deployment_mode="local",
-            )
-            MigrationRunner.from_settings(settings).apply_all()
+        database = create_test_database()
+        try:
+            settings = Settings(database_url=database.database_url, deployment_mode="local")
             registry = create_default_dependency_registry(settings)
 
             ready, statuses = registry.readiness_status()
@@ -118,15 +114,17 @@ class ProductApiShellPhase3Tests(unittest.TestCase):
             self.assertEqual(by_name["redis"].status, "not_configured")
             self.assertEqual(by_name["model_provider"].status, "not_configured")
             self.assertFalse(by_name["model_provider"].required)
+        finally:
+            database.close()
 
     def test_local_dependency_breaks_force_named_services_unhealthy(self) -> None:
-        with TemporaryDirectory() as directory:
+        database = create_test_database()
+        try:
             settings = Settings(
-                database_url=f"sqlite:///{directory}/ophanix.db",
+                database_url=database.database_url,
                 deployment_mode="local",
                 system_dependency_breaks=["database", "model_provider"],
             )
-            MigrationRunner.from_settings(settings).apply_all()
             registry = create_default_dependency_registry(settings)
 
             ready, statuses = registry.readiness_status()
@@ -137,6 +135,8 @@ class ProductApiShellPhase3Tests(unittest.TestCase):
             self.assertTrue(by_name["database"].required)
             self.assertEqual(by_name["model_provider"].status, "unhealthy")
             self.assertFalse(by_name["model_provider"].required)
+        finally:
+            database.close()
 
 
 if __name__ == "__main__":

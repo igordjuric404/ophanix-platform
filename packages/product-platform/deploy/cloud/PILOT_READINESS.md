@@ -2,9 +2,9 @@
 
 ## Tenant Provisioning
 
-The MVP cloud preview uses SQLite on a durable application data volume. Managed
-PostgreSQL runtime support is deferred until a PostgreSQL connection and
-migration adapter is implemented.
+The MVP cloud preview uses PostgreSQL for product state in the same shape as
+local development and production. Use a managed single-region PostgreSQL
+database for AWS pilot deployments.
 
 1. Create the pilot organization and default staging environment.
 2. Assign IdP groups to `Platform Admin`, `Operator`, and `Viewer` roles.

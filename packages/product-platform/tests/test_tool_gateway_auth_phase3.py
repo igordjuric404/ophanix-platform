@@ -335,24 +335,20 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
                 database=self.database,
             )
 
-    def test_api_rejects_sqlite_database_in_production_without_explicit_opt_in(self) -> None:
-        with self.assertRaisesRegex(ValueError, "SQLite is not supported"):
+    def test_api_rejects_non_postgres_database_in_production(self) -> None:
+        with self.assertRaisesRegex(ValueError, "postgresql://"):
             create_app(
                 self._production_settings(
-                    database_url="sqlite:///prod.db",
-                    allow_sqlite_in_production=False,
+                    database_url="file:///prod.db",
                 )
             )
 
-    def test_api_allows_sqlite_database_in_production_with_explicit_single_node_opt_in(self) -> None:
+    def test_api_allows_postgres_database_in_production(self) -> None:
         app = create_app(
-            self._production_settings(
-                database_url="sqlite:///prod.db",
-                allow_sqlite_in_production=True,
-            )
+            self._production_settings()
         )
 
-        self.assertTrue(app.state.settings.allow_sqlite_in_production)
+        self.assertTrue(app.state.settings.database_url.startswith("postgresql://"))
 
     def test_api_requires_supported_secret_provider_in_production(self) -> None:
         with self.assertRaisesRegex(ValueError, "OPHANIX_SECRET_MANAGER_REF"):

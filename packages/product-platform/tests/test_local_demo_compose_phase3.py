@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import os
-import sqlite3
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
 from product_platform.db.migrator import connect_database
+from product_platform.db.postgres import Connection
+from product_platform.db.testing import create_test_database
 from product_platform.demo.baseline import demo_baseline_status
 
 
@@ -17,11 +17,11 @@ PACKAGE_DIR = Path(__file__).resolve().parents[1]
 
 class LocalDemoComposePhase3Tests(unittest.TestCase):
     def test_fresh_volume_seed_is_idempotent_and_baseline_healthy(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            database_path = Path(temp_dir) / "ophanix_product.db"
+        database = create_test_database(migrate=False)
+        try:
             env = dict(os.environ)
             env["PYTHONPATH"] = str(PACKAGE_DIR / "src")
-            env["OPHANIX_DATABASE_URL"] = f"sqlite:///{database_path}"
+            env["OPHANIX_DATABASE_URL"] = database.database_url
 
             first = subprocess.run(
                 [sys.executable, "-m", "product_platform.cli", "db", "seed"],
@@ -40,7 +40,7 @@ class LocalDemoComposePhase3Tests(unittest.TestCase):
                 text=True,
             )
 
-            connection = connect_database(f"sqlite:///{database_path}")
+            connection = connect_database(database.database_url)
             try:
                 counts = {
                     "policy_placeholders": _count(connection, "policy_placeholders"),
@@ -55,6 +55,8 @@ class LocalDemoComposePhase3Tests(unittest.TestCase):
                 )
             finally:
                 connection.close()
+        finally:
+            database.close()
 
         self.assertIn("Seeded demo data", first.stdout)
         self.assertIn("Seeded demo data", second.stdout)
@@ -78,7 +80,7 @@ class LocalDemoComposePhase3Tests(unittest.TestCase):
         self.assertIn("condition: service_completed_successfully", compose_text)
 
 
-def _count(connection: sqlite3.Connection, table_name: str) -> int:
+def _count(connection: Connection, table_name: str) -> int:
     return int(connection.execute(f"SELECT COUNT(*) AS count FROM {table_name}").fetchone()["count"])
 
 

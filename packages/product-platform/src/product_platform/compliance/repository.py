@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
-from sqlite3 import Connection, IntegrityError, Row
+from product_platform.db.postgres import Connection, IntegrityError, Row
 from typing import Any
 
 from product_platform.audit.events import AuditEventEnvelope
@@ -245,9 +245,10 @@ class ComplianceRepository:
             framework_id = self._default_id(framework["id"])
             self.connection.execute(
                 """
-                INSERT OR IGNORE INTO control_frameworks
+                INSERT INTO control_frameworks
                     (id, organization_id, name, version, description, status, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT DO NOTHING
                 """,
                 (
                     framework_id,
@@ -263,11 +264,12 @@ class ComplianceRepository:
                 control_id = self._default_id(control["id"])
                 self.connection.execute(
                     """
-                    INSERT OR IGNORE INTO controls (
+                    INSERT INTO controls (
                         id, framework_id, control_code, title, description,
                         required_evidence_types_json, owner_user_id
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT DO NOTHING
                     """,
                     (
                         control_id,
@@ -283,11 +285,12 @@ class ComplianceRepository:
                     mapping_id = generate_id("cmap")
                     self.connection.execute(
                         """
-                        INSERT OR IGNORE INTO control_mappings (
+                        INSERT INTO control_mappings (
                             id, control_id, event_type, source_component,
                             predicate_json, evidence_type
                         )
                         VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT DO NOTHING
                         """,
                         (
                             mapping_id,
@@ -728,8 +731,9 @@ class ComplianceRepository:
         for evidence in evidence_rows:
             self.connection.execute(
                 """
-                INSERT OR IGNORE INTO report_evidence_items (report_id, evidence_item_id)
+                INSERT INTO report_evidence_items (report_id, evidence_item_id)
                 VALUES (?, ?)
+                ON CONFLICT DO NOTHING
                 """,
                 (report_id, evidence["id"]),
             )

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlite3 import Connection
+from product_platform.db.postgres import Connection
 
 from product_platform.db.time import utc_now_iso
 from product_platform.demo.baseline import DEMO_BASELINE_AGENT_IDS, DEMO_BASELINE_MCP_SERVER_ID
@@ -22,23 +22,26 @@ def seed_demo_data(connection: Connection, *, include_baseline: bool = False) ->
     now = utc_now_iso()
     connection.execute(
         """
-        INSERT OR IGNORE INTO organizations (id, name, slug, created_at, updated_at)
+        INSERT INTO organizations (id, name, slug, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT DO NOTHING
         """,
         (DEMO_ORG_ID, "Ophanix Demo", "ophanix-demo", now, now),
     )
     connection.execute(
         """
-        INSERT OR IGNORE INTO environments
+        INSERT INTO environments
             (id, organization_id, name, slug, type, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT DO NOTHING
         """,
         (DEMO_ENV_ID, DEMO_ORG_ID, "Development", "development", "development", now, now),
     )
     connection.execute(
         """
-        INSERT OR IGNORE INTO users (id, email, display_name, status, created_at, updated_at)
+        INSERT INTO users (id, email, display_name, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT DO NOTHING
         """,
         (DEMO_ADMIN_USER_ID, DEMO_ADMIN_EMAIL, "Demo Admin", "active", now, now),
     )
@@ -52,9 +55,10 @@ def seed_demo_data(connection: Connection, *, include_baseline: bool = False) ->
     )
     connection.execute(
         """
-        INSERT OR IGNORE INTO organization_memberships
+        INSERT INTO organization_memberships
             (organization_id, user_id, role, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT DO NOTHING
         """,
         (DEMO_ORG_ID, DEMO_ADMIN_USER_ID, "Platform Admin", "active", now, now),
     )
@@ -64,9 +68,10 @@ def seed_demo_data(connection: Connection, *, include_baseline: bool = False) ->
     ]:
         connection.execute(
             """
-            INSERT OR IGNORE INTO policy_placeholders
+            INSERT INTO policy_placeholders
                 (id, organization_id, environment_id, name, description, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT DO NOTHING
             """,
             (policy_id, DEMO_ORG_ID, DEMO_ENV_ID, name, description, now, now),
         )
@@ -100,12 +105,13 @@ def seed_demo_baseline_fixtures(connection: Connection) -> None:
     ]:
         connection.execute(
             """
-            INSERT OR IGNORE INTO agents (
+            INSERT INTO agents (
                 id, organization_id, environment_id, name, description, framework,
                 runtime_type, endpoint_url, owner_user_id, sponsor_user_id, status,
                 trust_score, trust_tier, credential_status, created_at, updated_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT DO NOTHING
             """,
             (
                 agent_id,
@@ -128,11 +134,12 @@ def seed_demo_baseline_fixtures(connection: Connection) -> None:
         )
     connection.execute(
         """
-        INSERT OR IGNORE INTO mcp_servers (
+        INSERT INTO mcp_servers (
             id, organization_id, environment_id, name, endpoint_url,
             owner_user_id, auth_type, status, policy_pack_id, created_at, updated_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT DO NOTHING
         """,
         (
             DEMO_BASELINE_MCP_SERVER_ID,

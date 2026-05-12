@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from sqlite3 import Connection, Row
+from product_platform.db.postgres import Connection, Row
 
 from product_platform.db.ids import generate_id
 from product_platform.db.time import utc_now_iso
@@ -502,7 +502,13 @@ class PolicyRepository:
 
     def _table_exists(self, table_name: str) -> bool:
         row = self.connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            """
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = current_schema()
+              AND table_name = ?
+            LIMIT 1
+            """,
             (table_name,),
         ).fetchone()
         return row is not None

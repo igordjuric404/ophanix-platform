@@ -2,24 +2,24 @@
 
 from __future__ import annotations
 
-import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import Any
 
 from product_platform.db.migrator import MigrationRunner, connect_database
+from product_platform.db.postgres import Connection
 
 
 class Database:
     """Small connection manager for the product database."""
 
-    def __init__(self, database_url: str) -> None:
+    def __init__(self, database_url: str, *, cleanup: Callable[[], None] | None = None) -> None:
         self.database_url = database_url
-        self._connection: sqlite3.Connection | Any | None = None
+        self._connection: Connection | None = None
+        self._cleanup = cleanup
         self._transaction_lock = threading.RLock()
 
-    def connect(self) -> Any:
+    def connect(self) -> Connection:
         if self._connection is None:
             self._connection = connect_database(self.database_url)
         return self._connection
@@ -28,7 +28,7 @@ class Database:
         return MigrationRunner(self.connect()).apply_all()
 
     @contextmanager
-    def transaction(self) -> Iterator[Any]:
+    def transaction(self) -> Iterator[Connection]:
         with self._transaction_lock:
             connection = self.connect()
             try:
@@ -44,6 +44,10 @@ class Database:
         if self._connection is not None:
             self._connection.close()
             self._connection = None
+        if self._cleanup is not None:
+            cleanup = self._cleanup
+            self._cleanup = None
+            cleanup()
 
     def __del__(self) -> None:
         try:
