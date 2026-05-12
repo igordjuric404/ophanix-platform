@@ -66,7 +66,8 @@ Reusable configuration accepted by `OphanixToolGatewayClient.from_config(...)`
 and `AsyncOphanixToolGatewayClient.from_config(...)`. It includes timeout,
 payload/response caps, cache settings, discovery retry settings, idempotent
 invocation retry settings, custom client streaming policy, user agent, and
-event-hook failure mode. `base_url`,
+event-hook failure mode, compatibility enforcement, and raw success-response
+retention. `ToolGatewayClientOptions` is an alias for the same type. `base_url`,
 `token_provider`, `http_client`, and `event_hook` remain constructor inputs.
 
 Recommended profile starting points:
@@ -112,9 +113,12 @@ be 4096 characters or fewer.
 - `ToolCallResult`: `request_id`, `correlation_id`, `tool_name`, `result`,
   `body`, `reason_code`, optional `decision`, and immutable raw response
   metadata. `body` unwraps the standard gateway execution envelope when present.
+  `raw` omits the potentially sensitive `result` field unless
+  `include_raw_response=True` is configured.
 - `GatewayCompatibility`: `compatible`, `sdk_version`,
   `expected_gateway_contract_version`, `gateway_contract_version`,
   `min_sdk_version`, `min_sdk_version_satisfied`, `incompatibility_reason`,
+  gateway-published operational limits, idempotency metadata, pagination modes,
   and immutable raw response metadata.
 
 `raw` fields are diagnostic snapshots rather than stable extension contracts.

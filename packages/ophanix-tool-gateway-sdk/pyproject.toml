@@ -14,6 +14,7 @@ authors = [{name = "Ophanix Maintainers"}]
 maintainers = [{name = "Ophanix Maintainers"}]
 dependencies = [
     "httpx>=0.27.0,<1.0",
+    "packaging>=23,<26",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",

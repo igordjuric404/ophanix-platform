@@ -11,7 +11,7 @@
 
 1. Provision an isolated staging PostgreSQL database.
 2. Restore the latest production-like PostgreSQL backup into staging.
-3. Run `python -m product_platform.cli db migrate`.
+3. Run `python3 -m product_platform.cli db migrate`.
 4. Start API and worker images against the restored database.
 5. Confirm `/ready` is healthy.
 6. Run a reduced Demo Lab scenario.

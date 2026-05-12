@@ -235,7 +235,19 @@ class ToolGatewaySdkRemediationTests(unittest.TestCase):
 
         self.assertEqual(unauthenticated.status_code, 401)
         self.assertEqual(authenticated.status_code, 200, authenticated.text)
-        self.assertEqual(authenticated.json()["gateway_contract_version"], "tool-gateway.v1")
+        payload = authenticated.json()
+        self.assertEqual(payload["gateway_contract_version"], "tool-gateway.v1")
+        self.assertEqual(payload["max_payload_bytes"], 1_000_000)
+        self.assertEqual(payload["max_response_bytes"], 1_000_000)
+        self.assertEqual(payload["max_discovery_page_size"], 200)
+        self.assertEqual(payload["supported_pagination_modes"], ["cursor", "offset"])
+        self.assertTrue(payload["supports_idempotency"])
+        self.assertEqual(payload["idempotency_in_progress_ttl_seconds"], 600)
+        self.assertEqual(payload["idempotency_replay_retention_seconds"], 604800)
+        self.assertEqual(payload["rate_limit_window_seconds"], 60)
+        self.assertEqual(payload["rate_limit_max_requests"], 600)
+        self.assertEqual(payload["circuit_breaker_failure_threshold"], 5)
+        self.assertEqual(payload["circuit_breaker_cooldown_seconds"], 30)
 
 
 if __name__ == "__main__":

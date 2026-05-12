@@ -10,12 +10,15 @@ COPY packages/agent-mesh/pyproject.toml packages/agent-mesh/README.md ./packages
 COPY packages/agent-mesh/src ./packages/agent-mesh/src
 COPY packages/agent-discovery/pyproject.toml packages/agent-discovery/README.md ./packages/agent-discovery/
 COPY packages/agent-discovery/src ./packages/agent-discovery/src
+COPY packages/ophanix-tool-gateway-sdk/pyproject.toml packages/ophanix-tool-gateway-sdk/README.md packages/ophanix-tool-gateway-sdk/LICENSE ./packages/ophanix-tool-gateway-sdk/
+COPY packages/ophanix-tool-gateway-sdk/src ./packages/ophanix-tool-gateway-sdk/src
 COPY packages/product-platform/pyproject.toml packages/product-platform/README.md ./packages/product-platform/
 COPY packages/product-platform/src ./packages/product-platform/src
 
 RUN python -m pip install --upgrade pip \
     && python -m pip install ./packages/agent-mesh \
     && python -m pip install ./packages/agent-discovery \
+    && python -m pip install -e ./packages/ophanix-tool-gateway-sdk \
     && python -m pip install -e ./packages/product-platform
 
 EXPOSE 8088

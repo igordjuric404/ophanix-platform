@@ -3452,7 +3452,26 @@ def create_app(
         """Return the authenticated SDK compatibility contract."""
 
         _ = principal
-        return GatewayCapabilitiesResponse()
+        return GatewayCapabilitiesResponse(
+            max_payload_bytes=int(resolved_settings.tool_gateway_max_body_bytes),
+            max_response_bytes=int(resolved_settings.tool_gateway_max_upstream_response_bytes),
+            idempotency_in_progress_ttl_seconds=int(
+                resolved_settings.tool_gateway_idempotency_in_progress_ttl_seconds
+            ),
+            idempotency_replay_retention_seconds=int(
+                resolved_settings.tool_gateway_idempotency_replay_retention_seconds
+            ),
+            rate_limit_window_seconds=int(
+                resolved_settings.tool_gateway_rate_limit_window_seconds
+            ),
+            rate_limit_max_requests=int(resolved_settings.tool_gateway_rate_limit_max_requests),
+            circuit_breaker_failure_threshold=int(
+                resolved_settings.tool_gateway_circuit_breaker_failure_threshold
+            ),
+            circuit_breaker_cooldown_seconds=int(
+                resolved_settings.tool_gateway_circuit_breaker_cooldown_seconds
+            ),
+        )
 
     @app.post(
         "/api/v1/tools/{tool_name}/invoke",

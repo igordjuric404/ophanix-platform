@@ -1333,3 +1333,185 @@ DX validation:
 This is a functional, credible MVP for controlled adoption. It is not a paper design: the SDK builds, types, tests, and can call the live product-platform gateway contract. The core runtime posture is substantially safer than a thin HTTP wrapper.
 
 It is still too fragile for broad external adoption. The main blockers are not one catastrophic code defect; they are accumulated release, packaging, provenance, documentation, and operational edge risks. Before wider rollout, make the artifact path deterministic, enforce strict release gates, move critical tests into the standalone package, surface server limits through capabilities, and reduce the chances that adopters misuse raw responses, direct HTTP examples, or idempotency recovery.
+
+## 16. Iterative Remediation Pass 1
+
+Date: 2026-05-12
+
+Scope: SDK public API, runtime compatibility behavior, safe diagnostic defaults, capabilities metadata, local Docker install determinism, cloud command documentation, standalone/product SDK parity, tests, builds, mypy, and release validation.
+
+### Fixes Implemented
+
+SDK-AUDIT-002: Product-platform installation depends on an external SDK package even for local monorepo builds.
+
+- Root cause: Cloud and demo Dockerfiles copied and installed `product-platform` without copying/installing the local standalone SDK package first. The product package declares `ophanix-tool-gateway-sdk>=0.1.0,<1.0`, so container builds could resolve a package-index artifact that did not match the checkout.
+- Fix: Updated `packages/product-platform/deploy/cloud/Dockerfile.api`, `packages/product-platform/deploy/cloud/Dockerfile.worker`, and `packages/product-platform/Dockerfile.demo` to copy `packages/ophanix-tool-gateway-sdk` and install it before `packages/product-platform`.
+- Impact: Local container builds now evaluate the SDK source in the checkout instead of silently depending on an external index copy.
+- Validation: Added `test_cloud_dockerfiles_install_local_tool_gateway_sdk_before_product_platform` in `packages/product-platform/tests/test_tool_gateway_sdk_package.py`; full Tool Gateway suite passed.
+- Status: Resolved for current Docker build paths.
+
+SDK-AUDIT-008: `allow_buffered_custom_http_client` is exposed but intentionally ignored.
+
+- Root cause: The compatibility option remained in the public constructor/config but did not communicate that buffered clients are no longer accepted.
+- Fix: The option now emits a `DeprecationWarning` when enabled, while validation continues to reject custom clients without `stream()` so response-size caps cannot be bypassed.
+- Impact: Existing callers get an actionable migration signal instead of a silent no-op.
+- Validation: Added standalone SDK test proving the warning and stream requirement.
+- Status: Resolved as a compatibility/deprecation issue; the field still exists for `0.1.x` compatibility.
+
+SDK-AUDIT-009: `ToolGatewayClientConfig` cannot carry `base_url` or `token_provider`.
+
+- Root cause: The name read like a complete client configuration even though endpoint and credentials are intentionally runtime inputs.
+- Fix: Added `ToolGatewayClientOptions = ToolGatewayClientConfig` alias and exported it from standalone and product compatibility namespaces.
+- Impact: New consumers can use the clearer "options" name without breaking existing imports.
+- Validation: Added standalone and product export assertions.
+- Status: Partially resolved. The original class name remains for compatibility, so some naming ambiguity remains until a future breaking release.
+
+SDK-AUDIT-010: Compatibility check is advisory and not enforced before calls.
+
+- Root cause: `check_compatibility()` was available but callers had to remember to invoke it and handle incompatibility manually.
+- Fix: Added `require_compatible_gateway` option to sync and async clients/config. When enabled, the SDK probes `/api/v1/gateway/capabilities` once before `call_tool`, `list_tools`, `list_all_tools`, or `get_tool`, caches a successful check, and fails closed with `ToolGatewayError` on contract or minimum-version mismatch.
+- Impact: Strict adopters can prevent accidental calls against incompatible gateways without adding custom wrapper code.
+- Validation: Added tests for one-time compatibility probing and fail-before-invocation behavior.
+- Status: Resolved as an opt-in MVP guard. Not made default to avoid breaking existing `0.1.x` callers.
+
+SDK-AUDIT-012: SDK returns full raw successful response snapshots that may include sensitive tool payloads.
+
+- Root cause: `ToolCallResult.raw` stored the complete success body, including arbitrary upstream `result` payloads.
+- Fix: Added `include_raw_response=False` default. Successful `ToolCallResult.raw` now retains only diagnostic metadata (`request_id`, `correlation_id`, `tool_name`, `reason_code`, `decision`) unless callers explicitly opt in.
+- Impact: Safer default for logs, telemetry, and object retention; callers still have an explicit escape hatch when they control data retention.
+- Validation: Added tests proving `result` is omitted by default and included only when `include_raw_response=True`.
+- Status: Resolved for successful SDK responses.
+
+SDK-AUDIT-013: Event hook schema is untyped at runtime and not versioned.
+
+- Root cause: Hook events had names and fields but no runtime schema identifier.
+- Fix: Added `TELEMETRY_SCHEMA_VERSION = "tool-gateway-sdk.telemetry.v1"` and inject `schema_version` into emitted events.
+- Impact: Downstream telemetry consumers can version parsing and dashboards safely.
+- Validation: Added event hook assertion for schema version.
+- Status: Resolved at SDK runtime level.
+
+SDK-AUDIT-019: Cloud deployment docs use `python`, while local validation environment only provides `python3`.
+
+- Root cause: Cloud docs mixed generic `python` commands with repo docs that otherwise use `python3`.
+- Fix: Updated cloud pilot, backup/restore, and observability command references to `python3`.
+- Impact: Fewer setup failures in environments where only `python3` is available.
+- Validation: Documentation diff reviewed; build/test validation unaffected.
+- Status: Resolved for reviewed cloud docs. CI workflows still use `python` inside setup-python environments where that executable is provided.
+
+SDK-AUDIT-028: Compatibility version comparison is simplistic.
+
+- Root cause: Version comparison parsed only leading numeric components, which mishandled valid PEP 440 versions.
+- Fix: Switched compatibility comparison to `packaging.version.Version` and added `packaging>=23,<26` as a runtime dependency for the standalone SDK and product-platform source-tree compatibility path.
+- Impact: Gateway `min_sdk_version` checks now follow Python packaging semantics for pre-releases, post-releases, and local versions.
+- Validation: Standalone mypy, SDK tests, build, and release validator passed with the new dependency.
+- Status: Resolved.
+
+SDK-AUDIT-035: Gateway capabilities response does not appear to advertise operational limits or retry policy.
+
+- Root cause: `/api/v1/gateway/capabilities` returned only contract version, minimum SDK version, and package name.
+- Fix: Extended `GatewayCapabilitiesResponse` with payload/response caps, discovery page size, pagination modes, idempotency support and TTL/retention, retryable status code lists, rate-limit settings, and circuit-breaker settings. The endpoint now fills settings-backed values from `resolved_settings`.
+- Impact: SDKs and operators can discover the gateway's core operational envelope without source-level inspection.
+- Validation: Product remediation test asserts the new fields; SDK compatibility test parses surfaced limits and feature metadata.
+- Status: Resolved for current MVP metadata. Future work can add per-tool retry/idempotency metadata.
+
+### Partially Mitigated Issues
+
+SDK-AUDIT-001: Product-platform wheel excludes the compatibility SDK source while retaining it in the source tree.
+
+- Remediation this pass: Synced the product-platform source-tree copy with the standalone SDK and kept the byte-for-byte parity test.
+- Remaining concern: The repository still has a transitional source-tree copy that is intentionally excluded from the product wheel. This is coherent if treated strictly as a local compatibility copy, but it remains a maintenance footgun.
+- Status: Partially mitigated, not fully resolved.
+
+SDK-AUDIT-004: Release validator makes dependency audit optional.
+
+- Remediation this pass: Ran SDK and product release validators with `--require-dependency-audit`; current CI/publish workflows already invoke required dependency-audit mode for SDK/product release validation paths.
+- Remaining concern: The validator CLI still allows non-audited local runs by default, and `pip-audit` skipped the local unpublished package names while auditing resolvable dependencies.
+- Status: Partially resolved operationally; CLI default remains permissive.
+
+SDK-AUDIT-005: Release validator does not require strict git/tag provenance by default.
+
+- Remediation this pass: Confirmed release workflow uses strict git/tag validation for release events.
+- Remaining concern: Local validation still defaults to non-strict mode; this dirty remediation worktree could not pass strict-git mode by design.
+- Status: Partially resolved in release workflow, not defaulted in CLI.
+
+SDK-AUDIT-018: Direct HTTP examples require callers to recreate critical SDK safeguards.
+
+- Remediation this pass: Product and SDK docs now more clearly identify the SDK as the safer production path, and SDK defaults reduce one major raw-response logging risk.
+- Remaining concern: Direct HTTP examples remain available and still rely on consumers to reproduce SDK-level behavior in non-Python clients.
+- Status: Partially mitigated, not resolved.
+
+SDK-AUDIT-022: Standalone SDK tests are fewer than product-platform compatibility tests.
+
+- Remediation this pass: Standalone SDK tests increased from 39 to 44 and now cover compatibility enforcement, raw response privacy, event schema versioning, insecure HTTP warning, and deprecated buffered-client option behavior.
+- Remaining concern: Standalone tests still do not fully subsume the 325 product Tool Gateway tests or all installed-wheel live gateway behavior.
+- Status: Partially mitigated.
+
+SDK-AUDIT-026: Base URL allows explicit non-local insecure HTTP opt-in.
+
+- Remediation this pass: Non-local `http://` with `allow_insecure_http=True` now emits a `RuntimeWarning`.
+- Remaining concern: The opt-in remains available for test networks and therefore remains unsafe if misused.
+- Status: Partially mitigated, intentionally not removed in `0.1.x`.
+
+### Left Unresolved
+
+- SDK-AUDIT-003: Version/provenance ambiguity remains because both packages still declare `0.1.0`; release process evidence, not code edits, must ultimately disambiguate artifacts.
+- SDK-AUDIT-006: Package-index install verification remains optional and was not run because this local package version is not guaranteed to exist on the index during remediation.
+- SDK-AUDIT-007: Pre-1.0 API instability remains by definition.
+- SDK-AUDIT-011: Non-JSON error response handling remains an acceptable but imperfect MVP behavior.
+- SDK-AUDIT-014: Discovery cache still has no server-driven invalidation, ETag, or version token.
+- SDK-AUDIT-015: Offset fallback can still miss catalog churn on older gateways.
+- SDK-AUDIT-016: Retry policy is still not tool-contract aware.
+- SDK-AUDIT-017: Runtime cap alignment is improved through capabilities, but not automatically enforced from server-advertised limits in client config.
+- SDK-AUDIT-020: Workspace build artifacts/caches still exist after validation runs and should be cleaned or ignored by repository hygiene policy.
+- SDK-AUDIT-021: Product-platform mypy still uses weaker settings for SDK-adjacent source than the standalone SDK.
+- SDK-AUDIT-023: Live contract tests still validate local wheel behavior, not post-publish package-index installation.
+- SDK-AUDIT-024: Redaction remains best-effort and not a substitute for safe logging.
+- SDK-AUDIT-025: No first-class token rotation/refresh provider abstraction was added.
+- SDK-AUDIT-027: Retry settings still do not include a cross-call total retry budget.
+- SDK-AUDIT-029: The SDK still does not validate arbitrary `result` payload shape beyond preserving it as caller-owned data.
+- SDK-AUDIT-030: Idempotency persistence failure still requires operator reconciliation.
+- SDK-AUDIT-031: Denied calls still do not store idempotency replay records.
+- SDK-AUDIT-032: Schema validation failures still do not store idempotency replay records.
+- SDK-AUDIT-033: Standalone package still relies on repository-level workflow evidence rather than a package-local CI declaration.
+- SDK-AUDIT-034: Release provenance remains process-dependent until artifacts are actually published with provenance and post-publish verification.
+
+### Validation Run
+
+- `python3 -m pytest packages/ophanix-tool-gateway-sdk/tests -q`: passed, 44 tests.
+- `python3 -m pytest packages/product-platform/tests/test_tool_gateway_sdk_package.py packages/product-platform/tests/test_tool_gateway_sdk_remediation.py -q`: passed, 12 tests.
+- `python3 -m mypy src/ophanix_tool_gateway` from `packages/ophanix-tool-gateway-sdk`: passed.
+- `python3 -m mypy src/product_platform/tool_gateway src/ophanix_tool_gateway` from `packages/product-platform`: passed.
+- `ruff check src tests scripts --select E,F,W --ignore E501` from `packages/ophanix-tool-gateway-sdk`: passed.
+- `ruff check src tests --select E,F,W --ignore E501` from `packages/product-platform`: passed.
+- `python3 -m pytest $(rg --files packages/product-platform/tests | rg 'test_tool_gateway.*\\.py') -q`: passed, 325 tests, 5 warnings. Warnings were deprecation/runtime warnings from dependency stack and intentional non-local insecure HTTP opt-in tests.
+- `python3 -m build` from `packages/ophanix-tool-gateway-sdk`: passed.
+- `python3 -m build` from `packages/product-platform`: passed.
+- `python3 scripts/validate_release.py --out-dir /tmp/ophanix-sdk-remediation-release --require-dependency-audit` from `packages/ophanix-tool-gateway-sdk`: passed; dependency audit reported the local unpublished package name as skipped/not found on PyPI.
+- `python3 scripts/validate_release.py --out-dir /tmp/ophanix-product-remediation-release-2 --require-dependency-audit` from `packages/product-platform`: passed; dependency audit reported the local unpublished package name as skipped/not found on PyPI.
+
+### Post-Pass Score Reassessment
+
+Implementation quality: 7/10.
+
+- Reason: The SDK now has safer raw-response defaults, opt-in compatibility enforcement, PEP 440 version checks, richer capabilities metadata, deterministic local Docker SDK installation, expanded standalone tests, passing mypy, passing builds, passing release validators, and a broad 325-test Tool Gateway regression pass.
+- Score cap: Capped at 7 by unresolved cache invalidation, tool-aware retry metadata, package-index verification, and incomplete standalone parity with product gateway tests.
+
+Ease of use: 7/10.
+
+- Reason: The API now exposes the clearer `ToolGatewayClientOptions` alias, warns on dangerous insecure HTTP and deprecated buffered-client compatibility settings, documents raw-response retention, and standardizes reviewed cloud commands to `python3`.
+- Score cap: Capped at 7 by remaining direct-HTTP footguns, no first-class token rotation provider, and process-heavy release/provenance docs.
+
+Security and reliability: 7/10.
+
+- Reason: The biggest proven security issue, successful raw payload retention in `ToolCallResult.raw`, now has a safer default; compatibility can fail closed; gateway limits are discoverable; non-local insecure HTTP opt-in emits a runtime warning; and dependency-audit-required release validation was exercised.
+- Score cap: Capped at 7 by best-effort redaction, retained insecure HTTP opt-in, manual cache invalidation, unresolved idempotency reconciliation, and lack of tool-aware retry contracts.
+
+### Next Remediation Order
+
+1. Add server-driven discovery invalidation or cache validators.
+2. Add tool-contract metadata for retryability/idempotency and have the SDK honor it.
+3. Add first-class token refresh/rotation provider examples with tests.
+4. Decide whether the product source-tree compatibility copy should be removed, generated, or formalized as a checked parity artifact.
+5. Add post-publish package-index install verification to the release workflow after publish.
+6. Add custom redaction hooks or structured payload-classification support.
+7. Define operational reconciliation workflow/tests for idempotency persistence failures.

@@ -32,6 +32,7 @@ from urllib.parse import quote
 from urllib.parse import urlparse
 
 import httpx
+from packaging.version import InvalidVersion, Version
 
 LOGGER = logging.getLogger(__name__)
 SDK_PACKAGE_NAME = "ophanix-tool-gateway-sdk"
@@ -71,6 +72,7 @@ GATEWAY_TOOL_INVOKE_PATH_SUFFIX = "/invoke"
 SDK_GATEWAY_CONTRACT_VERSION = "tool-gateway.v1"
 SDK_VERSION = _sdk_version()
 SDK_USER_AGENT = f"ophanix-tool-gateway-python/{SDK_VERSION}"
+TELEMETRY_SCHEMA_VERSION = "tool-gateway-sdk.telemetry.v1"
 DEFAULT_GATEWAY_TOKEN_ENV_VAR = "OPHANIX_GATEWAY_TOKEN"
 RETRYABLE_DISCOVERY_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
 RETRYABLE_TOOL_CALL_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
@@ -318,11 +320,18 @@ class GatewayCompatibility:
     raw: Mapping[str, Any] = field(default_factory=dict)
     min_sdk_version_satisfied: bool = True
     incompatibility_reason: str | None = None
+    max_payload_bytes: int | None = None
+    max_response_bytes: int | None = None
+    max_discovery_page_size: int | None = None
+    supported_pagination_modes: tuple[str, ...] = ()
+    supports_idempotency: bool | None = None
+    idempotency_in_progress_ttl_seconds: int | None = None
+    idempotency_replay_retention_seconds: int | None = None
 
 
 @dataclass(frozen=True)
 class ToolGatewayClientConfig:
-    """Reusable client configuration for sync and async SDK clients."""
+    """Reusable client options for sync and async SDK clients."""
 
     timeout_seconds: float = 5.0
     max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES
@@ -342,6 +351,11 @@ class ToolGatewayClientConfig:
     invocation_retry_jitter_ratio: float = DEFAULT_TOOL_CALL_RETRY_JITTER_RATIO
     allow_buffered_custom_http_client: bool = False
     raise_event_hook_errors: bool = False
+    require_compatible_gateway: bool = False
+    include_raw_response: bool = False
+
+
+ToolGatewayClientOptions = ToolGatewayClientConfig
 
 
 class ToolGatewayError(RuntimeError):
@@ -426,6 +440,8 @@ class _ClientConfig:
     invocation_retry_max_sleep_seconds: float
     invocation_retry_jitter_ratio: float
     allow_buffered_custom_http_client: bool
+    require_compatible_gateway: bool
+    include_raw_response: bool
 
 
 class OphanixToolGatewayClient:
@@ -467,6 +483,8 @@ class OphanixToolGatewayClient:
             invocation_retry_jitter_ratio=config.invocation_retry_jitter_ratio,
             allow_buffered_custom_http_client=config.allow_buffered_custom_http_client,
             raise_event_hook_errors=config.raise_event_hook_errors,
+            require_compatible_gateway=config.require_compatible_gateway,
+            include_raw_response=config.include_raw_response,
         )
 
     def __init__(
@@ -494,6 +512,8 @@ class OphanixToolGatewayClient:
         invocation_retry_jitter_ratio: float = DEFAULT_TOOL_CALL_RETRY_JITTER_RATIO,
         allow_buffered_custom_http_client: bool = False,
         raise_event_hook_errors: bool = False,
+        require_compatible_gateway: bool = False,
+        include_raw_response: bool = False,
     ) -> None:
         if token_provider is None:
             raise ToolGatewayValidationError("token_provider is required")
@@ -518,6 +538,8 @@ class OphanixToolGatewayClient:
             invocation_retry_max_sleep_seconds=invocation_retry_max_sleep_seconds,
             invocation_retry_jitter_ratio=invocation_retry_jitter_ratio,
             allow_buffered_custom_http_client=allow_buffered_custom_http_client,
+            require_compatible_gateway=require_compatible_gateway,
+            include_raw_response=include_raw_response,
         )
         self.token_provider = token_provider
         self.base_url = config.base_url
@@ -538,11 +560,15 @@ class OphanixToolGatewayClient:
         self.invocation_retry_max_sleep_seconds: float = config.invocation_retry_max_sleep_seconds
         self.invocation_retry_jitter_ratio: float = config.invocation_retry_jitter_ratio
         self.allow_buffered_custom_http_client: bool = config.allow_buffered_custom_http_client
+        self.require_compatible_gateway: bool = config.require_compatible_gateway
+        self.include_raw_response: bool = config.include_raw_response
         self.event_hook = _optional_event_hook(event_hook)
         self.raise_event_hook_errors = _require_bool(raise_event_hook_errors, "raise_event_hook_errors")
         self._sleep: Callable[[float], None] = time.sleep
         self._random: Callable[[], float] = random.random
         self._cache_lock = threading.RLock()
+        self._compatibility_lock = threading.RLock()
+        self._compatibility_checked = False
         self._tool_cache: dict[_ToolCacheKey, _ToolCacheValue] | None = (
             {} if self.cache_tools else None
         )
@@ -580,6 +606,7 @@ class OphanixToolGatewayClient:
         started_at = time.perf_counter()
         normalized_tool_name = _require_text(tool_name, "tool_name")
         _require_json_object(payload, "payload", max_bytes=self.max_payload_bytes)
+        self._ensure_compatible()
         body: dict[str, Any] = {"payload": payload}
         auth_context = self._auth_context()
         headers = auth_context.headers
@@ -683,7 +710,10 @@ class OphanixToolGatewayClient:
                 response.status_code,
                 retry_after_seconds=_retry_after_seconds(response),
             )
-        result = _tool_call_result(response_body)
+        result = _tool_call_result(
+            response_body,
+            include_raw_response=self.include_raw_response,
+        )
         self._emit_event(
             {
                 "event": "tool_call.success",
@@ -707,6 +737,7 @@ class OphanixToolGatewayClient:
         """List Tool Gateway contracts visible to the configured caller."""
 
         self._ensure_open()
+        self._ensure_compatible()
         auth_context = self._auth_context()
         if status is not None:
             warnings.warn(
@@ -733,6 +764,7 @@ class OphanixToolGatewayClient:
             raise ToolGatewayValidationError("page_size must be less than or equal to 200")
         max_total = _optional_positive_integer(max_total, "max_total")
         self._ensure_open()
+        self._ensure_compatible()
         auth_context = self._auth_context()
         tools: list[ToolDefinition] = []
         seen: set[str] = set()
@@ -822,6 +854,7 @@ class OphanixToolGatewayClient:
 
         self._ensure_open()
         normalized_tool_name = _require_text(tool_name, "tool_name")
+        self._ensure_compatible()
         auth_context = self._auth_context()
         cache_key = _tool_cache_key(auth_context.cache_key, normalized_tool_name)
         cached = self._cached_tool(cache_key)
@@ -890,6 +923,21 @@ class OphanixToolGatewayClient:
     def _ensure_open(self) -> None:
         if self._closed:
             raise ToolGatewayError("Tool Gateway client is closed.", code="client_closed")
+
+    def _ensure_compatible(self) -> None:
+        if not self.require_compatible_gateway:
+            return
+        with self._compatibility_lock:
+            if self._compatibility_checked:
+                return
+            compatibility = self.check_compatibility()
+            if not compatibility.compatible:
+                raise ToolGatewayError(
+                    "Tool Gateway contract is incompatible with this SDK.",
+                    code=compatibility.incompatibility_reason or "gateway_incompatible",
+                    response_body=dict(compatibility.raw),
+                )
+            self._compatibility_checked = True
 
     def _list_tools_with_auth(
         self,
@@ -1132,6 +1180,7 @@ class OphanixToolGatewayClient:
     def _emit_event(self, event: dict[str, Any]) -> None:
         if self.event_hook is None:
             return
+        event.setdefault("schema_version", TELEMETRY_SCHEMA_VERSION)
         try:
             self.event_hook(MappingProxyType(dict(event)))
         except Exception:
@@ -1179,6 +1228,8 @@ class AsyncOphanixToolGatewayClient:
             invocation_retry_jitter_ratio=config.invocation_retry_jitter_ratio,
             allow_buffered_custom_http_client=config.allow_buffered_custom_http_client,
             raise_event_hook_errors=config.raise_event_hook_errors,
+            require_compatible_gateway=config.require_compatible_gateway,
+            include_raw_response=config.include_raw_response,
         )
 
     def __init__(
@@ -1206,6 +1257,8 @@ class AsyncOphanixToolGatewayClient:
         invocation_retry_jitter_ratio: float = DEFAULT_TOOL_CALL_RETRY_JITTER_RATIO,
         allow_buffered_custom_http_client: bool = False,
         raise_event_hook_errors: bool = False,
+        require_compatible_gateway: bool = False,
+        include_raw_response: bool = False,
     ) -> None:
         if token_provider is None:
             raise ToolGatewayValidationError("token_provider is required")
@@ -1230,6 +1283,8 @@ class AsyncOphanixToolGatewayClient:
             invocation_retry_max_sleep_seconds=invocation_retry_max_sleep_seconds,
             invocation_retry_jitter_ratio=invocation_retry_jitter_ratio,
             allow_buffered_custom_http_client=allow_buffered_custom_http_client,
+            require_compatible_gateway=require_compatible_gateway,
+            include_raw_response=include_raw_response,
         )
         self.token_provider = token_provider
         self.base_url = config.base_url
@@ -1250,11 +1305,15 @@ class AsyncOphanixToolGatewayClient:
         self.invocation_retry_max_sleep_seconds: float = config.invocation_retry_max_sleep_seconds
         self.invocation_retry_jitter_ratio: float = config.invocation_retry_jitter_ratio
         self.allow_buffered_custom_http_client: bool = config.allow_buffered_custom_http_client
+        self.require_compatible_gateway: bool = config.require_compatible_gateway
+        self.include_raw_response: bool = config.include_raw_response
         self.event_hook = _optional_event_hook(event_hook)
         self.raise_event_hook_errors = _require_bool(raise_event_hook_errors, "raise_event_hook_errors")
         self._sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
         self._random: Callable[[], float] = random.random
         self._cache_lock = asyncio.Lock()
+        self._compatibility_lock = asyncio.Lock()
+        self._compatibility_checked = False
         self._tool_cache: dict[_ToolCacheKey, _ToolCacheValue] | None = (
             {} if self.cache_tools else None
         )
@@ -1292,6 +1351,7 @@ class AsyncOphanixToolGatewayClient:
         started_at = time.perf_counter()
         normalized_tool_name = _require_text(tool_name, "tool_name")
         _require_json_object(payload, "payload", max_bytes=self.max_payload_bytes)
+        await self._ensure_compatible()
         body: dict[str, Any] = {"payload": payload}
         auth_context = await self._auth_context()
         headers = auth_context.headers
@@ -1395,7 +1455,10 @@ class AsyncOphanixToolGatewayClient:
                 response.status_code,
                 retry_after_seconds=_retry_after_seconds(response),
             )
-        result = _tool_call_result(response_body)
+        result = _tool_call_result(
+            response_body,
+            include_raw_response=self.include_raw_response,
+        )
         self._emit_event(
             {
                 "event": "tool_call.success",
@@ -1419,6 +1482,7 @@ class AsyncOphanixToolGatewayClient:
         """List Tool Gateway contracts visible to the configured caller."""
 
         self._ensure_open()
+        await self._ensure_compatible()
         auth_context = await self._auth_context()
         if status is not None:
             warnings.warn(
@@ -1445,6 +1509,7 @@ class AsyncOphanixToolGatewayClient:
             raise ToolGatewayValidationError("page_size must be less than or equal to 200")
         max_total = _optional_positive_integer(max_total, "max_total")
         self._ensure_open()
+        await self._ensure_compatible()
         auth_context = await self._auth_context()
         tools: list[ToolDefinition] = []
         seen: set[str] = set()
@@ -1542,6 +1607,7 @@ class AsyncOphanixToolGatewayClient:
 
         self._ensure_open()
         normalized_tool_name = _require_text(tool_name, "tool_name")
+        await self._ensure_compatible()
         auth_context = await self._auth_context()
         cache_key = _tool_cache_key(auth_context.cache_key, normalized_tool_name)
         cached = await self._cached_tool(cache_key)
@@ -1606,6 +1672,21 @@ class AsyncOphanixToolGatewayClient:
     def _ensure_open(self) -> None:
         if self._closed:
             raise ToolGatewayError("Tool Gateway client is closed.", code="client_closed")
+
+    async def _ensure_compatible(self) -> None:
+        if not self.require_compatible_gateway:
+            return
+        async with self._compatibility_lock:
+            if self._compatibility_checked:
+                return
+            compatibility = await self.check_compatibility()
+            if not compatibility.compatible:
+                raise ToolGatewayError(
+                    "Tool Gateway contract is incompatible with this SDK.",
+                    code=compatibility.incompatibility_reason or "gateway_incompatible",
+                    response_body=dict(compatibility.raw),
+                )
+            self._compatibility_checked = True
 
     async def _list_tools_with_auth(
         self,
@@ -1848,6 +1929,7 @@ class AsyncOphanixToolGatewayClient:
     def _emit_event(self, event: dict[str, Any]) -> None:
         if self.event_hook is None:
             return
+        event.setdefault("schema_version", TELEMETRY_SCHEMA_VERSION)
         try:
             self.event_hook(MappingProxyType(dict(event)))
         except Exception:
@@ -1876,6 +1958,8 @@ def _client_config(
     invocation_retry_max_sleep_seconds: object,
     invocation_retry_jitter_ratio: object,
     allow_buffered_custom_http_client: object,
+    require_compatible_gateway: object,
+    include_raw_response: object,
 ) -> _ClientConfig:
     allow_insecure_http = _require_bool(allow_insecure_http, "allow_insecure_http")
     normalized_base_url = _normalize_base_url(
@@ -1949,6 +2033,17 @@ def _client_config(
     )
     if invocation_retry_jitter_ratio > 1:
         raise ToolGatewayValidationError("invocation_retry_jitter_ratio must be less than or equal to 1")
+    allow_buffered_custom_http_client = _require_bool(
+        allow_buffered_custom_http_client,
+        "allow_buffered_custom_http_client",
+    )
+    if allow_buffered_custom_http_client:
+        warnings.warn(
+            "allow_buffered_custom_http_client is deprecated and has no effect; "
+            "custom HTTP clients must provide stream() so SDK response-size caps remain enforced.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     return _ClientConfig(
         base_url=normalized_base_url,
         timeout_seconds=timeout_seconds,
@@ -1967,10 +2062,12 @@ def _client_config(
         invocation_retry_backoff_seconds=invocation_retry_backoff_seconds,
         invocation_retry_max_sleep_seconds=invocation_retry_max_sleep_seconds,
         invocation_retry_jitter_ratio=invocation_retry_jitter_ratio,
-        allow_buffered_custom_http_client=_require_bool(
-            allow_buffered_custom_http_client,
-            "allow_buffered_custom_http_client",
+        allow_buffered_custom_http_client=allow_buffered_custom_http_client,
+        require_compatible_gateway=_require_bool(
+            require_compatible_gateway,
+            "require_compatible_gateway",
         ),
+        include_raw_response=_require_bool(include_raw_response, "include_raw_response"),
     )
 
 
@@ -2000,6 +2097,13 @@ def _normalize_base_url(base_url: object, *, allow_insecure_http: bool = False) 
     ):
         raise ToolGatewayValidationError(
             "base_url must use https unless it targets localhost or allow_insecure_http=True"
+        )
+    if parsed.scheme == "http" and allow_insecure_http and not _is_local_http_host(parsed.hostname):
+        warnings.warn(
+            "allow_insecure_http=True disables HTTPS enforcement for a non-local Tool Gateway URL; "
+            "only use it in isolated test environments.",
+            RuntimeWarning,
+            stacklevel=2,
         )
     return normalized
 
@@ -2112,7 +2216,11 @@ def _close_awaitable(value: Awaitable[Any]) -> None:
         close()
 
 
-def _tool_call_result(body: dict[str, Any]) -> ToolCallResult:
+def _tool_call_result(
+    body: dict[str, Any],
+    *,
+    include_raw_response: bool,
+) -> ToolCallResult:
     error = body.get("error")
     if error not in (None, {}):
         raise ToolGatewayError(
@@ -2130,8 +2238,29 @@ def _tool_call_result(body: dict[str, Any]) -> ToolCallResult:
         reason_code=_optional_response_string_field(body, "reason_code"),
         decision=_optional_response_mapping_field(body, "decision"),
         result=body.get("result"),
-        raw=_immutable_mapping(body),
+        raw=_tool_call_raw_response(body, include_raw_response=include_raw_response),
     )
+
+
+def _tool_call_raw_response(
+    body: dict[str, Any],
+    *,
+    include_raw_response: bool,
+) -> Mapping[str, Any]:
+    if include_raw_response:
+        return _immutable_mapping(body)
+    diagnostic_fields = {
+        key: body[key]
+        for key in (
+            "request_id",
+            "correlation_id",
+            "tool_name",
+            "reason_code",
+            "decision",
+        )
+        if key in body
+    }
+    return _immutable_mapping(diagnostic_fields)
 
 
 def _tool_definition(body: dict[str, Any]) -> ToolDefinition:
@@ -2175,27 +2304,32 @@ def _gateway_compatibility(body: dict[str, Any]) -> GatewayCompatibility:
         raw=_immutable_mapping(body),
         min_sdk_version_satisfied=min_sdk_version_satisfied,
         incompatibility_reason=incompatibility_reason,
+        max_payload_bytes=_optional_response_integer_field(body, "max_payload_bytes"),
+        max_response_bytes=_optional_response_integer_field(body, "max_response_bytes"),
+        max_discovery_page_size=_optional_response_integer_field(body, "max_discovery_page_size"),
+        supported_pagination_modes=_optional_response_string_tuple_field(
+            body,
+            "supported_pagination_modes",
+        ),
+        supports_idempotency=_optional_response_bool_field(body, "supports_idempotency"),
+        idempotency_in_progress_ttl_seconds=_optional_response_integer_field(
+            body,
+            "idempotency_in_progress_ttl_seconds",
+        ),
+        idempotency_replay_retention_seconds=_optional_response_integer_field(
+            body,
+            "idempotency_replay_retention_seconds",
+        ),
     )
 
 
 def _version_at_least(current: str, minimum: str | None) -> bool:
     if minimum is None:
         return True
-    current_parts = _version_parts(current)
-    minimum_parts = _version_parts(minimum)
-    if current_parts is None or minimum_parts is None:
+    try:
+        return Version(current) >= Version(minimum)
+    except InvalidVersion:
         return False
-    max_length = max(len(current_parts), len(minimum_parts))
-    padded_current = current_parts + (0,) * (max_length - len(current_parts))
-    padded_minimum = minimum_parts + (0,) * (max_length - len(minimum_parts))
-    return padded_current >= padded_minimum
-
-
-def _version_parts(value: str) -> tuple[int, ...] | None:
-    match = re.match(r"^\s*(\d+(?:\.\d+)*)", value)
-    if match is None:
-        return None
-    return tuple(int(part) for part in match.group(1).split("."))
 
 
 def _clone_tool_definition(tool: ToolDefinition) -> ToolDefinition:
@@ -2443,6 +2577,48 @@ def _optional_response_string_field(body: dict[str, Any], field_name: str) -> st
             response_body=body,
         )
     return value
+
+
+def _optional_response_integer_field(body: dict[str, Any], field_name: str) -> int | None:
+    value = body.get(field_name)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ToolGatewayError(
+            f"Tool Gateway response field must be an integer: {field_name}.",
+            code="invalid_response",
+            response_body=body,
+        )
+    return cast(int, value)
+
+
+def _optional_response_bool_field(body: dict[str, Any], field_name: str) -> bool | None:
+    value = body.get(field_name)
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise ToolGatewayError(
+            f"Tool Gateway response field must be a boolean: {field_name}.",
+            code="invalid_response",
+            response_body=body,
+        )
+    return value
+
+
+def _optional_response_string_tuple_field(
+    body: dict[str, Any],
+    field_name: str,
+) -> tuple[str, ...]:
+    value = body.get(field_name)
+    if value is None:
+        return ()
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise ToolGatewayError(
+            f"Tool Gateway response field must be a list of strings: {field_name}.",
+            code="invalid_response",
+            response_body=body,
+        )
+    return tuple(value)
 
 
 def _optional_string(value: Any) -> str | None:

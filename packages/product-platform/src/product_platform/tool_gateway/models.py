@@ -184,6 +184,23 @@ class GatewayCapabilitiesResponse(BaseModel):
     gateway_contract_version: str = GATEWAY_CONTRACT_VERSION
     min_sdk_version: str = "0.1.0"
     sdk_package: str = "ophanix-tool-gateway-sdk"
+    max_payload_bytes: int = 1_000_000
+    max_response_bytes: int = 1_000_000
+    max_discovery_page_size: int = 200
+    supported_pagination_modes: list[str] = Field(default_factory=lambda: ["cursor", "offset"])
+    supports_idempotency: bool = True
+    idempotency_in_progress_ttl_seconds: int = 600
+    idempotency_replay_retention_seconds: int = 604_800
+    discovery_retryable_status_codes: list[int] = Field(
+        default_factory=lambda: [408, 429, 500, 502, 503, 504]
+    )
+    invocation_retryable_status_codes: list[int] = Field(
+        default_factory=lambda: [408, 429, 500, 502, 503, 504]
+    )
+    rate_limit_window_seconds: int = 60
+    rate_limit_max_requests: int = 600
+    circuit_breaker_failure_threshold: int = 5
+    circuit_breaker_cooldown_seconds: int = 30
 
 
 class ToolUpstreamTargetCreateRequest(BaseModel):

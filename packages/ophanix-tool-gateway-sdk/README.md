@@ -83,9 +83,10 @@ so the underlying HTTP client is closed when the agent shuts down.
 `AsyncOphanixToolGatewayClient` mirrors the synchronous API for async runtimes.
 It accepts either a sync token provider or an async token provider.
 
-Use `ToolGatewayClientConfig` with `OphanixToolGatewayClient.from_config(...)`
-or `AsyncOphanixToolGatewayClient.from_config(...)` when several workers share
-the same timeout, cache, retry, and response-limit settings.
+Use `ToolGatewayClientConfig` (also exported as `ToolGatewayClientOptions`) with
+`OphanixToolGatewayClient.from_config(...)` or
+`AsyncOphanixToolGatewayClient.from_config(...)` when several workers share the
+same timeout, cache, retry, and response-limit settings.
 
 Recommended starting profiles:
 
@@ -125,6 +126,12 @@ Common constructor options:
   and debug-logged by default so observability code cannot break tool calls.
 - `raise_event_hook_errors`: when `True`, event hook failures are surfaced to
   the caller. Use this in tests or strict observability environments.
+- `require_compatible_gateway`: when `True`, the client calls authenticated
+  `/api/v1/gateway/capabilities` once before runtime operations and fails
+  closed if the gateway contract or minimum SDK version is incompatible.
+- `include_raw_response`: when `True`, successful `ToolCallResult.raw` includes
+  the full gateway success body. It defaults to `False` so potentially sensitive
+  upstream `result` payloads are not retained in diagnostic snapshots.
 - `discovery_max_retries`: retry count for discovery only, default `2`.
 - `discovery_retry_backoff_seconds`: base exponential backoff, default `0.2`.
 - `discovery_retry_max_sleep_seconds`: cap for retry sleeps and `Retry-After`,
@@ -169,9 +176,12 @@ authorization.
 
 `ToolCallResult.body` returns the upstream tool body when the gateway result uses
 the standard execution envelope; `ToolCallResult.result` keeps the full gateway
-result for compatibility and diagnostics. `ToolCallResult.raw`,
-`ToolDefinition.raw`, and `GatewayCompatibility.raw` are
-diagnostic snapshots of gateway responses, not stable extension APIs.
+result for compatibility and diagnostics. By default, `ToolCallResult.raw`
+contains only non-result diagnostic fields such as request IDs, tool name,
+reason code, and decision summary. Set `include_raw_response=True` only when an
+application has an explicit retention and redaction plan for upstream result
+payloads. `ToolDefinition.raw` and `GatewayCompatibility.raw` remain diagnostic
+snapshots of gateway responses, not stable extension APIs.
 `ToolCallResult.decision` is a coarse agent-facing summary and intentionally
 excludes internal policy IDs. Operators should use Product Platform audit and
 runtime-action records for full decision details.
@@ -314,7 +324,8 @@ class CachedTokenProvider:
         return self._token
 ```
 
-SDK event hooks receive immutable mappings with no bearer tokens:
+SDK event hooks receive immutable mappings with no bearer tokens. Every event
+includes `schema_version="tool-gateway-sdk.telemetry.v1"`:
 
 | Event | Fields |
 | --- | --- |
@@ -474,8 +485,8 @@ For final release hardening, also run:
 python3 scripts/validate_release.py --strict-git
 ```
 
-The SDK depends only on `httpx`; CI exercises both the normal resolver and the
-minimum supported `httpx==0.27.0` path. It is also re-exported from
+The SDK depends on `httpx` and `packaging`; CI exercises both the normal
+resolver and the minimum supported `httpx==0.27.0` path. It is also re-exported from
 `product_platform.tool_gateway` for compatibility with earlier internal imports.
 CI exercises the SDK on Python 3.11, 3.12, and 3.13. Dependency range changes
 must keep those paths green before release.

@@ -8,8 +8,8 @@ database for AWS pilot deployments.
 
 1. Create the pilot organization and default staging environment.
 2. Assign IdP groups to `Platform Admin`, `Operator`, and `Viewer` roles.
-3. Run `python -m product_platform.cli db migrate`.
-4. Run `python -m product_platform.cli db seed` for demo fixtures.
+3. Run `python3 -m product_platform.cli db migrate`.
+4. Run `python3 -m product_platform.cli db seed` for demo fixtures.
 5. Confirm `/ready` is healthy.
 
 ## Smoke Demo

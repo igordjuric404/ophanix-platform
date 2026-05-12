@@ -21,6 +21,7 @@ from ophanix_tool_gateway.sdk import (
     ToolDefinition,
     ToolDeniedError,
     ToolGatewayClientConfig,
+    ToolGatewayClientOptions,
     ToolGatewayError,
     ToolGatewayValidationError,
 )
@@ -44,6 +45,7 @@ __all__ = [
     "ToolDefinition",
     "ToolDeniedError",
     "ToolGatewayClientConfig",
+    "ToolGatewayClientOptions",
     "ToolGatewayError",
     "ToolGatewayValidationError",
 ]

@@ -74,17 +74,38 @@ class ToolGatewaySdkPackageTests(unittest.TestCase):
         from product_platform.tool_gateway import (
             GatewayCompatibility,
             ToolGatewayClientConfig,
+            ToolGatewayClientOptions,
             ToolGatewayValidationError,
         )
         from product_platform.tool_gateway.sdk import (
             GatewayCompatibility as ShimGatewayCompatibility,
             ToolGatewayClientConfig as ShimToolGatewayClientConfig,
+            ToolGatewayClientOptions as ShimToolGatewayClientOptions,
             ToolGatewayValidationError as ShimToolGatewayValidationError,
         )
 
         self.assertIs(GatewayCompatibility, ShimGatewayCompatibility)
         self.assertIs(ToolGatewayClientConfig, ShimToolGatewayClientConfig)
+        self.assertIs(ToolGatewayClientOptions, ShimToolGatewayClientOptions)
+        self.assertIs(ToolGatewayClientOptions, ToolGatewayClientConfig)
         self.assertIs(ToolGatewayValidationError, ShimToolGatewayValidationError)
+
+    def test_cloud_dockerfiles_install_local_tool_gateway_sdk_before_product_platform(self) -> None:
+        dockerfiles = [
+            self.product_platform_root / "deploy" / "cloud" / "Dockerfile.api",
+            self.product_platform_root / "deploy" / "cloud" / "Dockerfile.worker",
+            self.product_platform_root / "Dockerfile.demo",
+        ]
+
+        for dockerfile in dockerfiles:
+            with self.subTest(dockerfile=dockerfile.name):
+                contents = dockerfile.read_text()
+                self.assertIn("packages/ophanix-tool-gateway-sdk", contents)
+                self.assertLess(
+                    contents.index("./packages/ophanix-tool-gateway-sdk"),
+                    contents.index("./packages/product-platform"),
+                    "Docker images must install the local SDK package before product-platform.",
+                )
 
 
 if __name__ == "__main__":

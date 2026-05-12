@@ -20,6 +20,7 @@ from ophanix_tool_gateway import (
     SyncGatewayHttpClient,
     ToolDeniedError,
     ToolGatewayClientConfig,
+    ToolGatewayClientOptions,
     ToolGatewayError,
     ToolGatewayValidationError,
     EnvironmentTokenProvider,
@@ -51,12 +52,14 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
             "SyncGatewayHttpClient",
             "TelemetryEventHook",
             "ToolGatewayClientConfig",
+            "ToolGatewayClientOptions",
             "ToolGatewayValidationError",
         }
 
         self.assertTrue(expected_exports.issubset(set(sdk.__all__)))
         self.assertIs(sdk.GatewayCompatibility, GatewayCompatibility)
         self.assertIs(sdk.ToolGatewayClientConfig, ToolGatewayClientConfig)
+        self.assertIs(sdk.ToolGatewayClientOptions, ToolGatewayClientOptions)
         self.assertIs(sdk.SyncGatewayHttpClient, SyncGatewayHttpClient)
         self.assertIs(sdk.AsyncGatewayHttpClient, AsyncGatewayHttpClient)
 
@@ -80,6 +83,28 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
         self.assertEqual(result.request_id, "req-sdk")
         self.assertEqual(result.result, {"status": "succeeded"})
         self.assertEqual(result.body, {"status": "succeeded"})
+        self.assertEqual(result.raw["request_id"], "req-sdk")
+        self.assertNotIn("result", result.raw)
+
+    def test_call_tool_can_opt_into_full_raw_success_response(self) -> None:
+        client = _client(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "request_id": "req-sdk",
+                    "correlation_id": "corr-sdk",
+                    "tool_name": "claims.lookup",
+                    "reason_code": "allowed",
+                    "result": {"status": "succeeded"},
+                    "error": None,
+                },
+            ),
+            include_raw_response=True,
+        )
+
+        result = client.call_tool("claims.lookup", {"claim_id": "claim_123"})
+
+        self.assertEqual(result.raw["result"], {"status": "succeeded"})
 
     def test_call_tool_body_unwraps_gateway_execution_envelope(self) -> None:
         client = _client(
@@ -439,6 +464,13 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
                     "gateway_contract_version": "tool-gateway.v1",
                     "min_sdk_version": "0.1.0",
                     "sdk_package": "ophanix-tool-gateway-sdk",
+                    "max_payload_bytes": 1_000_000,
+                    "max_response_bytes": 1_000_000,
+                    "max_discovery_page_size": 200,
+                    "supported_pagination_modes": ["cursor", "offset"],
+                    "supports_idempotency": True,
+                    "idempotency_in_progress_ttl_seconds": 600,
+                    "idempotency_replay_retention_seconds": 604800,
                 },
             )
 
@@ -451,6 +483,13 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
         self.assertEqual(compatibility.expected_gateway_contract_version, "tool-gateway.v1")
         self.assertTrue(compatibility.min_sdk_version_satisfied)
         self.assertIsNone(compatibility.incompatibility_reason)
+        self.assertEqual(compatibility.max_payload_bytes, 1_000_000)
+        self.assertEqual(compatibility.max_response_bytes, 1_000_000)
+        self.assertEqual(compatibility.max_discovery_page_size, 200)
+        self.assertEqual(compatibility.supported_pagination_modes, ("cursor", "offset"))
+        self.assertTrue(compatibility.supports_idempotency)
+        self.assertEqual(compatibility.idempotency_in_progress_ttl_seconds, 600)
+        self.assertEqual(compatibility.idempotency_replay_retention_seconds, 604800)
 
     def test_check_compatibility_respects_gateway_min_sdk_version(self) -> None:
         client = _client(
@@ -470,12 +509,60 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
         self.assertFalse(compatibility.min_sdk_version_satisfied)
         self.assertEqual(compatibility.incompatibility_reason, "sdk_version_below_gateway_minimum")
 
+    def test_require_compatible_gateway_checks_once_before_runtime_calls(self) -> None:
+        paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            paths.append(request.url.path)
+            if request.url.path == "/api/v1/gateway/capabilities":
+                return httpx.Response(
+                    200,
+                    json={
+                        "gateway_contract_version": "tool-gateway.v1",
+                        "min_sdk_version": "0.1.0",
+                        "sdk_package": "ophanix-tool-gateway-sdk",
+                    },
+                )
+            return httpx.Response(200, json=[TOOL_FIXTURE])
+
+        client = _client(handler, require_compatible_gateway=True)
+
+        self.assertEqual([tool.name for tool in client.list_tools()], ["claims.lookup"])
+        self.assertEqual([tool.name for tool in client.list_tools()], ["claims.lookup"])
+        self.assertEqual(paths.count("/api/v1/gateway/capabilities"), 1)
+
+    def test_require_compatible_gateway_fails_before_invocation_when_contract_mismatches(self) -> None:
+        paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            paths.append(request.url.path)
+            if request.url.path == "/api/v1/gateway/capabilities":
+                return httpx.Response(
+                    200,
+                    json={
+                        "gateway_contract_version": "tool-gateway.v0",
+                        "min_sdk_version": "0.1.0",
+                        "sdk_package": "ophanix-tool-gateway-sdk",
+                    },
+                )
+            return httpx.Response(200, json={})
+
+        client = _client(handler, require_compatible_gateway=True)
+
+        with self.assertRaises(ToolGatewayError) as raised:
+            client.call_tool("claims.lookup", {"claim_id": "claim_123"})
+
+        self.assertEqual(raised.exception.code, "gateway_contract_version_mismatch")
+        self.assertNotIn("/api/v1/tools/claims.lookup/invoke", paths)
+
     def test_from_config_constructs_client_without_repeating_every_option(self) -> None:
         config = ToolGatewayClientConfig(
             timeout_seconds=2.5,
             cache_tools=True,
             cache_ttl_seconds=10.0,
             discovery_max_retries=0,
+            require_compatible_gateway=True,
+            include_raw_response=True,
         )
 
         client = OphanixToolGatewayClient.from_config(
@@ -491,6 +578,8 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
         self.assertTrue(client.cache_tools)
         self.assertEqual(client.cache_ttl_seconds, 10.0)
         self.assertEqual(client.discovery_max_retries, 0)
+        self.assertTrue(client.require_compatible_gateway)
+        self.assertTrue(client.include_raw_response)
 
     def test_list_all_tools_enforces_max_total(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -713,6 +802,25 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
 
         success = [event for event in events if event["event"] == "tool_call.success"][0]
         self.assertIsInstance(success["elapsed_ms"], float)
+        self.assertEqual(success["schema_version"], "tool-gateway-sdk.telemetry.v1")
+
+    def test_allow_insecure_http_for_non_local_gateway_warns(self) -> None:
+        with self.assertWarns(RuntimeWarning):
+            _client(
+                lambda _request: httpx.Response(200, json=[]),
+                base_url="http://gateway.example.test",
+                allow_insecure_http=True,
+            )
+
+    def test_allow_buffered_custom_http_client_option_warns_but_does_not_bypass_stream_requirement(self) -> None:
+        with self.assertWarns(DeprecationWarning):
+            with self.assertRaisesRegex(ToolGatewayValidationError, "must provide stream"):
+                OphanixToolGatewayClient(
+                    base_url="https://gateway.example.test",
+                    token_provider=StaticTokenProvider("sdk-token"),
+                    http_client=cast(httpx.Client, _BufferedOnlyClient()),
+                    allow_buffered_custom_http_client=True,
+                )
 
     def test_error_response_sanitization_redacts_common_pii_keys(self) -> None:
         client = _client(
@@ -740,17 +848,24 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
 def _client(
     handler: Callable[[httpx.Request], httpx.Response],
     *,
+    base_url: str = "https://gateway.example.test",
     cache_tools: bool = False,
     event_hook: Callable[[Mapping[str, Any]], None] | None = None,
     raise_event_hook_errors: bool = False,
+    allow_insecure_http: bool = False,
+    require_compatible_gateway: bool = False,
+    include_raw_response: bool = False,
 ) -> OphanixToolGatewayClient:
     return OphanixToolGatewayClient(
-        base_url="https://gateway.example.test",
+        base_url=base_url,
         token_provider=StaticTokenProvider("sdk-token"),
         http_client=httpx.Client(transport=httpx.MockTransport(handler)),
         cache_tools=cache_tools,
         event_hook=event_hook,
         raise_event_hook_errors=raise_event_hook_errors,
+        allow_insecure_http=allow_insecure_http,
+        require_compatible_gateway=require_compatible_gateway,
+        include_raw_response=include_raw_response,
     )
 
 
