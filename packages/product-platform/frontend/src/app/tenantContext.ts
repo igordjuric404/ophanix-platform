@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 
 import { useEnvironments, useOrganizations } from "../api/system";
 import type { Environment, Organization, UserPrincipal } from "../api/types";
-import { setApiTenantContext } from "../api/client";
+import { setApiTenantContext, type TenantContext } from "../api/client";
 import { readSelectedEnvironmentId, writeSelectedEnvironmentId } from "../lib/storage";
 
 export interface TenantSelection {
@@ -10,9 +10,11 @@ export interface TenantSelection {
   environments: Environment[];
   selectedOrganization: Organization | null;
   selectedEnvironment: Environment | null;
+  tenantContext: TenantContext;
   setSelectedEnvironmentId: (environmentId: string) => void;
   isLoading: boolean;
   isError: boolean;
+  isReady: boolean;
   error: Error | null;
 }
 
@@ -62,9 +64,11 @@ export function useTenantSelection(user: UserPrincipal): TenantSelection {
     environments: environmentItems,
     selectedOrganization,
     selectedEnvironment,
+    tenantContext: apiTenantContext,
     setSelectedEnvironmentId,
     isLoading: organizations.isLoading || environments.isLoading,
     isError: organizations.isError || environments.isError,
+    isReady: Boolean(selectedOrganization && selectedEnvironment),
     error:
       organizations.error instanceof Error
         ? organizations.error

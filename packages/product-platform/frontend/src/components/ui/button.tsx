@@ -3,7 +3,7 @@ import type { ButtonHTMLAttributes } from "react";
 
 import { cn } from "../../lib/utils";
 
-type ButtonVariant = "default" | "secondary" | "outline" | "ghost" | "destructive";
+export type ButtonVariant = "default" | "secondary" | "outline" | "ghost" | "destructive";
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   asChild?: boolean;
@@ -23,13 +23,9 @@ const variants: Record<ButtonVariant, string> = {
     "border-destructive bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90"
 };
 
-export function Button({
-  asChild = false,
-  className,
-  variant = "default",
-  ...props
-}: ButtonProps) {
+export function Button({ asChild = false, className, variant = "default", ...props }: ButtonProps) {
   const Comp = asChild ? Slot : "button";
+  const buttonProps = asChild ? props : { type: "button" as const, ...props };
   return (
     <Comp
       className={cn(
@@ -37,7 +33,7 @@ export function Button({
         variants[variant],
         className
       )}
-      {...props}
+      {...buttonProps}
     />
   );
 }

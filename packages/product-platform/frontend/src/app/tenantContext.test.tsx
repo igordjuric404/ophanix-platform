@@ -1,8 +1,9 @@
 import { act, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useAgents } from "../api/agents";
 import { apiClient, setApiTenantContext } from "../api/client";
+import { TenantQueryScopeProvider, useTenantQueryScope } from "../api/queryScope";
 import type { UserPrincipal } from "../api/types";
 import { renderWithQueryClient } from "../test/test-utils";
 import { useTenantSelection } from "./tenantContext";
@@ -30,7 +31,17 @@ function AgentsProbe() {
   return <span>{agentsQuery.data?.[0]?.name ?? "Loading agents"}</span>;
 }
 
+function TenantScopeProbe() {
+  const scope = useTenantQueryScope();
+  return <span>{scope.context.environmentId ?? "No environment"}</span>;
+}
+
 describe("useTenantSelection", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    setApiTenantContext({ organizationId: null, environmentId: null });
+  });
+
   it("uses stored environment preference and sends tenant headers through the API client", async () => {
     window.localStorage.setItem("ophanix.selectedEnvironmentId", "env_prod");
     const calls: Array<[string, RequestInit]> = [];
@@ -90,6 +101,20 @@ describe("useTenantSelection", () => {
     expect(await screen.findByText("Production Agent")).toBeInTheDocument();
     expect(calls.map((call) => call.environmentId)).toEqual(["env_default", "env_prod"]);
     expect(queryClient.getQueriesData({ queryKey: ["tenant-scope"] })).toHaveLength(2);
+  });
+
+  it("lets the route tenant provider override stale global context during render", () => {
+    setApiTenantContext({ organizationId: "org_default", environmentId: "env_stale" });
+
+    renderWithQueryClient(
+      <TenantQueryScopeProvider
+        context={{ organizationId: "org_default", environmentId: "env_route" }}
+      >
+        <TenantScopeProbe />
+      </TenantQueryScopeProvider>
+    );
+
+    expect(screen.getByText("env_route")).toBeInTheDocument();
   });
 });
 

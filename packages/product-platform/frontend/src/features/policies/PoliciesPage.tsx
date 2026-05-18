@@ -9,26 +9,13 @@ import {
   Upload,
   X
 } from "lucide-react";
-import {
-  useCallback,
-  useMemo,
-  useState,
-  type FormEvent,
-  type InputHTMLAttributes
-} from "react";
+import { useCallback, useMemo, useState, type FormEvent, type InputHTMLAttributes } from "react";
 import { useQuery } from "@tanstack/react-query";
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Line,
-  LineChart,
-  Tooltip,
-  XAxis,
-  YAxis
-} from "recharts";
+import { Bar, BarChart, CartesianGrid, Line, LineChart, Tooltip, XAxis, YAxis } from "recharts";
 
 import { useAgents, type AgentSummary } from "../../api/agents";
+import type { TenantContext } from "../../api/client";
+import { useCurrentUserPrincipal } from "../../app/userContext";
 import {
   activatePolicyVersion,
   archivePolicyVersion,
@@ -69,6 +56,7 @@ import { useEnvironments } from "../../api/system";
 import type { Environment } from "../../api/types";
 import { PageHeader } from "../../components/layout/PageHeader";
 import { ActionFeedback, useActionFeedback } from "../../components/shared/ActionFeedback";
+import { ConfirmDialog } from "../../components/shared/ConfirmDialog";
 import { EmptyState } from "../../components/shared/EmptyState";
 import { QueryErrorSummary } from "../../components/shared/ErrorState";
 import { StatusBadge } from "../../components/shared/StatusBadge";
@@ -86,9 +74,10 @@ import {
   TableHeader,
   TableRow
 } from "../../components/ui/table";
+import { datetimeLocalToIso } from "../../lib/dates";
 import { useEventStream } from "../../lib/eventSource";
 import { parseJsonObjectField } from "../../lib/forms";
-import { readSelectedEnvironmentId } from "../../lib/storage";
+import { permissions, userHasPermission } from "../../lib/rbac";
 import { cn } from "../../lib/utils";
 
 const targetTypes = [
@@ -111,19 +100,54 @@ export function PoliciesPage() {
   const [editorBackend, setEditorBackend] = useState("native");
   const [exported, setExported] = useState<PolicyExport | null>(null);
   const [evaluationFilters, setEvaluationFilters] = useState<PolicyParams>({});
-  const [extraEvaluationRows, setExtraEvaluationRows] = useState<PolicyEvaluation[]>([]);
-  const [selectedEvaluationId, setSelectedEvaluationId] = useState<string | null>(null);
+  const [extraEvaluationFeed, setExtraEvaluationFeed] = useState<{
+    scopeKey: string;
+    rows: PolicyEvaluation[];
+  }>({ rows: [], scopeKey: "" });
+  const [selectedEvaluation, setSelectedEvaluation] = useState<{
+    id: string | null;
+    scopeKey: string;
+  }>({ id: null, scopeKey: "" });
   const [simulationResult, setSimulationResult] = useState<PolicyEvaluation | null>(null);
   const [simulationError, setSimulationError] = useState<string | null>(null);
   const { feedback, runWithFeedback } = useActionFeedback();
   const scope = useTenantQueryScope();
+  const currentUser = useCurrentUserPrincipal();
+  const canWritePolicies = userHasPermission(currentUser, permissions.POLICY_WRITE);
+  const evaluationTenantScopeKey = `${scope.key.organizationId}:${scope.key.environmentId}`;
+  const extraEvaluationRows = useMemo(
+    () =>
+      extraEvaluationFeed.scopeKey === evaluationTenantScopeKey ? extraEvaluationFeed.rows : [],
+    [evaluationTenantScopeKey, extraEvaluationFeed]
+  );
+  const selectedEvaluationId =
+    selectedEvaluation.scopeKey === evaluationTenantScopeKey ? selectedEvaluation.id : null;
+  const selectEvaluationId = useCallback(
+    (evaluationId: string | null) =>
+      setSelectedEvaluation({ id: evaluationId, scopeKey: evaluationTenantScopeKey }),
+    [evaluationTenantScopeKey]
+  );
+  const upsertExtraEvaluation = useCallback(
+    (evaluation: PolicyEvaluation) =>
+      setExtraEvaluationFeed((feed) => ({
+        rows: upsertPolicyEvaluationFeed(
+          feed.scopeKey === evaluationTenantScopeKey ? feed.rows : [],
+          evaluation
+        ),
+        scopeKey: evaluationTenantScopeKey
+      })),
+    [evaluationTenantScopeKey]
+  );
 
   const policiesQuery = usePolicies(filters);
   const policies = policiesQuery.data ?? [];
   const activePolicyId = selectedPolicyId ?? policies[0]?.id ?? null;
   const detailQuery = usePolicyDetail(activePolicyId);
   const selectedPolicy =
-    detailQuery.data ?? policies.find((policy) => policy.id === activePolicyId) ?? policies[0] ?? null;
+    detailQuery.data ??
+    policies.find((policy) => policy.id === activePolicyId) ??
+    policies[0] ??
+    null;
   const affectedQuery = usePolicyAffectedResources(activePolicyId);
   const bindingsQuery = usePolicyBindings({});
   const exceptionsQuery = usePolicyExceptions({});
@@ -132,8 +156,8 @@ export function PoliciesPage() {
   const evaluationsQuery = usePolicyEvaluations(evaluationFilters);
   const summaryQuery = usePolicyEvaluationSummary(evaluationFilters);
   const evaluationStreamParams = useMemo(
-    () => withSelectedEnvironment(evaluationFilters),
-    [evaluationFilters]
+    () => withSelectedTenant(evaluationFilters, scope.context),
+    [evaluationFilters, scope.context]
   );
   const evaluationStreamQueryKeys = useMemo(
     () => [
@@ -145,11 +169,11 @@ export function PoliciesPage() {
   const handlePolicyEvaluationStreamMessage = useCallback(
     (event: MessageEvent) => {
       const evaluation = parsePolicyEvaluationStreamEvent(event);
-      if (evaluation && policyEvaluationMatchesFilters(evaluation, evaluationFilters)) {
-        setExtraEvaluationRows((rows) => upsertPolicyEvaluationFeed(rows, evaluation));
+      if (evaluation && policyEvaluationMatchesFilters(evaluation, evaluationStreamParams)) {
+        upsertExtraEvaluation(evaluation);
       }
     },
-    [evaluationFilters]
+    [evaluationStreamParams, upsertExtraEvaluation]
   );
   const selectedEvaluationQuery = useQuery({
     enabled: Boolean(selectedEvaluationId),
@@ -160,15 +184,15 @@ export function PoliciesPage() {
   const evaluationRows = useMemo(() => {
     const baseRows = evaluationsQuery.data ?? [];
     const matchingExtraRows = extraEvaluationRows.filter((evaluation) =>
-      policyEvaluationMatchesFilters(evaluation, evaluationFilters)
+      policyEvaluationMatchesFilters(evaluation, evaluationStreamParams)
     );
-    return [...matchingExtraRows].reverse().reduce(
-      (rows, evaluation) => upsertPolicyEvaluationFeed(rows, evaluation),
-      baseRows
-    );
-  }, [evaluationFilters, evaluationsQuery.data, extraEvaluationRows]);
+    return [...matchingExtraRows]
+      .reverse()
+      .reduce((rows, evaluation) => upsertPolicyEvaluationFeed(rows, evaluation), baseRows);
+  }, [evaluationStreamParams, evaluationsQuery.data, extraEvaluationRows]);
 
   useEventStream({
+    enabled: Boolean(scope.context.environmentId && scope.context.organizationId),
     eventName: "policy_evaluation",
     onMessage: handlePolicyEvaluationStreamMessage,
     params: evaluationStreamParams,
@@ -202,19 +226,71 @@ export function PoliciesPage() {
         <ActionFeedback feedback={feedback} />
         <QueryErrorSummary
           items={[
-            { error: policiesQuery.error, isError: policiesQuery.isError, label: "Policy library", onRetry: () => void policiesQuery.refetch() },
-            { error: detailQuery.error, isError: detailQuery.isError, label: "Policy detail", onRetry: () => void detailQuery.refetch() },
-            { error: affectedQuery.error, isError: affectedQuery.isError, label: "Affected resources", onRetry: () => void affectedQuery.refetch() },
-            { error: bindingsQuery.error, isError: bindingsQuery.isError, label: "Policy bindings", onRetry: () => void bindingsQuery.refetch() },
-            { error: exceptionsQuery.error, isError: exceptionsQuery.isError, label: "Policy exceptions", onRetry: () => void exceptionsQuery.refetch() },
-            { error: agentsQuery.error, isError: agentsQuery.isError, label: "Agents", onRetry: () => void agentsQuery.refetch() },
-            { error: environmentsQuery.error, isError: environmentsQuery.isError, label: "Environments", onRetry: () => void environmentsQuery.refetch() },
-            { error: evaluationsQuery.error, isError: evaluationsQuery.isError, label: "Policy evaluations", onRetry: () => void evaluationsQuery.refetch() },
-            { error: summaryQuery.error, isError: summaryQuery.isError, label: "Evaluation summary", onRetry: () => void summaryQuery.refetch() },
-            { error: selectedEvaluationQuery.error, isError: selectedEvaluationQuery.isError, label: "Evaluation detail", onRetry: () => void selectedEvaluationQuery.refetch() }
+            {
+              error: policiesQuery.error,
+              isError: policiesQuery.isError,
+              label: "Policy library",
+              onRetry: () => void policiesQuery.refetch()
+            },
+            {
+              error: detailQuery.error,
+              isError: detailQuery.isError,
+              label: "Policy detail",
+              onRetry: () => void detailQuery.refetch()
+            },
+            {
+              error: affectedQuery.error,
+              isError: affectedQuery.isError,
+              label: "Affected resources",
+              onRetry: () => void affectedQuery.refetch()
+            },
+            {
+              error: bindingsQuery.error,
+              isError: bindingsQuery.isError,
+              label: "Policy bindings",
+              onRetry: () => void bindingsQuery.refetch()
+            },
+            {
+              error: exceptionsQuery.error,
+              isError: exceptionsQuery.isError,
+              label: "Policy exceptions",
+              onRetry: () => void exceptionsQuery.refetch()
+            },
+            {
+              error: agentsQuery.error,
+              isError: agentsQuery.isError,
+              label: "Agents",
+              onRetry: () => void agentsQuery.refetch()
+            },
+            {
+              error: environmentsQuery.error,
+              isError: environmentsQuery.isError,
+              label: "Environments",
+              onRetry: () => void environmentsQuery.refetch()
+            },
+            {
+              error: evaluationsQuery.error,
+              isError: evaluationsQuery.isError,
+              label: "Policy evaluations",
+              onRetry: () => void evaluationsQuery.refetch()
+            },
+            {
+              error: summaryQuery.error,
+              isError: summaryQuery.isError,
+              label: "Evaluation summary",
+              onRetry: () => void summaryQuery.refetch()
+            },
+            {
+              error: selectedEvaluationQuery.error,
+              isError: selectedEvaluationQuery.isError,
+              label: "Evaluation detail",
+              onRetry: () => void selectedEvaluationQuery.refetch()
+            }
           ]}
         />
         <PolicyLibrary
+          canWritePolicies={canWritePolicies}
+          isActionPending={mutation.isPending}
           isLoading={policiesQuery.isLoading}
           onExport={async (policyId) => {
             const result = await runWithFeedback<PolicyExport>(
@@ -232,7 +308,8 @@ export function PoliciesPage() {
           onFilter={(params) => setFilters(params)}
           onImport={async (payload) => {
             const imported = await runWithFeedback<PolicyImportResult>(
-              () => mutation.mutateAsync(() => importPolicy(payload)) as Promise<PolicyImportResult>,
+              () =>
+                mutation.mutateAsync(() => importPolicy(payload)) as Promise<PolicyImportResult>,
               {
                 errorMessage: "Policy import failed",
                 successMessage: (value) => `Imported ${value.policy.id}`
@@ -252,6 +329,8 @@ export function PoliciesPage() {
         />
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(28rem,0.8fr)]">
           <PolicyVersionHistory
+            canWritePolicies={canWritePolicies}
+            isActionPending={mutation.isPending}
             onVersionAction={async (action, versionId) => {
               if (!selectedPolicy?.id) {
                 return;
@@ -281,6 +360,8 @@ export function PoliciesPage() {
             body={editorBody}
             backend={editorBackend}
             bodyFormat={editorFormat}
+            canWritePolicies={canWritePolicies}
+            isActionPending={mutation.isPending}
             lintResult={editorLint}
             onLint={async (payload) => {
               const result = await runWithFeedback<PolicyLintResult>(
@@ -324,23 +405,31 @@ export function PoliciesPage() {
         <PolicyBindingsPanel
           agents={agentsQuery.data ?? []}
           bindings={bindingsQuery.data ?? []}
+          canWritePolicies={canWritePolicies}
           environments={environmentsQuery.data ?? []}
           exceptions={exceptionsQuery.data ?? []}
+          isActionPending={mutation.isPending}
           onCreateBinding={async (payload) => {
             await runTask("Policy binding created", () => createPolicyBinding(payload));
           }}
           onCreateException={async (bindingId, payload) => {
-            await runTask("Policy exception created", () => createPolicyException(bindingId, payload));
+            await runTask("Policy exception created", () =>
+              createPolicyException(bindingId, payload)
+            );
           }}
           onPromote={async (bindingId, payload) => {
-            await runTask("Policy binding promoted", () => promotePolicyBinding(bindingId, payload));
+            await runTask("Policy binding promoted", () =>
+              promotePolicyBinding(bindingId, payload)
+            );
           }}
           policies={policies}
           selectedPolicy={selectedPolicy}
         />
         <div className="grid gap-6 xl:grid-cols-[minmax(24rem,0.75fr)_minmax(0,1fr)]">
           <PolicySimulatorPanel
+            canWritePolicies={canWritePolicies}
             error={simulationError}
+            isActionPending={mutation.isPending}
             onError={setSimulationError}
             onSubmit={async (payload) => {
               try {
@@ -349,7 +438,7 @@ export function PoliciesPage() {
                 )) as PolicyEvaluation;
                 setSimulationResult(result);
                 setSimulationError(null);
-                setExtraEvaluationRows((rows) => upsertPolicyEvaluationFeed(rows, result));
+                upsertExtraEvaluation(result);
               } catch (error) {
                 setSimulationError(error instanceof Error ? error.message : "Simulation failed");
               }
@@ -362,8 +451,8 @@ export function PoliciesPage() {
             evaluations={evaluationRows}
             filters={evaluationFilters}
             onFilter={setEvaluationFilters}
-            onClose={() => setSelectedEvaluationId(null)}
-            onOpen={setSelectedEvaluationId}
+            onClose={() => selectEvaluationId(null)}
+            onOpen={selectEvaluationId}
             selectedEvaluation={
               selectedEvaluationQuery.data ??
               evaluationRows.find((evaluation) => evaluation.id === selectedEvaluationId) ??
@@ -379,6 +468,8 @@ export function PoliciesPage() {
 }
 
 function PolicyLibrary({
+  canWritePolicies,
+  isActionPending,
   isLoading,
   onExport,
   onFilter,
@@ -387,6 +478,8 @@ function PolicyLibrary({
   policies,
   selectedPolicyId
 }: {
+  canWritePolicies: boolean;
+  isActionPending: boolean;
   isLoading: boolean;
   onExport: (policyId: string) => void;
   onFilter: (params: PolicyParams) => void;
@@ -397,7 +490,15 @@ function PolicyLibrary({
 }) {
   function submitFilter(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    onFilter(cleanParamsFromForm(event.currentTarget, ["scope", "status", "backend", "owner_user_id", "tag"]));
+    onFilter(
+      cleanParamsFromForm(event.currentTarget, [
+        "scope",
+        "status",
+        "backend",
+        "owner_user_id",
+        "tag"
+      ])
+    );
   }
 
   function submitImport(event: FormEvent<HTMLFormElement>) {
@@ -435,7 +536,11 @@ function PolicyLibrary({
       </CardHeader>
       <CardContent className="space-y-5">
         <form className="grid gap-3 md:grid-cols-6" onSubmit={submitFilter}>
-          <SelectField label="Scope" name="scope" options={["", "agent", "mcp-tool", "runtime-action", "environment"]} />
+          <SelectField
+            label="Scope"
+            name="scope"
+            options={["", "agent", "mcp-tool", "runtime-action", "environment"]}
+          />
           <SelectField label="Status" name="status" options={["", "draft", "active", "archived"]} />
           <SelectField label="Backend" name="backend" options={["", "native", "opa", "cedar"]} />
           <Field label="Owner" name="owner_user_id" placeholder="user id" />
@@ -482,7 +587,9 @@ function PolicyLibrary({
                       <StatusBadge status={policy.status} />
                     </TableCell>
                     <TableCell>{policy.owner_user_id ?? "unassigned"}</TableCell>
-                    <TableCell>{policy.active_version_number ? `v${policy.active_version_number}` : "none"}</TableCell>
+                    <TableCell>
+                      {policy.active_version_number ? `v${policy.active_version_number}` : "none"}
+                    </TableCell>
                     <TableCell>
                       <div className="flex flex-wrap gap-2">
                         <Button onClick={() => onSelect(policy.id)} type="button" variant="outline">
@@ -502,38 +609,65 @@ function PolicyLibrary({
         ) : (
           <EmptyState description="Import a policy to populate the library." title="No policies" />
         )}
-        <form className="grid gap-3 rounded-md border bg-muted/20 p-4 md:grid-cols-6" onSubmit={submitImport}>
-          <Field label="Name" name="name" placeholder="Inline Policy" />
-          <Field className="md:col-span-2" label="Source path" name="source_path" placeholder="packages/agent-os/examples/policies/default.yaml" />
-          <SelectField label="Format" name="body_format" options={["yaml", "json", "rego", "cedar"]} />
-          <SelectField label="Scope" name="scope" options={["agent", "mcp-tool", "runtime-action", "environment"]} />
-          <SelectField label="Backend" name="backend" options={["native", "opa", "cedar"]} />
-          <Field className="md:col-span-2" label="Tags" name="tags" placeholder="safety, runtime" />
-          <label className="space-y-1 md:col-span-4">
-            <span className="text-sm font-medium">Body</span>
-            <textarea
-              className="min-h-28 w-full rounded-md border bg-background px-3 py-2 text-sm font-mono"
-              name="body_text"
-              spellCheck={false}
+        {canWritePolicies ? (
+          <form
+            className="grid gap-3 rounded-md border bg-muted/20 p-4 md:grid-cols-6"
+            onSubmit={submitImport}
+          >
+            <Field label="Name" name="name" placeholder="Inline Policy" />
+            <Field
+              className="md:col-span-2"
+              label="Source path"
+              name="source_path"
+              placeholder="packages/agent-os/examples/policies/default.yaml"
             />
-          </label>
-          <div className="flex items-end">
-            <Button type="submit">
-              <Upload className="h-4 w-4" />
-              Import
-            </Button>
-          </div>
-        </form>
+            <SelectField
+              label="Format"
+              name="body_format"
+              options={["yaml", "json", "rego", "cedar"]}
+            />
+            <SelectField
+              label="Scope"
+              name="scope"
+              options={["agent", "mcp-tool", "runtime-action", "environment"]}
+            />
+            <SelectField label="Backend" name="backend" options={["native", "opa", "cedar"]} />
+            <Field
+              className="md:col-span-2"
+              label="Tags"
+              name="tags"
+              placeholder="safety, runtime"
+            />
+            <label className="space-y-1 md:col-span-4">
+              <span className="text-sm font-medium">Body</span>
+              <textarea
+                className="min-h-28 w-full rounded-md border bg-background px-3 py-2 text-sm font-mono"
+                name="body_text"
+                spellCheck={false}
+              />
+            </label>
+            <div className="flex items-end">
+              <Button disabled={isActionPending} type="submit">
+                <Upload className="h-4 w-4" />
+                Import
+              </Button>
+            </div>
+          </form>
+        ) : null}
       </CardContent>
     </Card>
   );
 }
 
 function PolicyVersionHistory({
+  canWritePolicies,
+  isActionPending,
   onVersionAction,
   policy,
   versions
 }: {
+  canWritePolicies: boolean;
+  isActionPending: boolean;
   onVersionAction: (action: "activate" | "rollback" | "archive", versionId: string) => void;
   policy: PolicyDetail | PolicySummary | null;
   versions: PolicyVersion[];
@@ -554,7 +688,7 @@ function PolicyVersionHistory({
                   <TableHead>Backend</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Checksum</TableHead>
-                  <TableHead>Actions</TableHead>
+                  {canWritePolicies ? <TableHead>Actions</TableHead> : null}
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -569,20 +703,45 @@ function PolicyVersionHistory({
                       <StatusBadge status={version.status} />
                     </TableCell>
                     <TableCell className="max-w-44 truncate">{version.checksum ?? "n/a"}</TableCell>
-                    <TableCell>
-                      <div className="flex flex-wrap gap-2">
-                        <Button onClick={() => onVersionAction("activate", version.id)} type="button" variant="outline">
-                          Activate
-                        </Button>
-                        <Button onClick={() => onVersionAction("rollback", version.id)} type="button" variant="ghost">
-                          <RotateCcw className="h-4 w-4" />
-                          Rollback
-                        </Button>
-                        <Button onClick={() => onVersionAction("archive", version.id)} type="button" variant="ghost">
-                          Archive
-                        </Button>
-                      </div>
-                    </TableCell>
+                    {canWritePolicies ? (
+                      <TableCell>
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            disabled={isActionPending}
+                            onClick={() => onVersionAction("activate", version.id)}
+                            type="button"
+                            variant="outline"
+                          >
+                            Activate
+                          </Button>
+                          <ConfirmDialog
+                            confirmLabel="Rollback"
+                            description={`Rollback ${policy.name} to version ${version.version_number}. This changes the active version for governed traffic.`}
+                            isPending={isActionPending}
+                            onConfirm={() => onVersionAction("rollback", version.id)}
+                            title="Rollback policy version?"
+                            trigger={
+                              <Button disabled={isActionPending} type="button" variant="ghost">
+                                <RotateCcw className="h-4 w-4" />
+                                Rollback
+                              </Button>
+                            }
+                          />
+                          <ConfirmDialog
+                            confirmLabel="Archive"
+                            description={`Archive version ${version.version_number} of ${policy.name}. Archived versions should not be used for new policy changes.`}
+                            isPending={isActionPending}
+                            onConfirm={() => onVersionAction("archive", version.id)}
+                            title="Archive policy version?"
+                            trigger={
+                              <Button disabled={isActionPending} type="button" variant="ghost">
+                                Archive
+                              </Button>
+                            }
+                          />
+                        </div>
+                      </TableCell>
+                    ) : null}
                   </TableRow>
                 ))}
               </TableBody>
@@ -601,6 +760,8 @@ function PolicyEditorPanel({
   backend,
   body,
   bodyFormat,
+  canWritePolicies,
+  isActionPending,
   lintResult,
   onLint,
   onSave,
@@ -610,13 +771,17 @@ function PolicyEditorPanel({
   backend: string;
   body: string | null;
   bodyFormat: string;
+  canWritePolicies: boolean;
+  isActionPending: boolean;
   lintResult: PolicyLintResult | null;
   onLint: (payload: Record<string, unknown>) => void;
   onSave: (payload: Record<string, unknown>) => void;
   policy: PolicyDetail | PolicySummary | null;
 }) {
   const version = policy?.versions?.[0];
-  const fatal = (lintResult?.issues ?? []).some((issue) => issue.fatal || issue.severity === "error");
+  const fatal = (lintResult?.issues ?? []).some(
+    (issue) => issue.fatal || issue.severity === "error"
+  );
 
   function payloadFromForm(form: HTMLFormElement) {
     const data = new FormData(form);
@@ -654,26 +819,42 @@ function PolicyEditorPanel({
           className="space-y-4"
           onSubmit={(event) => {
             event.preventDefault();
+            if (!canWritePolicies) {
+              return;
+            }
             onSave(payloadFromForm(event.currentTarget));
           }}
         >
           <div className="grid gap-3 md:grid-cols-3">
-            <SelectField defaultValue={backend || version?.backend || "native"} label="Backend" name="backend" options={["native", "opa", "cedar"]} />
-            <SelectField defaultValue={bodyFormat || version?.body_format || "yaml"} label="Format" name="body_format" options={["yaml", "json", "rego", "cedar"]} />
-            <div className="flex items-end">
-              <Button
-                onClick={(event) => {
-                  const form = event.currentTarget.form;
-                  if (form) {
-                    onLint(payloadFromForm(form));
-                  }
-                }}
-                type="button"
-                variant="outline"
-              >
-                Lint
-              </Button>
-            </div>
+            <SelectField
+              defaultValue={backend || version?.backend || "native"}
+              label="Backend"
+              name="backend"
+              options={["native", "opa", "cedar"]}
+            />
+            <SelectField
+              defaultValue={bodyFormat || version?.body_format || "yaml"}
+              label="Format"
+              name="body_format"
+              options={["yaml", "json", "rego", "cedar"]}
+            />
+            {canWritePolicies ? (
+              <div className="flex items-end">
+                <Button
+                  disabled={isActionPending}
+                  onClick={(event) => {
+                    const form = event.currentTarget.form;
+                    if (form) {
+                      onLint(payloadFromForm(form));
+                    }
+                  }}
+                  type="button"
+                  variant="outline"
+                >
+                  Lint
+                </Button>
+              </div>
+            ) : null}
           </div>
           <label className="space-y-1">
             <span className="text-sm font-medium">Body</span>
@@ -681,13 +862,16 @@ function PolicyEditorPanel({
               className="min-h-72 w-full rounded-md border bg-background px-3 py-2 text-sm font-mono"
               defaultValue={body ?? version?.body_text ?? ""}
               name="body_text"
+              readOnly={!canWritePolicies}
               spellCheck={false}
             />
           </label>
           <PolicyLintPanel lintResult={lintResult} />
-          <Button data-policy-save-version disabled={fatal} type="submit">
-            Save Version
-          </Button>
+          {canWritePolicies ? (
+            <Button data-policy-save-version disabled={fatal || isActionPending} type="submit">
+              Save Version
+            </Button>
+          ) : null}
         </form>
         <AffectedResourcesPanel affected={affected} />
       </CardContent>
@@ -717,12 +901,18 @@ function PolicyLintPanel({ lintResult }: { lintResult: PolicyLintResult | null }
       {lintResult.issues?.length ? (
         <ol className="mt-3 space-y-2" data-policy-lint-issues>
           {lintResult.issues.map((issue) => (
-            <li className="rounded-md bg-muted px-3 py-2 text-sm" data-policy-lint-issue={issue.code} key={`${issue.code}-${issue.path}`}>
+            <li
+              className="rounded-md bg-muted px-3 py-2 text-sm"
+              data-policy-lint-issue={issue.code}
+              key={`${issue.code}-${issue.path}`}
+            >
               <div className="flex flex-wrap gap-2">
                 <StatusBadge status={issue.severity} />
                 <strong>{issue.code}</strong>
                 <span className="text-muted-foreground">{issue.path}</span>
-                {issue.line ? <span className="text-muted-foreground">line {issue.line}</span> : null}
+                {issue.line ? (
+                  <span className="text-muted-foreground">line {issue.line}</span>
+                ) : null}
               </div>
               <p className="mt-1">{issue.message}</p>
             </li>
@@ -751,7 +941,10 @@ function AffectedResourcesPanel({ affected }: { affected: PolicyAffectedResource
         <Table className="mt-3" data-policy-affected-table>
           <TableBody>
             {resources.map((resource) => (
-              <TableRow data-policy-affected-resource={resource.target_id} key={`${resource.target_type}-${resource.target_id}`}>
+              <TableRow
+                data-policy-affected-resource={resource.target_id}
+                key={`${resource.target_type}-${resource.target_id}`}
+              >
                 <TableCell>
                   <strong>{resource.label ?? resource.target_id}</strong>
                   <small className="block text-muted-foreground">{resource.target_id}</small>
@@ -773,8 +966,10 @@ function AffectedResourcesPanel({ affected }: { affected: PolicyAffectedResource
 function PolicyBindingsPanel({
   agents,
   bindings,
+  canWritePolicies,
   environments,
   exceptions,
+  isActionPending,
   onCreateBinding,
   onCreateException,
   onPromote,
@@ -783,8 +978,10 @@ function PolicyBindingsPanel({
 }: {
   agents: AgentSummary[];
   bindings: PolicyBinding[];
+  canWritePolicies: boolean;
   environments: Environment[];
   exceptions: PolicyException[];
+  isActionPending: boolean;
   onCreateBinding: (payload: Record<string, unknown>) => void;
   onCreateException: (bindingId: string, payload: Record<string, unknown>) => void;
   onPromote: (bindingId: string, payload: Record<string, unknown>) => void;
@@ -794,7 +991,10 @@ function PolicyBindingsPanel({
   const targetOptions = useMemo(
     () => [
       ...agents.map((agent) => ({ id: agent.id, label: `${agent.name} - agent` })),
-      ...environments.map((environment) => ({ id: environment.id, label: `${environment.name} - environment` }))
+      ...environments.map((environment) => ({
+        id: environment.id,
+        label: `${environment.name} - environment`
+      }))
     ],
     [agents, environments]
   );
@@ -822,50 +1022,66 @@ function PolicyBindingsPanel({
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-5">
-        <form className="grid gap-3 md:grid-cols-8" onSubmit={submitCreate}>
-          <label className="space-y-1 md:col-span-2">
-            <span className="text-sm font-medium">Policy</span>
-            <select
-              className="h-9 w-full rounded-md border bg-background px-3 text-sm"
-              defaultValue={selectedPolicy?.id ?? policies[0]?.id ?? ""}
-              name="policy_id"
-              required
-            >
-              {policies.map((policy) => (
-                <option key={policy.id} value={policy.id}>
-                  {policy.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="space-y-1">
-            <span className="text-sm font-medium">Version</span>
-            <select className="h-9 w-full rounded-md border bg-background px-3 text-sm" name="policy_version_id">
-              <option value="">Latest active</option>
-              {(selectedPolicy?.versions ?? []).map((version) => (
-                <option key={version.id} value={version.id}>
-                  v{version.version_number} - {version.status}
-                </option>
-              ))}
-            </select>
-          </label>
-          <SelectField label="Target Type" name="target_type" options={targetTypes} />
-          <label className="space-y-1 md:col-span-2">
-            <span className="text-sm font-medium">Target</span>
-            <Input list="policy-binding-target-options" name="target_id" placeholder="agent id or resource key" required />
-            <datalist id="policy-binding-target-options">
-              {targetOptions.map((option) => (
-                <option key={option.id} label={option.label} value={option.id} />
-              ))}
-            </datalist>
-          </label>
-          <SelectField label="Mode" name="mode" options={["shadow", "audit-only", "enforce", "disabled"]} />
-          <Field label="Rollout" name="rollout_percentage" type="number" defaultValue="100" />
-          <Field label="Priority" name="priority" type="number" defaultValue="0" />
-          <div className="flex items-end md:col-span-8">
-            <Button type="submit">Create Binding</Button>
-          </div>
-        </form>
+        {canWritePolicies ? (
+          <form className="grid gap-3 md:grid-cols-8" onSubmit={submitCreate}>
+            <label className="space-y-1 md:col-span-2">
+              <span className="text-sm font-medium">Policy</span>
+              <select
+                className="h-9 w-full rounded-md border bg-background px-3 text-sm"
+                defaultValue={selectedPolicy?.id ?? policies[0]?.id ?? ""}
+                name="policy_id"
+                required
+              >
+                {policies.map((policy) => (
+                  <option key={policy.id} value={policy.id}>
+                    {policy.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="space-y-1">
+              <span className="text-sm font-medium">Version</span>
+              <select
+                className="h-9 w-full rounded-md border bg-background px-3 text-sm"
+                name="policy_version_id"
+              >
+                <option value="">Latest active</option>
+                {(selectedPolicy?.versions ?? []).map((version) => (
+                  <option key={version.id} value={version.id}>
+                    v{version.version_number} - {version.status}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <SelectField label="Target Type" name="target_type" options={targetTypes} />
+            <label className="space-y-1 md:col-span-2">
+              <span className="text-sm font-medium">Target</span>
+              <Input
+                list="policy-binding-target-options"
+                name="target_id"
+                placeholder="agent id or resource key"
+                required
+              />
+              <datalist id="policy-binding-target-options">
+                {targetOptions.map((option) => (
+                  <option key={option.id} label={option.label} value={option.id} />
+                ))}
+              </datalist>
+            </label>
+            <SelectField
+              label="Mode"
+              name="mode"
+              options={["shadow", "audit-only", "enforce", "disabled"]}
+            />
+            <Field label="Rollout" name="rollout_percentage" type="number" defaultValue="100" />
+            <Field label="Priority" name="priority" type="number" defaultValue="0" />
+            <div className="flex items-end md:col-span-8">
+              <Button disabled={isActionPending} type="submit">
+                Create Binding
+              </Button>
+            </div>
+          </form>
+        ) : null}
         {bindings.length ? (
           <div className="overflow-x-auto">
             <Table className="min-w-[64rem]" data-policy-binding-matrix>
@@ -876,13 +1092,15 @@ function PolicyBindingsPanel({
                   <TableHead>Mode</TableHead>
                   <TableHead>Rollout</TableHead>
                   <TableHead>Exceptions</TableHead>
-                  <TableHead>Controls</TableHead>
+                  {canWritePolicies ? <TableHead>Controls</TableHead> : null}
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {bindings.map((binding) => {
                   const policy = policies.find((item) => item.id === binding.policy_id);
-                  const bindingExceptions = exceptions.filter((exception) => exception.binding_id === binding.id);
+                  const bindingExceptions = exceptions.filter(
+                    (exception) => exception.binding_id === binding.id
+                  );
                   return (
                     <TableRow data-policy-binding-row={binding.id} key={binding.id}>
                       <TableCell>
@@ -893,7 +1111,9 @@ function PolicyBindingsPanel({
                       </TableCell>
                       <TableCell>
                         <strong>{policy?.name ?? binding.policy_id}</strong>
-                        <small className="block text-muted-foreground">{binding.policy_version_id ?? "active"}</small>
+                        <small className="block text-muted-foreground">
+                          {binding.policy_version_id ?? "active"}
+                        </small>
                       </TableCell>
                       <TableCell>
                         <StatusBadge status={binding.mode} />
@@ -905,7 +1125,9 @@ function PolicyBindingsPanel({
                             {bindingExceptions.map((exception) => (
                               <li key={exception.id}>
                                 <span>{exception.reason}</span>
-                                <small className="block text-muted-foreground">{exception.expires_at ?? "no expiry"}</small>
+                                <small className="block text-muted-foreground">
+                                  {exception.expires_at ?? "no expiry"}
+                                </small>
                               </li>
                             ))}
                           </ul>
@@ -913,13 +1135,16 @@ function PolicyBindingsPanel({
                           "none"
                         )}
                       </TableCell>
-                      <TableCell>
-                        <BindingControls
-                          binding={binding}
-                          onCreateException={onCreateException}
-                          onPromote={onPromote}
-                        />
-                      </TableCell>
+                      {canWritePolicies ? (
+                        <TableCell>
+                          <BindingControls
+                            binding={binding}
+                            isActionPending={isActionPending}
+                            onCreateException={onCreateException}
+                            onPromote={onPromote}
+                          />
+                        </TableCell>
+                      ) : null}
                     </TableRow>
                   );
                 })}
@@ -927,7 +1152,10 @@ function PolicyBindingsPanel({
             </Table>
           </div>
         ) : (
-          <EmptyState description="Create a binding to attach policy to a governed resource." title="No bindings" />
+          <EmptyState
+            description="Create a binding to attach policy to a governed resource."
+            title="No bindings"
+          />
         )}
       </CardContent>
     </Card>
@@ -936,10 +1164,12 @@ function PolicyBindingsPanel({
 
 function BindingControls({
   binding,
+  isActionPending,
   onCreateException,
   onPromote
 }: {
   binding: PolicyBinding;
+  isActionPending: boolean;
   onCreateException: (bindingId: string, payload: Record<string, unknown>) => void;
   onPromote: (bindingId: string, payload: Record<string, unknown>) => void;
 }) {
@@ -952,23 +1182,33 @@ function BindingControls({
           const form = new FormData(event.currentTarget);
           onPromote(binding.id, {
             mode: formString(form, "mode"),
-            rollout_percentage: Number(formString(form, "rollout_percentage") || binding.rollout_percentage),
+            rollout_percentage: Number(
+              formString(form, "rollout_percentage") || binding.rollout_percentage
+            ),
             reason: formString(form, "reason")
           });
         }}
       >
         <div className="grid grid-cols-[1fr_5rem] gap-2">
-          <select className="h-9 rounded-md border bg-background px-3 text-sm" defaultValue={binding.mode} name="mode">
+          <select
+            className="h-9 rounded-md border bg-background px-3 text-sm"
+            defaultValue={binding.mode}
+            name="mode"
+          >
             {["shadow", "audit-only", "enforce", "disabled"].map((mode) => (
               <option key={mode} value={mode}>
                 {mode}
               </option>
             ))}
           </select>
-          <Input name="rollout_percentage" type="number" defaultValue={binding.rollout_percentage} />
+          <Input
+            name="rollout_percentage"
+            type="number"
+            defaultValue={binding.rollout_percentage}
+          />
         </div>
         <Input name="reason" placeholder="Promotion reason" required />
-        <Button type="submit" variant="outline">
+        <Button disabled={isActionPending} type="submit" variant="outline">
           Promote
         </Button>
       </form>
@@ -1001,7 +1241,7 @@ function BindingControls({
           <input name="no_expiry_approved" type="checkbox" />
           No expiry approved
         </label>
-        <Button type="submit" variant="ghost">
+        <Button disabled={isActionPending} type="submit" variant="ghost">
           Exception
         </Button>
       </form>
@@ -1010,14 +1250,18 @@ function BindingControls({
 }
 
 function PolicySimulatorPanel({
+  canWritePolicies,
   error,
+  isActionPending,
   onError,
   onSubmit,
   policies,
   result,
   selectedPolicy
 }: {
+  canWritePolicies: boolean;
   error: string | null;
+  isActionPending: boolean;
   onError: (message: string) => void;
   onSubmit: (payload: Record<string, unknown>) => void;
   policies: PolicySummary[];
@@ -1026,6 +1270,9 @@ function PolicySimulatorPanel({
 }) {
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!canWritePolicies) {
+      return;
+    }
     try {
       const form = new FormData(event.currentTarget);
       onSubmit({
@@ -1071,7 +1318,10 @@ function PolicySimulatorPanel({
           </label>
           <label className="space-y-1">
             <span className="text-sm font-medium">Version</span>
-            <select className="h-9 w-full rounded-md border bg-background px-3 text-sm" name="policy_version_id">
+            <select
+              className="h-9 w-full rounded-md border bg-background px-3 text-sm"
+              name="policy_version_id"
+            >
               <option value="">Latest active</option>
               {(selectedPolicy?.versions ?? []).map((version) => (
                 <option key={version.id} value={version.id}>
@@ -1080,7 +1330,18 @@ function PolicySimulatorPanel({
               ))}
             </select>
           </label>
-          <SelectField label="Target Type" name="target_type" options={["", "agent", "environment", "mcp-tool", "runtime-action", "framework-connector"]} />
+          <SelectField
+            label="Target Type"
+            name="target_type"
+            options={[
+              "",
+              "agent",
+              "environment",
+              "mcp-tool",
+              "runtime-action",
+              "framework-connector"
+            ]}
+          />
           <Field label="Target" name="target_id" placeholder="target id" />
           <Field label="Agent" name="agent_id" placeholder="agent id" />
           <Field label="Action" name="action" required defaultValue="mcp.tool_call" />
@@ -1096,7 +1357,9 @@ function PolicySimulatorPanel({
             />
           </label>
           <div className="md:col-span-2">
-            <Button type="submit">Simulate</Button>
+            <Button disabled={isActionPending || !canWritePolicies} type="submit">
+              Simulate
+            </Button>
           </div>
         </form>
         {error ? <p className="feedback-danger">{error}</p> : null}
@@ -1108,10 +1371,15 @@ function PolicySimulatorPanel({
 
 function PolicyEvaluationResult({ evaluation }: { evaluation: PolicyEvaluation | null }) {
   if (!evaluation) {
-    return <EmptyState description="Run a simulation to render a decision." title="No simulation" />;
+    return (
+      <EmptyState description="Run a simulation to render a decision." title="No simulation" />
+    );
   }
   return (
-    <section className="rounded-md border p-3" data-policy-simulator-result={evaluation.id ?? "transient"}>
+    <section
+      className="rounded-md border p-3"
+      data-policy-simulator-result={evaluation.id ?? "transient"}
+    >
       <div className="flex flex-wrap items-center gap-2">
         <StatusBadge status={evaluation.decision} />
         <strong>{evaluation.matched_rule ?? "default"}</strong>
@@ -1141,7 +1409,16 @@ function PolicyEvaluationFeed({
 }) {
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    onFilter(cleanParamsFromForm(event.currentTarget, ["decision", "mode", "agent_id", "action", "policy_id", "correlation_id"]));
+    onFilter(
+      cleanParamsFromForm(event.currentTarget, [
+        "decision",
+        "mode",
+        "agent_id",
+        "action",
+        "policy_id",
+        "correlation_id"
+      ])
+    );
   }
 
   return (
@@ -1155,12 +1432,26 @@ function PolicyEvaluationFeed({
       <CardContent className="space-y-4">
         <PolicyEvaluationSummaryPanel summary={summary} />
         <form className="grid gap-3 md:grid-cols-7" onSubmit={submit}>
-          <SelectField defaultValue={String(filters.decision ?? "")} label="Decision" name="decision" options={["", "allow", "deny"]} />
-          <SelectField defaultValue={String(filters.mode ?? "")} label="Mode" name="mode" options={["", "simulate", "live"]} />
+          <SelectField
+            defaultValue={String(filters.decision ?? "")}
+            label="Decision"
+            name="decision"
+            options={["", "allow", "deny"]}
+          />
+          <SelectField
+            defaultValue={String(filters.mode ?? "")}
+            label="Mode"
+            name="mode"
+            options={["", "simulate", "live"]}
+          />
           <Field label="Agent" name="agent_id" defaultValue={String(filters.agent_id ?? "")} />
           <Field label="Action" name="action" defaultValue={String(filters.action ?? "")} />
           <Field label="Policy" name="policy_id" defaultValue={String(filters.policy_id ?? "")} />
-          <Field label="Correlation" name="correlation_id" defaultValue={String(filters.correlation_id ?? "")} />
+          <Field
+            label="Correlation"
+            name="correlation_id"
+            defaultValue={String(filters.correlation_id ?? "")}
+          />
           <div className="flex items-end">
             <Button type="submit" variant="outline">
               Filter
@@ -1190,7 +1481,9 @@ function PolicyEvaluationFeed({
                     </TableCell>
                     <TableCell>
                       <strong>{evaluation.action}</strong>
-                      <small className="block text-muted-foreground">{evaluation.agent_id ?? "no agent"}</small>
+                      <small className="block text-muted-foreground">
+                        {evaluation.agent_id ?? "no agent"}
+                      </small>
                     </TableCell>
                     <TableCell>{evaluation.policy_id ?? evaluation.backend ?? "unbound"}</TableCell>
                     <TableCell>{evaluation.matched_rule ?? "default"}</TableCell>
@@ -1238,10 +1531,15 @@ function PolicyDecisionTrendChart({ summary }: { summary: PolicyEvaluationSummar
   return (
     <div className="rounded-md border bg-muted/20 p-4" data-policy-evaluation-trends>
       <div className="text-sm font-medium">Decision Trend</div>
-      <p className="text-xs text-muted-foreground">Allow and deny decisions over summary buckets.</p>
+      <p className="text-xs text-muted-foreground">
+        Allow and deny decisions over summary buckets.
+      </p>
       {rows.length === 0 ? (
         <div className="mt-4">
-          <EmptyState title="No decision trend" description="Run evaluations to populate trend buckets." />
+          <EmptyState
+            title="No decision trend"
+            description="Run evaluations to populate trend buckets."
+          />
         </div>
       ) : (
         <>
@@ -1312,7 +1610,10 @@ function PolicyActionDistributionChart({ summary }: { summary: PolicyEvaluationS
       <p className="text-xs text-muted-foreground">Evaluation volume by governed action.</p>
       {rows.length === 0 ? (
         <div className="mt-4">
-          <EmptyState title="No action counts" description="Action counts appear after evaluations run." />
+          <EmptyState
+            title="No action counts"
+            description="Action counts appear after evaluations run."
+          />
         </div>
       ) : (
         <>
@@ -1325,10 +1626,23 @@ function PolicyActionDistributionChart({ summary }: { summary: PolicyEvaluationS
               width={540}
             >
               <CartesianGrid strokeDasharray="3 3" vertical={false} />
-              <XAxis angle={-18} dataKey="action" height={56} interval={0} textAnchor="end" tickLine={false} />
+              <XAxis
+                angle={-18}
+                dataKey="action"
+                height={56}
+                interval={0}
+                textAnchor="end"
+                tickLine={false}
+              />
               <YAxis allowDecimals={false} tickLine={false} />
               <Tooltip />
-              <Bar dataKey="count" fill="#2563eb" isAnimationActive={false} name="Evaluations" radius={[4, 4, 0, 0]} />
+              <Bar
+                dataKey="count"
+                fill="#2563eb"
+                isAnimationActive={false}
+                name="Evaluations"
+                radius={[4, 4, 0, 0]}
+              />
             </BarChart>
           </div>
           <Table>
@@ -1363,48 +1677,51 @@ function PolicyEvaluationDetailDrawer({
   return (
     <Dialog open={Boolean(evaluation)} onOpenChange={(open) => !open && onClose()}>
       {evaluation ? (
-      <DialogContent
-        aria-label={`Policy evaluation ${evaluation.id}`}
-        className="left-auto right-0 top-0 h-dvh w-full max-w-xl translate-x-0 translate-y-0 overflow-y-auto rounded-none border-y-0 border-l border-r-0 bg-background p-6 shadow-xl"
-        data-policy-evaluation-detail={evaluation.id}
-        showCloseButton={false}
-      >
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <DialogTitle className="text-lg font-semibold">
-              {evaluation.decision} - {evaluation.action}
-            </DialogTitle>
-            <DialogDescription className="mt-1 text-sm text-muted-foreground">
-              {evaluation.correlation_id ?? "No correlation id"}
-            </DialogDescription>
+        <DialogContent
+          aria-label={`Policy evaluation ${evaluation.id}`}
+          className="left-auto right-0 top-0 h-dvh w-full max-w-xl translate-x-0 translate-y-0 overflow-y-auto rounded-none border-y-0 border-l border-r-0 bg-background p-6 shadow-xl"
+          data-policy-evaluation-detail={evaluation.id}
+          showCloseButton={false}
+        >
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <DialogTitle className="text-lg font-semibold">
+                {evaluation.decision} - {evaluation.action}
+              </DialogTitle>
+              <DialogDescription className="mt-1 text-sm text-muted-foreground">
+                {evaluation.correlation_id ?? "No correlation id"}
+              </DialogDescription>
+            </div>
+            <div className="flex items-center gap-2">
+              <Badge tone="muted">{evaluation.backend ?? "native"}</Badge>
+              <Button
+                aria-label="Close policy evaluation detail"
+                onClick={onClose}
+                type="button"
+                variant="ghost"
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <Badge tone="muted">{evaluation.backend ?? "native"}</Badge>
-            <Button
-              aria-label="Close policy evaluation detail"
-              onClick={onClose}
-              type="button"
-              variant="ghost"
-            >
-              <X className="h-4 w-4" />
-            </Button>
+          <dl className="mt-5 grid gap-3 text-sm md:grid-cols-2">
+            <KeyValue label="Reason" value={evaluation.reason ?? "n/a"} />
+            <KeyValue label="Policy" value={evaluation.policy_id ?? "unbound"} />
+            <KeyValue label="Version" value={evaluation.policy_version_id ?? "n/a"} />
+            <KeyValue label="Matched Rule" value={evaluation.matched_rule ?? "default"} />
+            <KeyValue
+              label="Resource"
+              value={`${evaluation.resource_type ?? "n/a"} / ${evaluation.resource_id ?? "n/a"}`}
+            />
+            <KeyValue label="Latency" value={`${evaluation.latency_ms ?? 0}ms`} />
+          </dl>
+          <div className="mt-5">
+            <div className="text-sm font-medium">Context Payload</div>
+            <pre className="mt-2 max-h-72 overflow-auto rounded-md bg-muted p-3 text-xs">
+              {JSON.stringify(evaluation.context ?? {}, null, 2)}
+            </pre>
           </div>
-        </div>
-        <dl className="mt-5 grid gap-3 text-sm md:grid-cols-2">
-          <KeyValue label="Reason" value={evaluation.reason ?? "n/a"} />
-          <KeyValue label="Policy" value={evaluation.policy_id ?? "unbound"} />
-          <KeyValue label="Version" value={evaluation.policy_version_id ?? "n/a"} />
-          <KeyValue label="Matched Rule" value={evaluation.matched_rule ?? "default"} />
-          <KeyValue label="Resource" value={`${evaluation.resource_type ?? "n/a"} / ${evaluation.resource_id ?? "n/a"}`} />
-          <KeyValue label="Latency" value={`${evaluation.latency_ms ?? 0}ms`} />
-        </dl>
-        <div className="mt-5">
-          <div className="text-sm font-medium">Context Payload</div>
-          <pre className="mt-2 max-h-72 overflow-auto rounded-md bg-muted p-3 text-xs">
-            {JSON.stringify(evaluation.context ?? {}, null, 2)}
-          </pre>
-        </div>
-      </DialogContent>
+        </DialogContent>
       ) : null}
     </Dialog>
   );
@@ -1417,7 +1734,9 @@ function PolicyExportPanel({ exported }: { exported: PolicyExport }) {
         <CardTitle>{exported.filename ?? "Policy export"}</CardTitle>
       </CardHeader>
       <CardContent>
-        <pre className="max-h-96 overflow-auto rounded-md bg-muted p-4 text-xs">{exported.body_text}</pre>
+        <pre className="max-h-96 overflow-auto rounded-md bg-muted p-4 text-xs">
+          {exported.body_text}
+        </pre>
       </CardContent>
     </Card>
   );
@@ -1489,7 +1808,16 @@ export function policyEvaluationMatchesFilters(
   evaluation: PolicyEvaluation,
   filters: PolicyParams = {}
 ) {
-  return ["decision", "mode", "agent_id", "action", "policy_id", "correlation_id"].every((key) => {
+  return [
+    "decision",
+    "mode",
+    "agent_id",
+    "action",
+    "policy_id",
+    "correlation_id",
+    "organization_id",
+    "environment_id"
+  ].every((key) => {
     const expected = filters[key];
     if (expected === undefined || expected === null || expected === "") {
       return true;
@@ -1525,9 +1853,16 @@ function readPolicyIdFromUrl() {
   return new URL(window.location.href).searchParams.get("policy_id");
 }
 
-function withSelectedEnvironment(params: PolicyParams) {
-  const environmentId = readSelectedEnvironmentId();
-  return environmentId && !params.environment_id ? { ...params, environment_id: environmentId } : params;
+function withSelectedTenant(params: PolicyParams, context: TenantContext) {
+  return {
+    ...params,
+    ...(!params.organization_id && context.organizationId
+      ? { organization_id: context.organizationId }
+      : {}),
+    ...(!params.environment_id && context.environmentId
+      ? { environment_id: context.environmentId }
+      : {})
+  };
 }
 
 function formString(form: FormData, key: string) {
@@ -1537,24 +1872,12 @@ function formString(form: FormData, key: string) {
 function cleanParamsFromForm(form: HTMLFormElement, keys: string[]) {
   const data = new FormData(form);
   return Object.fromEntries(
-    keys
-      .map((key) => [key, formString(data, key)])
-      .filter(([, value]) => value !== "")
+    keys.map((key) => [key, formString(data, key)]).filter(([, value]) => value !== "")
   );
 }
 
 function parseContextJson(value: string) {
   return parseJsonObjectField(value, "Context JSON", { emptyFallback: {} });
-}
-
-function datetimeLocalToIso(value: string) {
-  if (!value) {
-    return undefined;
-  }
-  if (value.endsWith("Z") || /[+-]\d\d:\d\d$/.test(value)) {
-    return value;
-  }
-  return `${value}:00+00:00`;
 }
 
 function backendHint(backend: string) {
@@ -1572,7 +1895,10 @@ function targetLabel(binding: PolicyBinding, agents: AgentSummary[], environment
     return agents.find((agent) => agent.id === binding.target_id)?.name ?? binding.target_id;
   }
   if (binding.target_type === "environment") {
-    return environments.find((environment) => environment.id === binding.target_id)?.name ?? binding.target_id;
+    return (
+      environments.find((environment) => environment.id === binding.target_id)?.name ??
+      binding.target_id
+    );
   }
   return binding.target_id;
 }

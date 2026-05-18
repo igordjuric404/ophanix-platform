@@ -10,6 +10,7 @@ import {
 import { LoginScreen } from "../components/auth/LoginScreen";
 import { RequireAuth } from "../components/auth/RequireAuth";
 import { AppShell } from "../components/layout/AppShell";
+import { ErrorState } from "../components/shared/ErrorState";
 import { AgentsPage } from "../features/agents/AgentsPage";
 import { CompliancePage } from "../features/compliance/CompliancePage";
 import { DemoLabPage } from "../features/demo/DemoLabPage";
@@ -50,6 +51,12 @@ function ProtectedLayout() {
 
 const rootRoute = createRootRoute({
   component: Outlet,
+  errorComponent: ({ error, reset }) => (
+    <ErrorState
+      message={error instanceof Error ? error.message : "Route rendering failed."}
+      onRetry={reset}
+    />
+  ),
   notFoundComponent: () => (
     <RequireAuth>
       {(user) => (

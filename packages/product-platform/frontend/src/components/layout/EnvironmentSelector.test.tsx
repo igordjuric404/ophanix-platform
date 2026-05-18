@@ -12,18 +12,18 @@ const environments: Environment[] = [
   { id: "env_prod", name: "Production", organization_id: "org_default" }
 ];
 
-function tenantSelection(
-  overrides: Partial<TenantSelection> = {}
-): TenantSelection {
+function tenantSelection(overrides: Partial<TenantSelection> = {}): TenantSelection {
   return {
     environments,
     error: null,
     isError: false,
     isLoading: false,
+    isReady: true,
     organizations: [{ id: "org_default", name: "Ophanix Demo" }],
     selectedEnvironment: environments[0],
     selectedOrganization: { id: "org_default", name: "Ophanix Demo" },
     setSelectedEnvironmentId: vi.fn(),
+    tenantContext: { organizationId: "org_default", environmentId: "env_default" },
     ...overrides
   };
 }

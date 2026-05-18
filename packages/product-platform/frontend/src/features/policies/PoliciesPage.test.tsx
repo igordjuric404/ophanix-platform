@@ -1,6 +1,9 @@
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { CurrentUserProvider } from "../../app/userContext";
+import { TenantQueryScopeProvider } from "../../api/queryScope";
+import type { UserPrincipal } from "../../api/types";
 import { renderWithQueryClient } from "../../test/test-utils";
 import {
   PoliciesPage,
@@ -110,6 +113,23 @@ const summary = {
   ]
 };
 
+const tenantContext = { organizationId: "org_default", environmentId: "env_default" };
+const adminUser: UserPrincipal = {
+  id: "user_admin",
+  display_name: "Admin",
+  email: "admin@example.com",
+  organization_id: "org_default",
+  roles: ["Platform Admin"]
+};
+
+const viewerUser: UserPrincipal = {
+  ...adminUser,
+  id: "user_viewer",
+  display_name: "Viewer",
+  email: "viewer@example.com",
+  roles: ["Viewer"]
+};
+
 describe("PoliciesPage", () => {
   beforeEach(() => {
     window.history.replaceState(null, "", "/policies");
@@ -118,7 +138,7 @@ describe("PoliciesPage", () => {
   });
 
   it("renders library, versions, editor, bindings, simulator, and feed", async () => {
-    renderWithQueryClient(<PoliciesPage />);
+    renderPoliciesPage();
 
     expect((await screen.findAllByText("Runtime Guardrails")).length).toBeGreaterThan(0);
     expect(screen.getByText("Policy Library")).toBeInTheDocument();
@@ -139,7 +159,7 @@ describe("PoliciesPage", () => {
 
   it("lints, disables fatal saves, simulates decisions, filters, and opens detail", async () => {
     const calls = mockPolicyFetch();
-    renderWithQueryClient(<PoliciesPage />);
+    renderPoliciesPage();
 
     expect((await screen.findAllByText("Runtime Guardrails")).length).toBeGreaterThan(0);
 
@@ -166,11 +186,47 @@ describe("PoliciesPage", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
+  it("requires confirmation before archiving a policy version", async () => {
+    const calls = mockPolicyFetch();
+    renderPoliciesPage();
+
+    const versionRow = (await screen.findAllByText("v2"))
+      .find((element) => element.closest("[data-policy-version-row='pver_2']"))
+      ?.closest("tr");
+    expect(versionRow).toBeTruthy();
+
+    fireEvent.click(within(versionRow as HTMLElement).getByRole("button", { name: "Archive" }));
+    expect(calls).not.toContain("/api/v1/policies/policy_1/versions/pver_2/archive");
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Archive policy version?")).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Archive" }));
+
+    await waitFor(() =>
+      expect(calls).toContain("/api/v1/policies/policy_1/versions/pver_2/archive")
+    );
+  });
+
+  it("hides policy write controls for read-only users", async () => {
+    renderPoliciesPage(viewerUser);
+
+    expect((await screen.findAllByText("Runtime Guardrails")).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "Export" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Import" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save Version" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Create Binding" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Simulate" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Archive" })).not.toBeInTheDocument();
+  });
+
   it("keeps streamed evaluation rows deterministic", () => {
     const streamed = { ...evaluation, id: "peval_2", correlation_id: "corr-streamed" };
 
-    expect(policyEvaluationMatchesFilters(streamed, { decision: "deny", mode: "simulate" })).toBe(true);
+    expect(policyEvaluationMatchesFilters(streamed, { decision: "deny", mode: "simulate" })).toBe(
+      true
+    );
     expect(policyEvaluationMatchesFilters(streamed, { decision: "allow" })).toBe(false);
+    expect(policyEvaluationMatchesFilters(streamed, { environment_id: "env_other" })).toBe(false);
     expect(upsertPolicyEvaluationFeed([evaluation], streamed).map((row) => row.id)).toEqual([
       "peval_2",
       "peval_1"
@@ -187,11 +243,24 @@ describe("PoliciesPage", () => {
     FakeEventSource.instances = [];
     vi.stubGlobal("EventSource", FakeEventSource);
 
-    renderWithQueryClient(<PoliciesPage />);
+    renderPoliciesPage();
 
     expect(await screen.findByText("corr-policy-eval")).toBeInTheDocument();
     expect(FakeEventSource.instances).toHaveLength(1);
-    expect(FakeEventSource.instances[0].url).toBe("/api/v1/policy-evaluations/stream");
+    expect(FakeEventSource.instances[0].url).toBe(
+      "/api/v1/policy-evaluations/stream?organization_id=org_default&environment_id=env_default"
+    );
+
+    act(() => {
+      FakeEventSource.instances[0].emit("policy_evaluation", {
+        ...evaluation,
+        environment_id: "env_other",
+        id: "peval_other_environment",
+        correlation_id: "corr-other-environment"
+      });
+    });
+
+    expect(screen.queryByText("corr-other-environment")).not.toBeInTheDocument();
 
     act(() => {
       FakeEventSource.instances[0].emit("policy_evaluation", {
@@ -205,10 +274,22 @@ describe("PoliciesPage", () => {
 
     expect(await screen.findByText("corr-live-policy")).toBeInTheDocument();
     await waitFor(() =>
-      expect(calls.filter((path) => path.startsWith("/api/v1/policy-evaluations/summary")).length).toBeGreaterThan(1)
+      expect(
+        calls.filter((path) => path.startsWith("/api/v1/policy-evaluations/summary")).length
+      ).toBeGreaterThan(1)
     );
   });
 });
+
+function renderPoliciesPage(user = adminUser) {
+  return renderWithQueryClient(
+    <CurrentUserProvider user={user}>
+      <TenantQueryScopeProvider context={tenantContext}>
+        <PoliciesPage />
+      </TenantQueryScopeProvider>
+    </CurrentUserProvider>
+  );
+}
 
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
@@ -333,6 +414,9 @@ function mockPolicyFetch() {
     }
     if (path === "/api/v1/policies/policy_1/versions/pver_3/lint" && init?.method === "POST") {
       return json({ passed: true, error_count: 0, warning_count: 0, issues: [] });
+    }
+    if (path === "/api/v1/policies/policy_1/versions/pver_2/archive" && init?.method === "POST") {
+      return json({ ...policy.versions[0], status: "archived" });
     }
     return json({});
   });
