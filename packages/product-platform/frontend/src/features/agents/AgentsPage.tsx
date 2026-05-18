@@ -1,6 +1,7 @@
 import { KeyRound, Play, RotateCcw, Search, ShieldCheck, UserCheck } from "lucide-react";
-import { useState, type FormEvent, type InputHTMLAttributes, type KeyboardEvent } from "react";
+import { useId, useState, type FormEvent, type InputHTMLAttributes, type KeyboardEvent } from "react";
 
+import type { TenantContext } from "../../api/client";
 import {
   activateAgent,
   approveAgent,
@@ -85,7 +86,7 @@ export function AgentsPage() {
     const form = new FormData(event.currentTarget);
     const draft = await runWithFeedback<AgentDetail | AgentSummary>(
       () =>
-        mutation.mutateAsync(() =>
+        mutation.mutateAsync((tenantContext) =>
           createAgentRegistrationDraft({
             name: formString(form, "name"),
             description: formString(form, "description"),
@@ -103,7 +104,7 @@ export function AgentsPage() {
             policy_selections: formString(form, "policy_pack")
               ? [{ policy_pack: formString(form, "policy_pack") }]
               : []
-          })
+          }, tenantContext)
         ) as Promise<AgentDetail | AgentSummary>,
       {
         errorMessage: "Registration draft failed",
@@ -128,7 +129,7 @@ export function AgentsPage() {
     });
   }
 
-  async function runTask(label: string, task: () => Promise<unknown>) {
+  async function runTask(label: string, task: (tenantContext: TenantContext) => Promise<unknown>) {
     await runWithFeedback(() => mutation.mutateAsync(task), {
       errorMessage: `${label} failed`,
       successMessage: label
@@ -429,7 +430,7 @@ function AgentOperations({
   detail: AgentDetail | null;
   expiringCredentials: AgentCredential[];
   isLoading: boolean;
-  onRunTask: (label: string, task: () => Promise<unknown>) => Promise<void>;
+  onRunTask: (label: string, task: (tenantContext: TenantContext) => Promise<unknown>) => Promise<void>;
   setActiveTab: (tab: string) => void;
   timeline: AgentLifecycleEvent[];
 }) {
@@ -488,7 +489,11 @@ function AgentOperations({
         </div>
         <div className="flex flex-wrap gap-2">
           <Button
-            onClick={() => onRunTask("Agent approved", () => approveAgent(activeAgentId))}
+            onClick={() =>
+              onRunTask("Agent approved", (tenantContext) =>
+                approveAgent(activeAgentId, {}, tenantContext)
+              )
+            }
             type="button"
             variant="outline"
           >
@@ -496,7 +501,11 @@ function AgentOperations({
             Approve
           </Button>
           <Button
-            onClick={() => onRunTask("Agent activated", () => activateAgent(activeAgentId))}
+            onClick={() =>
+              onRunTask("Agent activated", (tenantContext) =>
+                activateAgent(activeAgentId, {}, tenantContext)
+              )
+            }
             type="button"
             variant="outline"
           >
@@ -575,7 +584,7 @@ function AgentDetailTab({
   credentials: AgentCredential[];
   detail: AgentDetail | null;
   expiringCredentials: AgentCredential[];
-  onRunTask: (label: string, task: () => Promise<unknown>) => Promise<void>;
+  onRunTask: (label: string, task: (tenantContext: TenantContext) => Promise<unknown>) => Promise<void>;
   summary: AgentSummary | null;
   timeline: AgentLifecycleEvent[];
 }) {
@@ -665,7 +674,7 @@ function LifecycleTab({
   timeline
 }: {
   activeAgentId: string;
-  onRunTask: (label: string, task: () => Promise<unknown>) => Promise<void>;
+  onRunTask: (label: string, task: (tenantContext: TenantContext) => Promise<unknown>) => Promise<void>;
   timeline: AgentLifecycleEvent[];
 }) {
   return (
@@ -677,8 +686,8 @@ function LifecycleTab({
           onSubmit={(event) => {
             event.preventDefault();
             const reason = formString(new FormData(event.currentTarget), "reason");
-            void onRunTask("Agent suspended", () =>
-              runLifecycleAction(activeAgentId, "suspend", { reason })
+            void onRunTask("Agent suspended", (tenantContext) =>
+              runLifecycleAction(activeAgentId, "suspend", { reason }, tenantContext)
             );
           }}
         >
@@ -690,7 +699,9 @@ function LifecycleTab({
             </Button>
             <Button
               onClick={() =>
-                onRunTask("Orphan detection queued", () => runOrphanDetection())
+                onRunTask("Orphan detection queued", (tenantContext) =>
+                  runOrphanDetection(tenantContext)
+                )
               }
               type="button"
               variant="outline"
@@ -733,7 +744,7 @@ function CredentialsTab({
   activeAgentId: string;
   credentials: AgentCredential[];
   expiringCredentials: AgentCredential[];
-  onRunTask: (label: string, task: () => Promise<unknown>) => Promise<void>;
+  onRunTask: (label: string, task: (tenantContext: TenantContext) => Promise<unknown>) => Promise<void>;
 }) {
   return (
     <div className="space-y-4" data-agent-credentials-table>
@@ -746,8 +757,12 @@ function CredentialsTab({
         </div>
         <Button
           onClick={() =>
-            onRunTask("Credential issued", () =>
-              issueAgentCredential(activeAgentId, { scopes: [{ scope: "claims:read" }] })
+            onRunTask("Credential issued", (tenantContext) =>
+              issueAgentCredential(
+                activeAgentId,
+                { scopes: [{ scope: "claims:read" }] },
+                tenantContext
+              )
             )
           }
           type="button"
@@ -786,8 +801,8 @@ function CredentialsTab({
                     <div className="flex flex-wrap gap-2">
                       <Button
                         onClick={() =>
-                          onRunTask("Credential rotated", () =>
-                            rotateCredential(credential.id, { reason: "scheduled" })
+                          onRunTask("Credential rotated", (tenantContext) =>
+                            rotateCredential(credential.id, { reason: "scheduled" }, tenantContext)
                           )
                         }
                         type="button"
@@ -801,8 +816,8 @@ function CredentialsTab({
                         onSubmit={(event) => {
                           event.preventDefault();
                           const reason = formString(new FormData(event.currentTarget), "reason");
-                          void onRunTask("Credential revoked", () =>
-                            revokeCredential(credential.id, { reason })
+                          void onRunTask("Credential revoked", (tenantContext) =>
+                            revokeCredential(credential.id, { reason }, tenantContext)
                           );
                         }}
                       >
@@ -905,10 +920,12 @@ function Field({
   label: string;
   name: string;
 } & InputHTMLAttributes<HTMLInputElement>) {
+  const reactId = useId();
+  const id = `${reactId}-${name}`;
   return (
     <div className={cn("space-y-1", compact ? "w-36" : "", className)}>
-      <Label htmlFor={name}>{label}</Label>
-      <Input id={name} name={name} {...props} />
+      <Label htmlFor={id}>{label}</Label>
+      <Input id={id} name={name} {...props} />
     </div>
   );
 }
@@ -924,12 +941,14 @@ function SelectField({
   name: string;
   options: string[];
 }) {
+  const reactId = useId();
+  const id = `${reactId}-${name}`;
   return (
     <div className={cn("space-y-1", compact ? "w-40" : "")}>
-      <Label htmlFor={name}>{label}</Label>
+      <Label htmlFor={id}>{label}</Label>
       <select
         className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        id={name}
+        id={id}
         name={name}
       >
         {options.map((option) => (

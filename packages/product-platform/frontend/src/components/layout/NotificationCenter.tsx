@@ -25,7 +25,9 @@ export function NotificationCenter() {
     readDismissedNotifications()
   );
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverId = useId();
+  const popoverTitleId = `${popoverId}-title`;
   const dependencies = useSystemDependencies();
   const version = useVersionInfo();
   const allNotifications = useMemo(
@@ -49,7 +51,8 @@ export function NotificationCenter() {
     id: popoverId,
     onOpenChange: setOpen,
     open,
-    rootRef
+    rootRef,
+    triggerRef
   });
 
   function toggleOpen() {
@@ -81,6 +84,7 @@ export function NotificationCenter() {
         aria-label={buttonLabel}
         className="relative h-9 w-9 p-0"
         onClick={toggleOpen}
+        ref={triggerRef}
         type="button"
         variant="outline"
       >
@@ -97,11 +101,12 @@ export function NotificationCenter() {
       {open ? (
         <div
           className="absolute right-0 z-30 mt-2 w-72 rounded-lg border border-border/80 bg-card p-4 text-sm shadow-[var(--shadow-popover)]"
+          aria-labelledby={popoverTitleId}
           id={popoverId}
           role="dialog"
         >
           <div className="flex items-center justify-between gap-3">
-            <div className="font-display font-semibold">Notifications</div>
+            <div className="font-display font-semibold" id={popoverTitleId}>Notifications</div>
           </div>
           {notificationCount > 0 ? (
             <ul className="mt-3 space-y-3">

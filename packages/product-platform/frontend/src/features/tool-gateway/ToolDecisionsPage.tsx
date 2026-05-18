@@ -77,7 +77,7 @@ export function ToolDecisionsPage() {
         title="Tool Gateway Decisions"
         description="Runtime actions, policy outcomes, upstream metadata, and safe response summaries."
       />
-      <main className="space-y-4 p-6">
+      <div className="space-y-4 p-6">
         <section className="rounded-md border bg-card" data-tool-runtime-feed>
           <div className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3">
             <div>
@@ -190,7 +190,7 @@ export function ToolDecisionsPage() {
             onClose={() => setSelectedActionId(null)}
           />
         ) : null}
-      </main>
+      </div>
     </>
   );
 }

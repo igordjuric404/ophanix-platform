@@ -34,6 +34,13 @@ describe("NotificationCenter", () => {
     fireEvent.click(button);
     expect(screen.getByRole("dialog")).toBeInTheDocument();
 
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(button).toHaveFocus();
+
+    fireEvent.click(button);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
     fireEvent.pointerDown(screen.getByRole("button", { name: "Outside" }));
 
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());

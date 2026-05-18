@@ -136,8 +136,8 @@ export interface McpRateLimit {
   updated_at: string;
 }
 
-export function createMcpServer(body: Record<string, unknown>) {
-  return apiClient.request<McpServer>("/mcp/servers", { method: "POST", body });
+export function createMcpServer(body: Record<string, unknown>, tenantContext?: TenantContext) {
+  return apiClient.request<McpServer>("/mcp/servers", { method: "POST", body, tenantContext });
 }
 
 export function listMcpServers(params: McpParams = {}, tenantContext?: TenantContext) {
@@ -146,21 +146,28 @@ export function listMcpServers(params: McpParams = {}, tenantContext?: TenantCon
   });
 }
 
-export function getMcpServer(serverId: string) {
-  return apiClient.request<McpServer>(`/mcp/servers/${encodeURIComponent(serverId)}`);
-}
-
-export function patchMcpServer(serverId: string, body: Record<string, unknown>) {
+export function getMcpServer(serverId: string, tenantContext?: TenantContext) {
   return apiClient.request<McpServer>(`/mcp/servers/${encodeURIComponent(serverId)}`, {
-    method: "PATCH",
-    body
+    tenantContext
   });
 }
 
-export function discoverMcpServerTools(serverId: string) {
+export function patchMcpServer(
+  serverId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
+  return apiClient.request<McpServer>(`/mcp/servers/${encodeURIComponent(serverId)}`, {
+    method: "PATCH",
+    body,
+    tenantContext
+  });
+}
+
+export function discoverMcpServerTools(serverId: string, tenantContext?: TenantContext) {
   return apiClient.request<McpToolDiscovery>(
     `/mcp/servers/${encodeURIComponent(serverId)}/discover-tools`,
-    { method: "POST" }
+    { method: "POST", tenantContext }
   );
 }
 
@@ -174,9 +181,10 @@ export function getMcpTool(toolId: string, tenantContext?: TenantContext) {
   });
 }
 
-export function runMcpSecurityScan(serverId: string) {
+export function runMcpSecurityScan(serverId: string, tenantContext?: TenantContext) {
   return apiClient.request<McpScanRun>(`/mcp/servers/${encodeURIComponent(serverId)}/scan`, {
-    method: "POST"
+    method: "POST",
+    tenantContext
   });
 }
 
@@ -196,29 +204,46 @@ export function listMcpFindings(params: McpParams = {}, tenantContext?: TenantCo
   });
 }
 
-export function acceptMcpFindingRisk(findingId: string, body: Record<string, unknown>) {
+export function acceptMcpFindingRisk(
+  findingId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<McpFinding>(
     `/mcp/findings/${encodeURIComponent(findingId)}/accept-risk`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
-export function resolveMcpFinding(findingId: string, body: Record<string, unknown>) {
+export function resolveMcpFinding(
+  findingId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<McpFinding>(`/mcp/findings/${encodeURIComponent(findingId)}/resolve`, {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
-export function markMcpFindingFalsePositive(findingId: string, body: Record<string, unknown>) {
+export function markMcpFindingFalsePositive(
+  findingId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<McpFinding>(
     `/mcp/findings/${encodeURIComponent(findingId)}/false-positive`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
-export function createMcpProxyCall(body: Record<string, unknown>) {
-  return apiClient.request<McpToolCall>("/mcp/proxy/call", { method: "POST", body });
+export function createMcpProxyCall(body: Record<string, unknown>, tenantContext?: TenantContext) {
+  return apiClient.request<McpToolCall>("/mcp/proxy/call", {
+    method: "POST",
+    body,
+    tenantContext
+  });
 }
 
 export function listMcpTraffic(params: McpParams = {}, tenantContext?: TenantContext) {
@@ -233,17 +258,26 @@ export function listMcpApprovals(params: McpParams = {}, tenantContext?: TenantC
   });
 }
 
-export function approveMcpApproval(approvalId: string, body: Record<string, unknown>) {
+export function approveMcpApproval(
+  approvalId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<McpApproval>(
     `/mcp/approvals/${encodeURIComponent(approvalId)}/approve`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
-export function denyMcpApproval(approvalId: string, body: Record<string, unknown>) {
+export function denyMcpApproval(
+  approvalId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<McpApproval>(`/mcp/approvals/${encodeURIComponent(approvalId)}/deny`, {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
@@ -253,8 +287,12 @@ export function listMcpRateLimits(params: McpParams = {}, tenantContext?: Tenant
   });
 }
 
-export function createMcpRateLimit(body: Record<string, unknown>) {
-  return apiClient.request<McpRateLimit>("/mcp/rate-limits", { method: "POST", body });
+export function createMcpRateLimit(body: Record<string, unknown>, tenantContext?: TenantContext) {
+  return apiClient.request<McpRateLimit>("/mcp/rate-limits", {
+    method: "POST",
+    body,
+    tenantContext
+  });
 }
 
 export function useMcpServers(params: McpParams = {}) {
@@ -335,7 +373,8 @@ export function useMcpMutation() {
   const queryClient = useQueryClient();
   const scope = useTenantQueryScope();
   return useMutation({
-    mutationFn: async (task: () => Promise<unknown>) => task(),
+    mutationFn: async (task: (tenantContext: TenantContext) => Promise<unknown>) =>
+      task(scope.context),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["mcp"], scope) });
       void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["policies"], scope) });

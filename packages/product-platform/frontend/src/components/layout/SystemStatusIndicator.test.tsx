@@ -21,12 +21,17 @@ describe("SystemStatusIndicator", () => {
     renderWithQueryClient(<SystemStatusIndicator />);
 
     expect(await screen.findByText("Degraded")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "System status" }));
+    const button = screen.getByRole("button", { name: "System status" });
+    fireEvent.click(button);
 
+    expect(screen.getByRole("dialog", { name: "System status" })).toBeInTheDocument();
     expect(screen.getByText("API build: test-sha")).toBeInTheDocument();
     expect(screen.getByText("worker")).toBeInTheDocument();
     expect(calls).toContain("/version");
     expect(calls).not.toContain("/api/v1/version");
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(button).toHaveFocus();
   });
 
   it("renders a warning when status endpoints cannot be loaded", async () => {

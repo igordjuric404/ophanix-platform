@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
 
+import type { TenantContext } from "../../api/client";
 import {
   acceptMcpFindingRisk,
   approveMcpApproval,
@@ -99,7 +100,7 @@ export function McpPage() {
   const selectedFinding =
     findings.find((finding) => finding.id === selectedFindingId) ?? findings[0] ?? null;
 
-  async function runTask(label: string, task: () => Promise<unknown>) {
+  async function runTask(label: string, task: (tenantContext: TenantContext) => Promise<unknown>) {
     await runWithFeedback(() => mutation.mutateAsync(task), {
       errorMessage: `${label} failed`,
       successMessage: label
@@ -129,12 +130,20 @@ export function McpPage() {
         <McpSummary approvals={approvals} findings={findings} servers={servers} tools={tools} />
         <ServerRegistryPanel
           isLoading={serversQuery.isLoading}
-          onCreate={(payload) => runTask("MCP server registered", () => createMcpServer(payload))}
+          onCreate={(payload) =>
+            runTask("MCP server registered", (tenantContext) =>
+              createMcpServer(payload, tenantContext)
+            )
+          }
           onDiscover={(serverId) =>
-            runTask("Tool discovery completed", () => discoverMcpServerTools(serverId))
+            runTask("Tool discovery completed", (tenantContext) =>
+              discoverMcpServerTools(serverId, tenantContext)
+            )
           }
           onScan={(serverId) =>
-            runTask("MCP security scan completed", () => runMcpSecurityScan(serverId))
+            runTask("MCP security scan completed", (tenantContext) =>
+              runMcpSecurityScan(serverId, tenantContext)
+            )
           }
           scans={scans}
           servers={servers}
@@ -152,14 +161,14 @@ export function McpPage() {
           filters={findingFilters}
           findings={findings}
           onAction={(findingId, action, payload) =>
-            runTask(`Finding ${action} submitted`, () => {
+            runTask(`Finding ${action} submitted`, (tenantContext) => {
               if (action === "accepted") {
-                return acceptMcpFindingRisk(findingId, payload);
+                return acceptMcpFindingRisk(findingId, payload, tenantContext);
               }
               if (action === "false-positive") {
-                return markMcpFindingFalsePositive(findingId, payload);
+                return markMcpFindingFalsePositive(findingId, payload, tenantContext);
               }
-              return resolveMcpFinding(findingId, payload);
+              return resolveMcpFinding(findingId, payload, tenantContext);
             })
           }
           onFilter={setFindingFilters}
@@ -170,7 +179,11 @@ export function McpPage() {
           filters={trafficFilters}
           onFilter={setTrafficFilters}
           onInvalidInput={(error) => setError(actionErrorMessage(error, "Invalid MCP proxy input"))}
-          onProxyCall={(payload) => runTask("Proxy call evaluated", () => createMcpProxyCall(payload))}
+          onProxyCall={(payload) =>
+            runTask("Proxy call evaluated", (tenantContext) =>
+              createMcpProxyCall(payload, tenantContext)
+            )
+          }
           traffic={traffic}
         />
         <div className="grid gap-6 2xl:grid-cols-[minmax(0,1fr)_minmax(22rem,0.7fr)]">
@@ -178,16 +191,20 @@ export function McpPage() {
             approvals={approvals}
             filters={approvalFilters}
             onDecision={(approvalId, decision, payload) =>
-              runTask(`Approval ${decision}`, () =>
+              runTask(`Approval ${decision}`, (tenantContext) =>
                 decision === "approved"
-                  ? approveMcpApproval(approvalId, payload)
-                  : denyMcpApproval(approvalId, payload)
+                  ? approveMcpApproval(approvalId, payload, tenantContext)
+                  : denyMcpApproval(approvalId, payload, tenantContext)
               )
             }
             onFilter={setApprovalFilters}
           />
           <RateLimitsPanel
-            onCreate={(payload) => runTask("Rate limit created", () => createMcpRateLimit(payload))}
+            onCreate={(payload) =>
+              runTask("Rate limit created", (tenantContext) =>
+                createMcpRateLimit(payload, tenantContext)
+              )
+            }
             rateLimits={rateLimits}
           />
         </div>
@@ -886,6 +903,7 @@ function ApprovalsPanel({
             <TableBody>
               {approvals.map((approval) => {
                 const call = approval.tool_call;
+                const isPending = approval.status === "pending";
                 return (
                   <TableRow data-mcp-approval-row={approval.id} key={approval.id}>
                     <TableCell>
@@ -902,21 +920,27 @@ function ApprovalsPanel({
                       <code className="text-xs">{JSON.stringify(call?.params_summary ?? {})}</code>
                     </TableCell>
                     <TableCell>
-                      <div className="grid min-w-44 gap-2">
-                        <DecisionForm
-                          approvalId={approval.id}
-                          buttonLabel="Approve"
-                          label="Approve Reason"
-                          onSubmit={(payload) => onDecision(approval.id, "approved", payload)}
-                        />
-                        <DecisionForm
-                          approvalId={approval.id}
-                          buttonLabel="Deny"
-                          label="Deny Reason"
-                          onSubmit={(payload) => onDecision(approval.id, "denied", payload)}
-                          required
-                        />
-                      </div>
+                      {isPending ? (
+                        <div className="grid min-w-44 gap-2">
+                          <DecisionForm
+                            approvalId={approval.id}
+                            buttonLabel="Approve"
+                            label="Approve Reason"
+                            onSubmit={(payload) => onDecision(approval.id, "approved", payload)}
+                          />
+                          <DecisionForm
+                            approvalId={approval.id}
+                            buttonLabel="Deny"
+                            label="Deny Reason"
+                            onSubmit={(payload) => onDecision(approval.id, "denied", payload)}
+                            required
+                          />
+                        </div>
+                      ) : (
+                        <div className="min-w-44 text-sm text-muted-foreground">
+                          {approval.decision_reason ?? approval.decided_at ?? "Decision recorded"}
+                        </div>
+                      )}
                     </TableCell>
                   </TableRow>
                 );

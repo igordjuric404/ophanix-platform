@@ -81,24 +81,30 @@ export function listDiscoveryTargets(tenantContext?: TenantContext) {
   return apiClient.request<DiscoveryTarget[]>("/discovery/targets", { tenantContext });
 }
 
-export function createDiscoveryTarget(body: Record<string, unknown>) {
+export function createDiscoveryTarget(body: Record<string, unknown>, tenantContext?: TenantContext) {
   return apiClient.request<DiscoveryTarget>("/discovery/targets", {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
-export function patchDiscoveryTargetSchedule(targetId: string, body: Record<string, unknown>) {
+export function patchDiscoveryTargetSchedule(
+  targetId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<DiscoveryTarget>(
     `/discovery/targets/${encodeURIComponent(targetId)}/schedule`,
-    { method: "PATCH", body }
+    { method: "PATCH", body, tenantContext }
   );
 }
 
-export function createDiscoveryRun(body: Record<string, unknown>) {
+export function createDiscoveryRun(body: Record<string, unknown>, tenantContext?: TenantContext) {
   return apiClient.request<DiscoveryRun>("/discovery/runs", {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
@@ -106,8 +112,10 @@ export function listDiscoveryRuns(tenantContext?: TenantContext) {
   return apiClient.request<DiscoveryRun[]>("/discovery/runs", { tenantContext });
 }
 
-export function getDiscoveryRun(runId: string) {
-  return apiClient.request<DiscoveryRun>(`/discovery/runs/${encodeURIComponent(runId)}`);
+export function getDiscoveryRun(runId: string, tenantContext?: TenantContext) {
+  return apiClient.request<DiscoveryRun>(`/discovery/runs/${encodeURIComponent(runId)}`, {
+    tenantContext
+  });
 }
 
 export function listDiscoveryFindings(
@@ -120,44 +128,60 @@ export function listDiscoveryFindings(
   );
 }
 
-export function getDiscoveryFinding(findingId: string) {
+export function getDiscoveryFinding(findingId: string, tenantContext?: TenantContext) {
   return apiClient.request<DiscoveryFinding>(
-    `/discovery/findings/${encodeURIComponent(findingId)}`
+    `/discovery/findings/${encodeURIComponent(findingId)}`,
+    { tenantContext }
   );
 }
 
-export function reconcileDiscoveryRun(runId: string) {
+export function reconcileDiscoveryRun(runId: string, tenantContext?: TenantContext) {
   return apiClient.request<Record<string, unknown>>(
     `/discovery/reconcile-run/${encodeURIComponent(runId)}`,
-    { method: "POST" }
+    { method: "POST", tenantContext }
   );
 }
 
-export function assignDiscoveryFindingOwner(findingId: string, body: Record<string, unknown>) {
+export function assignDiscoveryFindingOwner(
+  findingId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<DiscoveryFinding>(
     `/discovery/findings/${encodeURIComponent(findingId)}/assign-owner`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
-export function registerDiscoveryFindingAgent(findingId: string, body: Record<string, unknown>) {
+export function registerDiscoveryFindingAgent(
+  findingId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<Record<string, unknown>>(
     `/discovery/findings/${encodeURIComponent(findingId)}/register-agent`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
-export function suppressDiscoveryFinding(findingId: string, body: Record<string, unknown>) {
+export function suppressDiscoveryFinding(
+  findingId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<DiscoveryFinding>(
     `/discovery/findings/${encodeURIComponent(findingId)}/suppress`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
-export function markDiscoveryFindingDecommissioned(findingId: string) {
+export function markDiscoveryFindingDecommissioned(
+  findingId: string,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<DiscoveryFinding>(
     `/discovery/findings/${encodeURIComponent(findingId)}/mark-decommissioned`,
-    { method: "POST" }
+    { method: "POST", tenantContext }
   );
 }
 
@@ -197,7 +221,8 @@ export function useDiscoveryMutation() {
   const queryClient = useQueryClient();
   const scope = useTenantQueryScope();
   return useMutation({
-    mutationFn: async (task: () => Promise<unknown>) => task(),
+    mutationFn: async (task: (tenantContext: TenantContext) => Promise<unknown>) =>
+      task(scope.context),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["discovery"], scope) });
     }

@@ -10,16 +10,25 @@ export function useHeaderPopoverDismiss({
   id,
   onOpenChange,
   open,
-  rootRef
+  rootRef,
+  triggerRef
 }: {
   id: string;
   onOpenChange: (open: boolean) => void;
   open: boolean;
   rootRef: RefObject<HTMLElement | null>;
+  triggerRef?: RefObject<HTMLElement | null>;
 }) {
   useEffect(() => {
     if (!open) {
       return undefined;
+    }
+
+    function closePopover({ restoreFocus }: { restoreFocus: boolean }) {
+      onOpenChange(false);
+      if (restoreFocus) {
+        triggerRef?.current?.focus();
+      }
     }
 
     function handlePointerDown(event: PointerEvent) {
@@ -27,19 +36,19 @@ export function useHeaderPopoverDismiss({
       if (target instanceof Node && rootRef.current?.contains(target)) {
         return;
       }
-      onOpenChange(false);
+      closePopover({ restoreFocus: false });
     }
 
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
-        onOpenChange(false);
+        closePopover({ restoreFocus: true });
       }
     }
 
     function handlePeerOpen(event: Event) {
       const peerId = event instanceof CustomEvent ? event.detail?.id : null;
       if (peerId !== id) {
-        onOpenChange(false);
+        closePopover({ restoreFocus: false });
       }
     }
 
@@ -52,5 +61,5 @@ export function useHeaderPopoverDismiss({
       document.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener(HEADER_POPOVER_OPEN_EVENT, handlePeerOpen);
     };
-  }, [id, onOpenChange, open, rootRef]);
+  }, [id, onOpenChange, open, rootRef, triggerRef]);
 }

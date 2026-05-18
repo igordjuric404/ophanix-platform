@@ -116,7 +116,17 @@ async function parseResponse(response: Response): Promise<ApiErrorPayload | null
     const text = await response.text();
     return text ? { message: text } : null;
   }
-  return (await response.json()) as ApiErrorPayload;
+  const text = await response.text();
+  if (!text.trim()) {
+    return null;
+  }
+  try {
+    return JSON.parse(text) as ApiErrorPayload;
+  } catch {
+    return {
+      message: response.ok ? "Response contained invalid JSON." : "Request failed with invalid JSON."
+    };
+  }
 }
 
 export function queryString(params: Record<string, unknown> = {}) {

@@ -1,6 +1,7 @@
 import { Play, RotateCcw, Square, StepForward } from "lucide-react";
 import { useState } from "react";
 
+import type { TenantContext } from "../../api/client";
 import {
   cancelDemoRun,
   continueDemoRun,
@@ -70,7 +71,11 @@ export function DemoLabPage() {
   const activeRun = runQuery.data ?? null;
   const baselineStatus = baselineQuery.data ?? null;
 
-  async function runResultTask<T>(label: string, task: () => Promise<T>, onResult: (value: T) => void) {
+  async function runResultTask<T>(
+    label: string,
+    task: (tenantContext: TenantContext) => Promise<T>,
+    onResult: (value: T) => void
+  ) {
     const result = await runWithFeedback<T>(
       () => mutation.mutateAsync(task) as Promise<T>,
       {
@@ -111,8 +116,10 @@ export function DemoLabPage() {
           <BaselinePanel baselineStatus={baselineStatus} />
           <ResetPanel
             onReset={(payload) =>
-              runResultTask("Demo environment reset", () => resetDemoEnvironment(payload), (resetRun) =>
-                setSelectedResetId(resetRun.id)
+              runResultTask(
+                "Demo environment reset",
+                (tenantContext) => resetDemoEnvironment(payload, tenantContext),
+                (resetRun) => setSelectedResetId(resetRun.id)
               )
             }
             onSelect={setSelectedResetId}
@@ -129,8 +136,10 @@ export function DemoLabPage() {
           />
           <ScenarioDetail
             onStart={(scenarioId) =>
-              runResultTask("Demo scenario started", () => startDemoRun(scenarioId), (run) =>
-                setSelectedRunId(run.id)
+              runResultTask(
+                "Demo scenario started",
+                (tenantContext) => startDemoRun(scenarioId, tenantContext),
+                (run) => setSelectedRunId(run.id)
               )
             }
             scenario={activeScenario}
@@ -138,13 +147,17 @@ export function DemoLabPage() {
         </div>
         <RunTimeline
           onCancel={(runId) =>
-            runResultTask("Demo run canceled", () => cancelDemoRun(runId), (run) =>
-              setSelectedRunId(run.id)
+            runResultTask(
+              "Demo run canceled",
+              (tenantContext) => cancelDemoRun(runId, tenantContext),
+              (run) => setSelectedRunId(run.id)
             )
           }
           onContinue={(runId) =>
-            runResultTask("Demo run advanced", () => continueDemoRun(runId), (run) =>
-              setSelectedRunId(run.id)
+            runResultTask(
+              "Demo run advanced",
+              (tenantContext) => continueDemoRun(runId, tenantContext),
+              (run) => setSelectedRunId(run.id)
             )
           }
           run={activeRun}

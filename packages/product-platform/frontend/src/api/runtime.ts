@@ -167,8 +167,12 @@ export interface RuntimeKillSwitchEvent {
   created_at: string;
 }
 
-export function createRuntimeSession(body: Record<string, unknown>) {
-  return apiClient.request<RuntimeSession>("/runtime/sessions", { method: "POST", body });
+export function createRuntimeSession(body: Record<string, unknown>, tenantContext?: TenantContext) {
+  return apiClient.request<RuntimeSession>("/runtime/sessions", {
+    method: "POST",
+    body,
+    tenantContext
+  });
 }
 
 export function listRuntimeSessions(params: RuntimeParams = {}, tenantContext?: TenantContext) {
@@ -183,17 +187,25 @@ export function getRuntimeSession(sessionId: string, tenantContext?: TenantConte
   });
 }
 
-export function endRuntimeSession(sessionId: string, body: Record<string, unknown> = {}) {
+export function endRuntimeSession(
+  sessionId: string,
+  body: Record<string, unknown> = {},
+  tenantContext?: TenantContext
+) {
   return apiClient.request<RuntimeSession>(
     `/runtime/sessions/${encodeURIComponent(sessionId)}/end`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
-export function createRuntimeAction(sessionId: string, body: Record<string, unknown>) {
+export function createRuntimeAction(
+  sessionId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<RuntimeAction>(
     `/runtime/sessions/${encodeURIComponent(sessionId)}/actions`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
@@ -213,12 +225,19 @@ export function listRuntimeRingRules(params: RuntimeParams = {}, tenantContext?:
   });
 }
 
-export function createRuntimeRingRule(body: Record<string, unknown>) {
-  return apiClient.request<RuntimeRingRule>("/runtime/ring-rules", { method: "POST", body });
+export function createRuntimeRingRule(
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
+  return apiClient.request<RuntimeRingRule>("/runtime/ring-rules", {
+    method: "POST",
+    body,
+    tenantContext
+  });
 }
 
-export function createRuntimeSaga(body: Record<string, unknown>) {
-  return apiClient.request<RuntimeSaga>("/runtime/sagas", { method: "POST", body });
+export function createRuntimeSaga(body: Record<string, unknown>, tenantContext?: TenantContext) {
+  return apiClient.request<RuntimeSaga>("/runtime/sagas", { method: "POST", body, tenantContext });
 }
 
 export function listRuntimeSagas(params: RuntimeParams = {}, tenantContext?: TenantContext) {
@@ -233,31 +252,48 @@ export function getRuntimeSaga(sagaId: string, tenantContext?: TenantContext) {
   });
 }
 
-export function addRuntimeSagaStep(sagaId: string, body: Record<string, unknown>) {
+export function addRuntimeSagaStep(
+  sagaId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<RuntimeSagaStep>(
     `/runtime/sagas/${encodeURIComponent(sagaId)}/steps`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
-export function executeRuntimeSaga(sagaId: string, body: Record<string, unknown>) {
+export function executeRuntimeSaga(
+  sagaId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<RuntimeSagaExecution>(
     `/runtime/sagas/${encodeURIComponent(sagaId)}/execute`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
-export function cancelRuntimeSaga(sagaId: string, body: Record<string, unknown>) {
+export function cancelRuntimeSaga(
+  sagaId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<RuntimeSaga>(`/runtime/sagas/${encodeURIComponent(sagaId)}/cancel`, {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
-export function createRuntimeSandboxProfile(body: Record<string, unknown>) {
+export function createRuntimeSandboxProfile(
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<RuntimeSandboxProfile>("/runtime/sandbox-profiles", {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
@@ -271,24 +307,36 @@ export function listRuntimeSandboxProfiles(
   );
 }
 
-export function patchRuntimeSandboxProfile(profileId: string, body: Record<string, unknown>) {
+export function patchRuntimeSandboxProfile(
+  profileId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<RuntimeSandboxProfile>(
     `/runtime/sandbox-profiles/${encodeURIComponent(profileId)}`,
-    { method: "PATCH", body }
+    { method: "PATCH", body, tenantContext }
   );
 }
 
-export function testRuntimeSandboxProfile(profileId: string, body: Record<string, unknown>) {
+export function testRuntimeSandboxProfile(
+  profileId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<RuntimeSandboxDecision>(
     `/runtime/sandbox-profiles/${encodeURIComponent(profileId)}/test`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
-export function triggerRuntimeKillSwitch(body: Record<string, unknown>) {
+export function triggerRuntimeKillSwitch(
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<RuntimeKillSwitchEvent>("/runtime/kill-switch", {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
@@ -372,7 +420,8 @@ export function useRuntimeMutation() {
   const queryClient = useQueryClient();
   const scope = useTenantQueryScope();
   return useMutation({
-    mutationFn: async (task: () => Promise<unknown>) => task(),
+    mutationFn: async (task: (tenantContext: TenantContext) => Promise<unknown>) =>
+      task(scope.context),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["runtime"], scope) });
       void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["agents"], scope) });

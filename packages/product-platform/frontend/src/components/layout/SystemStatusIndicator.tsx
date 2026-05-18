@@ -9,7 +9,9 @@ import { announceHeaderPopoverOpen, useHeaderPopoverDismiss } from "./headerPopo
 export function SystemStatusIndicator() {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverId = useId();
+  const popoverTitleId = `${popoverId}-title`;
   const dependencies = useSystemDependencies();
   const version = useVersionInfo();
   const dependencyItems = dependencies.data ?? [];
@@ -33,7 +35,8 @@ export function SystemStatusIndicator() {
     id: popoverId,
     onOpenChange: setOpen,
     open,
-    rootRef
+    rootRef,
+    triggerRef
   });
 
   function toggleOpen() {
@@ -54,6 +57,7 @@ export function SystemStatusIndicator() {
         aria-label="System status"
         className="h-9 gap-2 px-3"
         onClick={toggleOpen}
+        ref={triggerRef}
         type="button"
         variant="outline"
       >
@@ -63,10 +67,11 @@ export function SystemStatusIndicator() {
       {open ? (
         <div
           className="absolute right-0 z-30 mt-2 w-80 rounded-lg border border-border/80 bg-card p-4 text-sm shadow-[var(--shadow-popover)]"
+          aria-labelledby={popoverTitleId}
           id={popoverId}
           role="dialog"
         >
-          <div className="font-display font-semibold">System status</div>
+          <div className="font-display font-semibold" id={popoverTitleId}>System status</div>
           <p className="mt-1 text-muted-foreground">
             {status === "healthy"
               ? "Required dependencies are healthy."

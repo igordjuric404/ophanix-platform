@@ -145,8 +145,15 @@ export interface Rollout {
   events: RolloutEvent[];
 }
 
-export function createObservabilitySlo(body: Record<string, unknown>) {
-  return apiClient.request<SloObjective>("/observability/slo", { method: "POST", body });
+export function createObservabilitySlo(
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
+  return apiClient.request<SloObjective>("/observability/slo", {
+    method: "POST",
+    body,
+    tenantContext
+  });
 }
 
 export function listObservabilitySlos(
@@ -158,39 +165,72 @@ export function listObservabilitySlos(
   });
 }
 
-export function createObservabilitySloMeasurement(sloId: string, body: Record<string, unknown>) {
+export function createObservabilitySloMeasurement(
+  sloId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<SloMeasurement>(
     `/observability/slo/${encodeURIComponent(sloId)}/measurements`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
-export function createObservabilityCostBudget(body: Record<string, unknown>) {
-  return apiClient.request<CostBudget>("/observability/cost-budgets", { method: "POST", body });
+export function createObservabilityCostBudget(
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
+  return apiClient.request<CostBudget>("/observability/cost-budgets", {
+    method: "POST",
+    body,
+    tenantContext
+  });
 }
 
-export function listObservabilityCostBudgets(params: ObservabilityParams = {}) {
+export function listObservabilityCostBudgets(
+  params: ObservabilityParams = {},
+  tenantContext?: TenantContext
+) {
   return apiClient.request<CostBudget[]>(
-    `/observability/cost-budgets${queryString(params)}`
+    `/observability/cost-budgets${queryString(params)}`,
+    { tenantContext }
   );
 }
 
-export function createObservabilityCostEvent(body: Record<string, unknown>) {
-  return apiClient.request<CostEvent>("/observability/cost-events", { method: "POST", body });
+export function createObservabilityCostEvent(
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
+  return apiClient.request<CostEvent>("/observability/cost-events", {
+    method: "POST",
+    body,
+    tenantContext
+  });
 }
 
 export function getObservabilityCosts(tenantContext?: TenantContext) {
   return apiClient.request<CostDashboard>("/observability/costs", { tenantContext });
 }
 
-export function createObservabilityIncident(body: Record<string, unknown>) {
-  return apiClient.request<Incident>("/observability/incidents", { method: "POST", body });
+export function createObservabilityIncident(
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
+  return apiClient.request<Incident>("/observability/incidents", {
+    method: "POST",
+    body,
+    tenantContext
+  });
 }
 
-export function createObservabilityIncidentFromEvent(body: Record<string, unknown>) {
+export function createObservabilityIncidentFromEvent(
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<Incident>("/observability/incidents/from-event", {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
@@ -203,24 +243,35 @@ export function listObservabilityIncidents(
   });
 }
 
-export function acknowledgeObservabilityIncident(incidentId: string) {
+export function acknowledgeObservabilityIncident(
+  incidentId: string,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<Incident>(
     `/observability/incidents/${encodeURIComponent(incidentId)}/ack`,
-    { method: "POST" }
+    { method: "POST", tenantContext }
   );
 }
 
-export function resolveObservabilityIncident(incidentId: string, body: Record<string, unknown>) {
+export function resolveObservabilityIncident(
+  incidentId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<Incident>(
     `/observability/incidents/${encodeURIComponent(incidentId)}/resolve`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
-export function createObservabilityChaosExperiment(body: Record<string, unknown>) {
+export function createObservabilityChaosExperiment(
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<ChaosExperiment>("/observability/chaos/experiments", {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
@@ -236,23 +287,31 @@ export function listObservabilityChaosExperiments(
 
 export function runObservabilityChaosExperiment(
   experimentId: string,
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
 ) {
   return apiClient.request<ChaosRun>(
     `/observability/chaos/experiments/${encodeURIComponent(experimentId)}/run`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
-export function stopObservabilityChaosRun(runId: string) {
+export function stopObservabilityChaosRun(runId: string, tenantContext?: TenantContext) {
   return apiClient.request<ChaosRun>(
     `/observability/chaos/runs/${encodeURIComponent(runId)}/stop`,
-    { method: "POST" }
+    { method: "POST", tenantContext }
   );
 }
 
-export function createObservabilityRollout(body: Record<string, unknown>) {
-  return apiClient.request<Rollout>("/observability/rollouts", { method: "POST", body });
+export function createObservabilityRollout(
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
+  return apiClient.request<Rollout>("/observability/rollouts", {
+    method: "POST",
+    body,
+    tenantContext
+  });
 }
 
 export function listObservabilityRollouts(
@@ -264,17 +323,25 @@ export function listObservabilityRollouts(
   });
 }
 
-export function advanceObservabilityRollout(rolloutId: string, body: Record<string, unknown>) {
+export function advanceObservabilityRollout(
+  rolloutId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<Rollout>(
     `/observability/rollouts/${encodeURIComponent(rolloutId)}/advance`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
-export function rollbackObservabilityRollout(rolloutId: string, body: Record<string, unknown>) {
+export function rollbackObservabilityRollout(
+  rolloutId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<Rollout>(
     `/observability/rollouts/${encodeURIComponent(rolloutId)}/rollback`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
@@ -322,7 +389,8 @@ export function useObservabilityMutation() {
   const queryClient = useQueryClient();
   const scope = useTenantQueryScope();
   return useMutation({
-    mutationFn: async (task: () => Promise<unknown>) => task(),
+    mutationFn: async (task: (tenantContext: TenantContext) => Promise<unknown>) =>
+      task(scope.context),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["observability"], scope) });
       void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["audit"], scope) });

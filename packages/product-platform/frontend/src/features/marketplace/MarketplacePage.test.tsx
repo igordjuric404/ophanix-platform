@@ -37,6 +37,24 @@ const plugin = {
       permissions: ["mcp.invoke"],
       created_at: "2026-05-01T00:00:00Z",
       updated_at: "2026-05-01T00:00:00Z"
+    },
+    {
+      id: "plugver_2",
+      plugin_id: "plug_1",
+      version: "2.0.0",
+      manifest: {
+        name: "Claims Assistant",
+        version: "2.0.0",
+        plugin_type: "integration"
+      },
+      package_ref: "registry://claims-assistant/v2",
+      signature_status: "signed",
+      quality_score: 0.97,
+      trust_tier: "trusted",
+      required_capabilities: ["claims.lookup", "claims.update"],
+      permissions: ["mcp.invoke", "claims.write"],
+      created_at: "2026-05-02T00:00:00Z",
+      updated_at: "2026-05-02T00:00:00Z"
     }
   ]
 };
@@ -185,6 +203,32 @@ describe("MarketplacePage", () => {
     expect(requests.some((request) => request.url.endsWith("/recompute-trust"))).toBe(true);
   });
 
+  it("targets the selected plugin version for version-scoped actions", async () => {
+    const requests = mockMarketplaceFetch();
+
+    renderWithQueryClient(<MarketplacePage />);
+
+    const versionRow = await screen.findByText("2.0.0");
+    const row = versionRow.closest("tr");
+    expect(row).not.toBeNull();
+    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Select" }));
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Require Signature" }));
+    fireEvent.click(screen.getByRole("button", { name: /Check Policy/ }));
+    expect(await screen.findByText("Policy compatibility checked")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Install" }));
+    expect(await screen.findByText("Plugin installation created")).toBeInTheDocument();
+
+    expect(requests.some((request) => request.url.endsWith("/plugver_2/check-policy"))).toBe(true);
+    const installRequest = requests.find(
+      (request) => request.url.endsWith("/installations") && request.method === "POST"
+    );
+    expect(installRequest?.body).toMatchObject({
+      plugin_version_id: "plugver_2"
+    });
+  });
+
   it("normalizes policy payload lists and booleans", () => {
     expect(
       marketplacePolicyPayloadFromValues({
@@ -250,8 +294,18 @@ function mockMarketplaceFetch() {
       if (path === "/api/v1/marketplace/plugins/plugver_1/check-policy" && method === "POST") {
         return json(policyResult, 201);
       }
+      if (path === "/api/v1/marketplace/plugins/plugver_2/check-policy" && method === "POST") {
+        return json({ ...policyResult, plugin_version_id: "plugver_2" }, 201);
+      }
       if (path === "/api/v1/marketplace/installations" && method === "POST") {
-        return json({ ...installation, id: "install_2" }, 201);
+        return json(
+          {
+            ...installation,
+            id: "install_2",
+            plugin_version_id: body?.plugin_version_id ?? installation.plugin_version_id
+          },
+          201
+        );
       }
       if (path === "/api/v1/marketplace/plugins/plugver_1/submit-review" && method === "POST") {
         return json({ ...review, id: "review_2" }, 201);

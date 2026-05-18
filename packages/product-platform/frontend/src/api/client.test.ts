@@ -62,4 +62,38 @@ describe("api client", () => {
     expect(init.body).toBe("false");
     expect((init.headers as Headers).get("Content-Type")).toBe("application/json");
   });
+
+  it("normalizes invalid JSON responses into typed API errors", async () => {
+    const client = createApiClient({
+      fetchImpl: vi.fn(
+        async () =>
+          new Response("", {
+            headers: { "Content-Type": "application/json" },
+            status: 500
+          })
+      ) as unknown as typeof fetch
+    });
+
+    await expect(client.request("/broken")).rejects.toMatchObject({
+      name: "ApiClientError",
+      status: 500,
+      message: "Request failed with status 500"
+    });
+  });
+
+  it("returns a safe payload for successful invalid JSON responses", async () => {
+    const client = createApiClient({
+      fetchImpl: vi.fn(
+        async () =>
+          new Response("{", {
+            headers: { "Content-Type": "application/json" },
+            status: 200
+          })
+      ) as unknown as typeof fetch
+    });
+
+    await expect(client.request("/invalid-json")).resolves.toEqual({
+      message: "Response contained invalid JSON."
+    });
+  });
 });

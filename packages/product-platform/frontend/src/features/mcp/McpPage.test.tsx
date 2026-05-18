@@ -128,6 +128,14 @@ const mcpApproval = {
   }
 };
 
+const approvedMcpApproval = {
+  ...mcpApproval,
+  id: "mcpappr_approved",
+  status: "approved",
+  decision_reason: "Approved previously",
+  decided_at: "2026-05-01T02:20:00Z"
+};
+
 const mcpRateLimit = {
   id: "mcprl_1",
   target_type: "mcp-tool",
@@ -265,6 +273,21 @@ describe("McpPage", () => {
     );
   });
 
+  it("does not render decision forms for final approvals", async () => {
+    renderWithQueryClient(<McpPage />);
+
+    const approvalsPanel = await screen.findByText("Approval Queue");
+    const panel = approvalsPanel.closest("[data-mcp-approvals]") as HTMLElement;
+    fireEvent.change(within(panel).getByLabelText("Status"), {
+      target: { value: "approved" }
+    });
+    fireEvent.click(within(panel).getByRole("button", { name: "Filter" }));
+
+    expect(await within(panel).findByText("Approved previously")).toBeInTheDocument();
+    expect(within(panel).queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+    expect(within(panel).queryByRole("button", { name: "Deny" })).not.toBeInTheDocument();
+  });
+
   it("rejects invalid proxy params JSON before submitting", () => {
     const form = document.createElement("form");
     form.innerHTML = `
@@ -332,6 +355,9 @@ function mockMcpFetch() {
     }
     if (path.includes("/api/v1/mcp/approvals/") && method === "POST") {
       return json({ ...mcpApproval, status: path.endsWith("/approve") ? "approved" : "denied" });
+    }
+    if (path === "/api/v1/mcp/approvals?status=approved") {
+      return json([approvedMcpApproval]);
     }
     if (path.startsWith("/api/v1/mcp/approvals")) {
       return json([mcpApproval]);

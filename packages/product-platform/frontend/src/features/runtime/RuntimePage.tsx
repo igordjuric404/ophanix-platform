@@ -66,6 +66,7 @@ import {
   ActionFeedback,
   useActionFeedback
 } from "../../components/shared/ActionFeedback";
+import type { TenantContext } from "../../api/client";
 import { QueryErrorSummary } from "../../components/shared/ErrorState";
 import { cn } from "../../lib/utils";
 
@@ -109,7 +110,7 @@ export function RuntimePage() {
   const selectedSaga = sagaDetailQuery.data ?? sagas.find((saga) => saga.id === activeSagaId) ?? null;
   const selectedProfile = profiles.find((profile) => profile.id === activeProfileId) ?? null;
 
-  async function runTask(label: string, task: () => Promise<unknown>) {
+  async function runTask(label: string, task: (tenantContext: TenantContext) => Promise<unknown>) {
     await runWithFeedback(() => mutation.mutateAsync(task), {
       errorMessage: `${label} failed`,
       successMessage: label
@@ -145,7 +146,11 @@ export function RuntimePage() {
         <div className="grid gap-6 2xl:grid-cols-[minmax(0,1fr)_minmax(24rem,0.85fr)]">
           <SessionsPanel
             filters={sessionFilters}
-            onCreate={(payload) => runTask("Runtime session started", () => createRuntimeSession(payload))}
+            onCreate={(payload) =>
+              runTask("Runtime session started", (tenantContext) =>
+                createRuntimeSession(payload, tenantContext)
+              )
+            }
             onFilter={setSessionFilters}
             onSelect={setSelectedSessionId}
             selectedSessionId={activeSessionId}
@@ -153,10 +158,14 @@ export function RuntimePage() {
           />
           <SessionDetailPanel
             onAction={(sessionId, payload) =>
-              runTask("Runtime action evaluated", () => createRuntimeAction(sessionId, payload))
+              runTask("Runtime action evaluated", (tenantContext) =>
+                createRuntimeAction(sessionId, payload, tenantContext)
+              )
             }
             onEnd={(sessionId, payload) =>
-              runTask("Runtime session ended", () => endRuntimeSession(sessionId, payload))
+              runTask("Runtime session ended", (tenantContext) =>
+                endRuntimeSession(sessionId, payload, tenantContext)
+              )
             }
             session={selectedSession}
           />
@@ -164,14 +173,20 @@ export function RuntimePage() {
         <div className="grid gap-6 2xl:grid-cols-[minmax(0,1fr)_minmax(22rem,0.7fr)]">
           <RingDecisionsPanel decisions={decisions} filters={decisionFilters} onFilter={setDecisionFilters} />
           <RingRulesPanel
-            onCreate={(payload) => runTask("Ring rule created", () => createRuntimeRingRule(payload))}
+            onCreate={(payload) =>
+              runTask("Ring rule created", (tenantContext) =>
+                createRuntimeRingRule(payload, tenantContext)
+              )
+            }
             rules={rules}
           />
         </div>
         <div className="grid gap-6 2xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
           <SagasPanel
             filters={sagaFilters}
-            onCreate={(payload) => runTask("Saga created", () => createRuntimeSaga(payload))}
+            onCreate={(payload) =>
+              runTask("Saga created", (tenantContext) => createRuntimeSaga(payload, tenantContext))
+            }
             onFilter={setSagaFilters}
             onSelect={setSelectedSagaId}
             sagas={sagas}
@@ -179,13 +194,19 @@ export function RuntimePage() {
           />
           <SagaMonitor
             onAddStep={(sagaId, payload) =>
-              runTask("Saga step added", () => addRuntimeSagaStep(sagaId, payload))
+              runTask("Saga step added", (tenantContext) =>
+                addRuntimeSagaStep(sagaId, payload, tenantContext)
+              )
             }
             onCancel={(sagaId, payload) =>
-              runTask("Saga cancelled", () => cancelRuntimeSaga(sagaId, payload))
+              runTask("Saga cancelled", (tenantContext) =>
+                cancelRuntimeSaga(sagaId, payload, tenantContext)
+              )
             }
             onExecute={(sagaId, payload) =>
-              runTask("Saga execution started", () => executeRuntimeSaga(sagaId, payload))
+              runTask("Saga execution started", (tenantContext) =>
+                executeRuntimeSaga(sagaId, payload, tenantContext)
+              )
             }
             saga={selectedSaga}
           />
@@ -194,7 +215,9 @@ export function RuntimePage() {
           <SandboxPanel
             decision={sandboxDecision}
             onCreate={(payload) =>
-              runTask("Sandbox profile created", () => createRuntimeSandboxProfile(payload))
+              runTask("Sandbox profile created", (tenantContext) =>
+                createRuntimeSandboxProfile(payload, tenantContext)
+              )
             }
             onSelect={(profileId) => {
               setSelectedProfileId(profileId);
@@ -203,8 +226,8 @@ export function RuntimePage() {
             onTest={async (profileId, payload) => {
               const result = await runWithFeedback<RuntimeSandboxDecision>(
                 () =>
-                  mutation.mutateAsync(() =>
-                    testRuntimeSandboxProfile(profileId, payload)
+                  mutation.mutateAsync((tenantContext) =>
+                    testRuntimeSandboxProfile(profileId, payload, tenantContext)
                   ) as Promise<RuntimeSandboxDecision>,
                 {
                   errorMessage: "Sandbox profile test failed",
@@ -222,7 +245,9 @@ export function RuntimePage() {
           <KillSwitchPanel
             events={killSwitchEvents}
             onTrigger={(payload) =>
-              runTask("Kill switch triggered", () => triggerRuntimeKillSwitch(payload))
+              runTask("Kill switch triggered", (tenantContext) =>
+                triggerRuntimeKillSwitch(payload, tenantContext)
+              )
             }
           />
         </div>

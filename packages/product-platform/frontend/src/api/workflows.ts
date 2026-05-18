@@ -91,10 +91,15 @@ export function listWorkflows(params: WorkflowParams = {}, tenantContext?: Tenan
   });
 }
 
-export function createWorkflowRun(workflowId: string, body: Record<string, unknown>) {
+export function createWorkflowRun(
+  workflowId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<WorkflowRun>(`/workflows/${encodeURIComponent(workflowId)}/runs`, {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
@@ -110,14 +115,15 @@ export function getWorkflowRun(runId: string, tenantContext?: TenantContext) {
   });
 }
 
-export function cancelWorkflowRun(runId: string) {
+export function cancelWorkflowRun(runId: string, tenantContext?: TenantContext) {
   return apiClient.request<WorkflowRun>(`/workflow-runs/${encodeURIComponent(runId)}/cancel`, {
-    method: "POST"
+    method: "POST",
+    tenantContext
   });
 }
 
-export function createArtifact(body: Record<string, unknown>) {
-  return apiClient.request<Artifact>("/artifacts", { method: "POST", body });
+export function createArtifact(body: Record<string, unknown>, tenantContext?: TenantContext) {
+  return apiClient.request<Artifact>("/artifacts", { method: "POST", body, tenantContext });
 }
 
 export function listArtifacts(params: WorkflowParams = {}, tenantContext?: TenantContext) {
@@ -130,23 +136,33 @@ export function getArtifact(artifactId: string, tenantContext?: TenantContext) {
   });
 }
 
-export function downloadArtifact(artifactId: string) {
+export function downloadArtifact(artifactId: string, tenantContext?: TenantContext) {
   return apiClient.request<ArtifactDownload>(
-    `/artifacts/${encodeURIComponent(artifactId)}/download`
+    `/artifacts/${encodeURIComponent(artifactId)}/download`,
+    { tenantContext }
   );
 }
 
-export function createArtifactLink(artifactId: string, body: Record<string, unknown>) {
+export function createArtifactLink(
+  artifactId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<ArtifactLink>(`/artifacts/${encodeURIComponent(artifactId)}/links`, {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
-export function attestArtifact(artifactId: string, body: Record<string, unknown>) {
+export function attestArtifact(
+  artifactId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<ArtifactAttestation>(
     `/artifacts/${encodeURIComponent(artifactId)}/attest`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
@@ -196,7 +212,8 @@ export function useWorkflowMutation() {
   const queryClient = useQueryClient();
   const scope = useTenantQueryScope();
   return useMutation({
-    mutationFn: async (task: () => Promise<unknown>) => task(),
+    mutationFn: async (task: (tenantContext: TenantContext) => Promise<unknown>) =>
+      task(scope.context),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["workflows"], scope) });
       void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["artifacts"], scope) });

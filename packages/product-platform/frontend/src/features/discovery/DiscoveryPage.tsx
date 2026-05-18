@@ -1,6 +1,7 @@
 import { Play, RefreshCw, Search, ShieldAlert } from "lucide-react";
 import { useState, type FormEvent } from "react";
 
+import type { TenantContext } from "../../api/client";
 import {
   assignDiscoveryFindingOwner,
   createDiscoveryRun,
@@ -51,7 +52,7 @@ export function DiscoveryPage() {
   const selectedFinding =
     findings.find((finding) => finding.id === selectedFindingId) ?? findings[0] ?? null;
 
-  async function runTask(label: string, task: () => Promise<unknown>) {
+  async function runTask(label: string, task: (tenantContext: TenantContext) => Promise<unknown>) {
     await runWithFeedback(() => mutation.mutateAsync(task), {
       errorMessage: `${label} failed`,
       successMessage: label
@@ -165,7 +166,7 @@ function DiscoveryTargets({
   targets
 }: {
   isLoading: boolean;
-  onRunTask: (label: string, task: () => Promise<unknown>) => Promise<void>;
+  onRunTask: (label: string, task: (tenantContext: TenantContext) => Promise<unknown>) => Promise<void>;
   targets: DiscoveryTarget[];
 }) {
   return (
@@ -205,8 +206,8 @@ function DiscoveryTargets({
                     <div className="flex flex-wrap gap-2">
                       <Button
                         onClick={() =>
-                          onRunTask("Discovery run started", () =>
-                            createDiscoveryRun({ target_id: target.id })
+                          onRunTask("Discovery run started", (tenantContext) =>
+                            createDiscoveryRun({ target_id: target.id }, tenantContext)
                           )
                         }
                         type="button"
@@ -217,8 +218,8 @@ function DiscoveryTargets({
                       </Button>
                       <Button
                         onClick={() =>
-                          onRunTask("Schedule updated", () =>
-                            patchDiscoveryTargetSchedule(target.id, { mode: "hourly" })
+                          onRunTask("Schedule updated", (tenantContext) =>
+                            patchDiscoveryTargetSchedule(target.id, { mode: "hourly" }, tenantContext)
                           )
                         }
                         type="button"
@@ -244,7 +245,7 @@ function DiscoveryRuns({
   runs,
   selectedRun
 }: {
-  onRunTask: (label: string, task: () => Promise<unknown>) => Promise<void>;
+  onRunTask: (label: string, task: (tenantContext: TenantContext) => Promise<unknown>) => Promise<void>;
   onSelectRun: (runId: string) => void;
   runs: DiscoveryRun[];
   selectedRun: DiscoveryRun | null;
@@ -261,7 +262,9 @@ function DiscoveryRuns({
         {selectedRun ? (
           <Button
             onClick={() =>
-              onRunTask("Run reconciled", () => reconcileDiscoveryRun(selectedRun.id))
+              onRunTask("Run reconciled", (tenantContext) =>
+                reconcileDiscoveryRun(selectedRun.id, tenantContext)
+              )
             }
             type="button"
             variant="outline"
@@ -291,14 +294,22 @@ function DiscoveryRuns({
                 {runs.map((run) => (
                   <tr
                     className={cn(
-                      "cursor-pointer border-b last:border-b-0",
+                      "border-b last:border-b-0",
                       selectedRun?.id === run.id ? "bg-accent/50" : ""
                     )}
                     data-discovery-run-row={run.id}
                     key={run.id}
-                    onClick={() => onSelectRun(run.id)}
                   >
-                    <td className="py-3 pr-3 font-medium">{run.id}</td>
+                    <td className="py-3 pr-3">
+                      <button
+                        aria-pressed={selectedRun?.id === run.id}
+                        className="text-left font-medium underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        onClick={() => onSelectRun(run.id)}
+                        type="button"
+                      >
+                        {run.id}
+                      </button>
+                    </td>
                     <td className="py-3 pr-3">
                       <StatusBadge status={run.status} />
                     </td>
@@ -361,7 +372,7 @@ function DiscoveryFindings({
   findings: DiscoveryFinding[];
   includeSuppressed: boolean;
   onFilter: (event: FormEvent<HTMLFormElement>) => void;
-  onRunTask: (label: string, task: () => Promise<unknown>) => Promise<void>;
+  onRunTask: (label: string, task: (tenantContext: TenantContext) => Promise<unknown>) => Promise<void>;
   onSelectFinding: (findingId: string) => void;
   selectedFinding: DiscoveryFinding | null;
 }) {
@@ -417,14 +428,22 @@ function DiscoveryFindings({
                 {visibleFindings.map((finding) => (
                   <tr
                     className={cn(
-                      "cursor-pointer border-b last:border-b-0",
+                      "border-b last:border-b-0",
                       selectedFinding?.id === finding.id ? "bg-accent/50" : ""
                     )}
                     data-discovery-finding-row={finding.id}
                     key={finding.id}
-                    onClick={() => onSelectFinding(finding.id)}
                   >
-                    <td className="py-3 pr-3 font-medium">{finding.detected_name}</td>
+                    <td className="py-3 pr-3">
+                      <button
+                        aria-pressed={selectedFinding?.id === finding.id}
+                        className="text-left font-medium underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        onClick={() => onSelectFinding(finding.id)}
+                        type="button"
+                      >
+                        {finding.detected_name}
+                      </button>
+                    </td>
                     <td className="py-3 pr-3">
                       <RiskBadge risk={finding.risk_level ?? "low"} />
                       <span className="ml-2 text-muted-foreground">{finding.risk_score ?? 0}</span>
@@ -450,7 +469,7 @@ function FindingDetail({
   onRunTask
 }: {
   finding: DiscoveryFinding | null;
-  onRunTask: (label: string, task: () => Promise<unknown>) => Promise<void>;
+  onRunTask: (label: string, task: (tenantContext: TenantContext) => Promise<unknown>) => Promise<void>;
 }) {
   if (!finding) {
     return <EmptyState title="No finding selected" description="Select a finding to inspect risk evidence." />;
@@ -493,8 +512,8 @@ function FindingDetail({
           onSubmit={(event) => {
             event.preventDefault();
             const owner = formString(new FormData(event.currentTarget), "owner_user_id");
-            void onRunTask("Owner assigned", () =>
-              assignDiscoveryFindingOwner(finding.id, { owner_user_id: owner })
+            void onRunTask("Owner assigned", (tenantContext) =>
+              assignDiscoveryFindingOwner(finding.id, { owner_user_id: owner }, tenantContext)
             );
           }}
         >
@@ -507,8 +526,12 @@ function FindingDetail({
           <Button
             data-discovery-action="register-agent"
             onClick={() =>
-              onRunTask("Registration draft created", () =>
-                registerDiscoveryFindingAgent(finding.id, { owner_user_id: finding.owner_hint ?? "owner_1" })
+              onRunTask("Registration draft created", (tenantContext) =>
+                registerDiscoveryFindingAgent(
+                  finding.id,
+                  { owner_user_id: finding.owner_hint ?? "owner_1" },
+                  tenantContext
+                )
               )
             }
             type="button"
@@ -523,11 +546,11 @@ function FindingDetail({
             onSubmit={(event) => {
               event.preventDefault();
               const form = new FormData(event.currentTarget);
-              void onRunTask("Finding suppressed", () =>
+              void onRunTask("Finding suppressed", (tenantContext) =>
                 suppressDiscoveryFinding(finding.id, {
                   reason: formString(form, "reason"),
                   confirm: formString(form, "confirm")
-                })
+                }, tenantContext)
               );
             }}
           >
@@ -539,8 +562,8 @@ function FindingDetail({
           </form>
           <Button
             onClick={() =>
-              onRunTask("Finding decommissioned", () =>
-                markDiscoveryFindingDecommissioned(finding.id)
+              onRunTask("Finding decommissioned", (tenantContext) =>
+                markDiscoveryFindingDecommissioned(finding.id, tenantContext)
               )
             }
             type="button"

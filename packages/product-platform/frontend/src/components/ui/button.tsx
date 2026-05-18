@@ -1,4 +1,5 @@
 import { Slot } from "@radix-ui/react-slot";
+import { forwardRef } from "react";
 import type { ButtonHTMLAttributes } from "react";
 
 import { cn } from "../../lib/utils";
@@ -23,7 +24,10 @@ const variants: Record<ButtonVariant, string> = {
     "border-destructive bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90"
 };
 
-export function Button({ asChild = false, className, variant = "default", ...props }: ButtonProps) {
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
+  { asChild = false, className, variant = "default", ...props },
+  ref
+) {
   const Comp = asChild ? Slot : "button";
   const buttonProps = asChild ? props : { type: "button" as const, ...props };
   return (
@@ -33,7 +37,8 @@ export function Button({ asChild = false, className, variant = "default", ...pro
         variants[variant],
         className
       )}
+      ref={ref}
       {...buttonProps}
     />
   );
-}
+});

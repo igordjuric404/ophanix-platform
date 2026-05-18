@@ -1,6 +1,7 @@
 import { Archive, FileCheck2, Play, ScrollText, XCircle } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
+import type { TenantContext } from "../../api/client";
 import {
   attestArtifact,
   cancelWorkflowRun,
@@ -45,6 +46,17 @@ const runStatuses = ["", "queued", "running", "succeeded", "failed", "cancelled"
 const artifactTypes = ["", "workflow.output", "compliance.report", "audit.export", "sbom"];
 const linkTargetTypes = ["workflow_run", "compliance_report", "audit_export", "plugin_assessment", "evidence_item"];
 
+type WorkflowFieldKind = "boolean" | "integer" | "json" | "number" | "string";
+
+interface WorkflowField {
+  kind: WorkflowFieldKind;
+  label: string;
+  name: string;
+  options: string[];
+  required: boolean;
+  schema: Record<string, unknown>;
+}
+
 export function WorkflowsPage() {
   const [runFilters, setRunFilters] = useState<Record<string, string>>({});
   const [artifactFilters, setArtifactFilters] = useState<Record<string, string>>({});
@@ -72,14 +84,18 @@ export function WorkflowsPage() {
   const activeArtifact =
     artifactDetailQuery.data ?? artifacts.find((artifact) => artifact.id === activeArtifactId) ?? null;
 
-  async function runTask(label: string, task: () => Promise<unknown>) {
+  async function runTask(label: string, task: (tenantContext: TenantContext) => Promise<unknown>) {
     await runWithFeedback(() => mutation.mutateAsync(task), {
       errorMessage: `${label} failed`,
       successMessage: label
     });
   }
 
-  async function runResultTask<T>(label: string, task: () => Promise<T>, onResult: (value: T) => void) {
+  async function runResultTask<T>(
+    label: string,
+    task: (tenantContext: TenantContext) => Promise<T>,
+    onResult: (value: T) => void
+  ) {
     const result = await runWithFeedback<T>(
       () => mutation.mutateAsync(task) as Promise<T>,
       {
@@ -120,7 +136,7 @@ export function WorkflowsPage() {
             onRun={(workflowId, payload) =>
               runResultTask(
                 "Workflow run created",
-                () => createWorkflowRun(workflowId, payload),
+                (tenantContext) => createWorkflowRun(workflowId, payload, tenantContext),
                 (run) => setSelectedRunId(run.id)
               )
             }
@@ -129,7 +145,11 @@ export function WorkflowsPage() {
         </div>
         <WorkflowRunsPanel
           filters={runFilters}
-          onCancel={(runId) => runTask("Workflow run cancelled", () => cancelWorkflowRun(runId))}
+          onCancel={(runId) =>
+            runTask("Workflow run cancelled", (tenantContext) =>
+              cancelWorkflowRun(runId, tenantContext)
+            )
+          }
           onFilter={setRunFilters}
           onSelect={setSelectedRunId}
           runs={runs}
@@ -140,20 +160,28 @@ export function WorkflowsPage() {
           artifacts={artifacts}
           downloadResult={downloadResult}
           onAttest={(artifactId, payload) =>
-            runTask("Artifact attested", () => attestArtifact(artifactId, payload))
+            runTask("Artifact attested", (tenantContext) =>
+              attestArtifact(artifactId, payload, tenantContext)
+            )
           }
           onDownload={(artifactId) =>
-            runResultTask("Artifact downloaded", () => downloadArtifact(artifactId), setDownloadResult)
+            runResultTask(
+              "Artifact downloaded",
+              (tenantContext) => downloadArtifact(artifactId, tenantContext),
+              setDownloadResult
+            )
           }
           onFilter={setArtifactFilters}
           onLink={(artifactId, payload) =>
-            runTask("Artifact linked", () => createArtifactLink(artifactId, payload))
+            runTask("Artifact linked", (tenantContext) =>
+              createArtifactLink(artifactId, payload, tenantContext)
+            )
           }
           onSelect={setSelectedArtifactId}
           onUpload={(payload) =>
             runResultTask(
               "Artifact uploaded",
-              () => createArtifact(payload),
+              (tenantContext) => createArtifact(payload, tenantContext),
               (artifact) => setSelectedArtifactId(artifact.id)
             )
           }
@@ -264,13 +292,7 @@ function WorkflowRunPanel({
             }}
           >
             {fields.map((field) => (
-              <Field
-                defaultValue={String(field.schema.default ?? "")}
-                key={field.name}
-                label={field.label}
-                name={field.name}
-                required={field.required}
-              />
+              <WorkflowInputField field={field} key={field.name} />
             ))}
             <label className="flex items-center gap-2 text-sm">
               <input defaultChecked name="run_immediately" type="checkbox" value="true" />
@@ -536,9 +558,7 @@ function WorkflowArtifactDetail({
         </Button>
       </div>
       {activeDownload ? (
-        <output className="mt-3 block rounded-md bg-muted p-2 text-sm" data-workflow-artifact-download-result={artifact.id}>
-          {activeDownload.metadata.checksum_verified ? "checksum verified" : "downloaded"} {activeDownload.content_base64}
-        </output>
+        <ArtifactDownloadResult download={activeDownload} />
       ) : null}
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
         <div>
@@ -603,6 +623,95 @@ function WorkflowArtifactDetail({
         </div>
       </div>
     </section>
+  );
+}
+
+function ArtifactDownloadResult({ download }: { download: ArtifactDownload }) {
+  const blob = useMemo(() => artifactDownloadBlob(download), [download]);
+  const url = useMemo(
+    () => (typeof URL.createObjectURL === "function" ? URL.createObjectURL(blob) : null),
+    [blob]
+  );
+
+  useEffect(() => {
+    return () => {
+      if (url && typeof URL.revokeObjectURL === "function") {
+        URL.revokeObjectURL(url);
+      }
+    };
+  }, [url]);
+
+  const verified = download.metadata.checksum_verified ? "checksum verified" : "download ready";
+  return (
+    <output
+      className="mt-3 block rounded-md bg-muted p-3 text-sm"
+      data-workflow-artifact-download-result={download.artifact.id}
+    >
+      <span className="font-medium">{verified}</span>
+      <span className="ml-2 text-muted-foreground">
+        {download.artifact.content_type} · {formatBytes(blob.size)}
+      </span>
+      {url ? (
+        <a
+          className="ml-3 inline-flex text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          download={download.artifact.name}
+          href={url}
+        >
+          Save file
+        </a>
+      ) : null}
+    </output>
+  );
+}
+
+function WorkflowInputField({ field }: { field: WorkflowField }) {
+  const defaultValue = workflowDefaultValue(field.schema);
+  if (field.options.length > 0) {
+    return (
+      <SelectField
+        defaultValue={String(defaultValue ?? "")}
+        label={field.label}
+        name={field.name}
+        options={field.required ? field.options : ["", ...field.options]}
+      />
+    );
+  }
+  if (field.kind === "boolean") {
+    return (
+      <label className="flex items-center gap-2 text-sm">
+        <input name={field.name} type="hidden" value="false" />
+        <input
+          defaultChecked={Boolean(defaultValue)}
+          name={field.name}
+          type="checkbox"
+          value="true"
+        />
+        {field.label}
+      </label>
+    );
+  }
+  if (field.kind === "json") {
+    return (
+      <TextAreaField
+        defaultValue={
+          defaultValue === undefined || defaultValue === ""
+            ? ""
+            : JSON.stringify(defaultValue, null, 2)
+        }
+        label={field.label}
+        name={field.name}
+        required={field.required}
+      />
+    );
+  }
+  return (
+    <Field
+      defaultValue={String(defaultValue ?? "")}
+      label={field.label}
+      name={field.name}
+      required={field.required}
+      type={field.kind === "number" || field.kind === "integer" ? "number" : "text"}
+    />
   );
 }
 
@@ -714,20 +823,22 @@ export function workflowRunPayloadFromValues(
   const properties = (schema.properties ?? {}) as Record<string, Record<string, unknown>>;
   const required = new Set((schema.required as string[] | undefined) ?? []);
   const missing: string[] = [];
-  const inputs: Record<string, string> = {};
+  const inputs: Record<string, unknown> = {};
 
   for (const [name, propertySchema] of Object.entries(properties)) {
     const submittedValue = values[name];
-    const rawValue =
-      submittedValue === undefined || submittedValue === null || String(submittedValue).trim() === ""
-        ? propertySchema.default ?? ""
-        : submittedValue;
-    const value = String(rawValue).trim();
-    if (value || required.has(name)) {
-      inputs[name] = value;
-    }
-    if (required.has(name) && !value) {
+    const hasSubmittedValue = !isBlankWorkflowValue(submittedValue);
+    const hasDefault = propertySchema.default !== undefined;
+    const rawValue = hasSubmittedValue ? submittedValue : propertySchema.default;
+    if (required.has(name) && rawValue === undefined) {
       missing.push(name);
+      continue;
+    }
+    if (rawValue !== undefined) {
+      const value = coerceWorkflowInput(name, rawValue, propertySchema);
+      inputs[name] = value;
+    } else if (required.has(name) || hasDefault) {
+      inputs[name] = "";
     }
   }
 
@@ -795,11 +906,100 @@ function workflowFields(workflow: WorkflowDefinition | null) {
   const properties = (schema.properties ?? {}) as Record<string, Record<string, unknown>>;
   const required = new Set((schema.required as string[] | undefined) ?? []);
   return Object.entries(properties).map(([name, propertySchema]) => ({
+    kind: workflowFieldKind(propertySchema),
     name,
+    options: workflowFieldOptions(propertySchema),
     schema: propertySchema,
     required: required.has(name),
     label: String(propertySchema.title ?? name)
   }));
+}
+
+function workflowFieldKind(schema: Record<string, unknown>): WorkflowFieldKind {
+  const type = workflowSchemaType(schema);
+  if (type === "boolean" || type === "integer" || type === "number" || type === "string") {
+    return type;
+  }
+  return "json";
+}
+
+function workflowFieldOptions(schema: Record<string, unknown>) {
+  const enumValues = Array.isArray(schema.enum) ? schema.enum : [];
+  return enumValues
+    .filter((value): value is string | number | boolean => ["string", "number", "boolean"].includes(typeof value))
+    .map((value) => String(value));
+}
+
+function workflowDefaultValue(schema: Record<string, unknown>) {
+  return schema.default;
+}
+
+function coerceWorkflowInput(name: string, value: unknown, schema: Record<string, unknown>) {
+  const type = workflowSchemaType(schema);
+  if (type === "boolean") {
+    return value === true || value === "true" || value === "on" || value === "1";
+  }
+  if (type === "integer" || type === "number") {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) {
+      throw new Error(`Workflow input ${name} must be a ${type}.`);
+    }
+    if (type === "integer" && !Number.isInteger(numericValue)) {
+      throw new Error(`Workflow input ${name} must be an integer.`);
+    }
+    return numericValue;
+  }
+  if (type === "array" || type === "object") {
+    const parsedValue = typeof value === "string" ? parseWorkflowJsonInput(name, value) : value;
+    if (type === "array" && !Array.isArray(parsedValue)) {
+      throw new Error(`Workflow input ${name} must be a JSON array.`);
+    }
+    if (
+      type === "object" &&
+      (typeof parsedValue !== "object" || parsedValue === null || Array.isArray(parsedValue))
+    ) {
+      throw new Error(`Workflow input ${name} must be a JSON object.`);
+    }
+    return parsedValue;
+  }
+  return String(value).trim();
+}
+
+function workflowSchemaType(schema: Record<string, unknown>) {
+  if (Array.isArray(schema.type)) {
+    return schema.type.find((type) => type !== "null") ?? "string";
+  }
+  return typeof schema.type === "string" ? schema.type : "string";
+}
+
+function parseWorkflowJsonInput(name: string, value: string) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    throw new Error(`Workflow input ${name} must be valid JSON.`);
+  }
+}
+
+function isBlankWorkflowValue(value: unknown) {
+  return value === undefined || value === null || String(value).trim() === "";
+}
+
+function artifactDownloadBlob(download: ArtifactDownload) {
+  const binary = globalThis.atob(download.content_base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return new Blob([bytes], {
+    type: download.artifact.content_type || "application/octet-stream"
+  });
+}
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  return `${(bytes / 1024).toFixed(1)} KB`;
 }
 
 function cleanParams(form: FormData, keys: string[]) {

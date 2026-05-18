@@ -105,69 +105,90 @@ export function getAgentAudit(agentId: string, tenantContext?: TenantContext) {
   });
 }
 
-export function createAgentRegistrationDraft(body: Record<string, unknown>) {
+export function createAgentRegistrationDraft(
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<AgentDetail | AgentSummary>("/agents/registration-drafts", {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
-export function updateAgentRegistrationDraft(draftId: string, body: Record<string, unknown>) {
+export function updateAgentRegistrationDraft(
+  draftId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<AgentDetail | AgentSummary>(
     `/agents/registration-drafts/${encodeURIComponent(draftId)}`,
-    { method: "PATCH", body }
+    { method: "PATCH", body, tenantContext }
   );
 }
 
-export function createAgentIdentity(draftId: string) {
+export function createAgentIdentity(draftId: string, tenantContext?: TenantContext) {
   return apiClient.request<Record<string, unknown>>(
     `/agents/registration-drafts/${encodeURIComponent(draftId)}/identity`,
-    { method: "POST" }
+    { method: "POST", tenantContext }
   );
 }
 
-export function simulateAgentRegistrationDraft(draftId: string) {
+export function simulateAgentRegistrationDraft(draftId: string, tenantContext?: TenantContext) {
   return apiClient.request<Record<string, unknown>>(
     `/agents/registration-drafts/${encodeURIComponent(draftId)}/simulate`,
-    { method: "POST" }
+    { method: "POST", tenantContext }
   );
 }
 
-export function submitAgentRegistrationDraft(draftId: string) {
+export function submitAgentRegistrationDraft(draftId: string, tenantContext?: TenantContext) {
   return apiClient.request<AgentSummary>(
     `/agents/registration-drafts/${encodeURIComponent(draftId)}/submit`,
-    { method: "POST" }
+    { method: "POST", tenantContext }
   );
 }
 
-export function approveAgent(agentId: string, body: Record<string, unknown> = {}) {
+export function approveAgent(
+  agentId: string,
+  body: Record<string, unknown> = {},
+  tenantContext?: TenantContext
+) {
   return apiClient.request<AgentSummary>(`/agents/${encodeURIComponent(agentId)}/approve`, {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
-export function activateAgent(agentId: string, body: Record<string, unknown> = {}) {
+export function activateAgent(
+  agentId: string,
+  body: Record<string, unknown> = {},
+  tenantContext?: TenantContext
+) {
   return apiClient.request<AgentSummary>(`/agents/${encodeURIComponent(agentId)}/activate`, {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
 export function runLifecycleAction(
   agentId: string,
   action: "reject" | "suspend" | "resume" | "change-owner" | "decommission" | "heartbeat",
-  body: Record<string, unknown> = {}
+  body: Record<string, unknown> = {},
+  tenantContext?: TenantContext
 ) {
   return apiClient.request<AgentSummary>(`/agents/${encodeURIComponent(agentId)}/${action}`, {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
-export function runOrphanDetection() {
+export function runOrphanDetection(tenantContext?: TenantContext) {
   return apiClient.request<Record<string, unknown>>("/agents/orphan-detection/run", {
-    method: "POST"
+    method: "POST",
+    tenantContext
   });
 }
 
@@ -182,31 +203,47 @@ export function listAgentCredentials(
   );
 }
 
-export function issueAgentCredential(agentId: string, body: Record<string, unknown>) {
+export function issueAgentCredential(
+  agentId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<Record<string, unknown>>(
     `/agents/${encodeURIComponent(agentId)}/credentials`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
-export function rotateCredential(credentialId: string, body: Record<string, unknown>) {
+export function rotateCredential(
+  credentialId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<Record<string, unknown>>(
     `/credentials/${encodeURIComponent(credentialId)}/rotate`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
-export function revokeCredential(credentialId: string, body: Record<string, unknown>) {
+export function revokeCredential(
+  credentialId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<Record<string, unknown>>(
     `/credentials/${encodeURIComponent(credentialId)}/revoke`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
-export function verifyCredential(credentialId: string, body: Record<string, unknown>) {
+export function verifyCredential(
+  credentialId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<Record<string, unknown>>(
     `/credentials/${encodeURIComponent(credentialId)}/verify`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
@@ -275,7 +312,8 @@ export function useAgentMutation() {
   const queryClient = useQueryClient();
   const scope = useTenantQueryScope();
   return useMutation({
-    mutationFn: async (task: () => Promise<unknown>) => task(),
+    mutationFn: async (task: (tenantContext: TenantContext) => Promise<unknown>) =>
+      task(scope.context),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["agents"], scope) });
       void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["credentials"], scope) });

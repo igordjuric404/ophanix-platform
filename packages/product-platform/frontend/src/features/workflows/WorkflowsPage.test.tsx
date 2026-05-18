@@ -132,6 +132,7 @@ describe("WorkflowsPage", () => {
     expect(artifactDetail).not.toBeNull();
     fireEvent.click(within(artifactDetail as HTMLElement).getByRole("button", { name: "Download" }));
     expect(await screen.findByText(/checksum verified/)).toBeInTheDocument();
+    expect(within(artifactDetail as HTMLElement).queryByText("e30=")).not.toBeInTheDocument();
 
     fireEvent.change(within(artifactDetail as HTMLElement).getByLabelText("Link Target ID"), {
       target: { value: "wrun_1" }
@@ -168,6 +169,51 @@ describe("WorkflowsPage", () => {
       inputs: { policy_body: "package demo", policy_format: "yaml" },
       run_immediately: true
     });
+
+    expect(
+      workflowRunPayloadFromValues(
+        {
+          ...workflow,
+          input_schema: {
+            type: "object",
+            required: ["retries", "metadata"],
+            properties: {
+              retries: { type: "integer" },
+              dry_run: { type: "boolean", default: false },
+              metadata: { type: "object" },
+              tags: { type: "array", default: ["policy"] }
+            }
+          }
+        },
+        {
+          retries: "2",
+          dry_run: "true",
+          metadata: "{\"owner\":\"security\"}",
+          tags: ""
+        }
+      )
+    ).toEqual({
+      inputs: {
+        dry_run: true,
+        metadata: { owner: "security" },
+        retries: 2,
+        tags: ["policy"]
+      },
+      run_immediately: true
+    });
+
+    expect(() =>
+      workflowRunPayloadFromValues(
+        {
+          ...workflow,
+          input_schema: {
+            type: "object",
+            properties: { retries: { type: "integer" } }
+          }
+        },
+        { retries: "1.5" }
+      )
+    ).toThrow("Workflow input retries must be an integer.");
 
     expect(
       artifactUploadPayloadFromValues({

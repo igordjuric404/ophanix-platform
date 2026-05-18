@@ -11,6 +11,7 @@ import {
   YAxis
 } from "recharts";
 
+import type { TenantContext } from "../../api/client";
 import {
   acknowledgeObservabilityIncident,
   advanceObservabilityRollout,
@@ -88,14 +89,18 @@ export function ObservabilityPage() {
   const experiments = chaosQuery.data ?? [];
   const rollouts = rolloutsQuery.data ?? [];
 
-  async function runTask(label: string, task: () => Promise<unknown>) {
+  async function runTask(label: string, task: (tenantContext: TenantContext) => Promise<unknown>) {
     await runWithFeedback(() => mutation.mutateAsync(task), {
       errorMessage: `${label} failed`,
       successMessage: label
     });
   }
 
-  async function runResultTask<T>(label: string, task: () => Promise<T>, onResult: (value: T) => void) {
+  async function runResultTask<T>(
+    label: string,
+    task: (tenantContext: TenantContext) => Promise<T>,
+    onResult: (value: T) => void
+  ) {
     const result = await runWithFeedback<T>(
       () => mutation.mutateAsync(task) as Promise<T>,
       {
@@ -128,10 +133,14 @@ export function ObservabilityPage() {
         <ObservabilitySummary costs={costs} incidents={incidents} rollouts={rollouts} slos={slos} />
         <div className="grid gap-6 2xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
           <SloPanel
-            onCreate={(payload) => runTask("SLO created", () => createObservabilitySlo(payload))}
+            onCreate={(payload) =>
+              runTask("SLO created", (tenantContext) =>
+                createObservabilitySlo(payload, tenantContext)
+              )
+            }
             onMeasure={(sloId, payload) =>
-              runTask("SLO measurement recorded", () =>
-                createObservabilitySloMeasurement(sloId, payload)
+              runTask("SLO measurement recorded", (tenantContext) =>
+                createObservabilitySloMeasurement(sloId, payload, tenantContext)
               )
             }
             slos={slos}
@@ -139,10 +148,14 @@ export function ObservabilityPage() {
           <CostPanel
             costs={costs}
             onBudget={(payload) =>
-              runTask("Cost budget created", () => createObservabilityCostBudget(payload))
+              runTask("Cost budget created", (tenantContext) =>
+                createObservabilityCostBudget(payload, tenantContext)
+              )
             }
             onEvent={(payload) =>
-              runTask("Cost event recorded", () => createObservabilityCostEvent(payload))
+              runTask("Cost event recorded", (tenantContext) =>
+                createObservabilityCostEvent(payload, tenantContext)
+              )
             }
           />
         </div>
@@ -150,14 +163,20 @@ export function ObservabilityPage() {
           filters={incidentFilters}
           incidents={incidents}
           onAck={(incidentId) =>
-            runTask("Incident acknowledged", () => acknowledgeObservabilityIncident(incidentId))
+            runTask("Incident acknowledged", (tenantContext) =>
+              acknowledgeObservabilityIncident(incidentId, tenantContext)
+            )
           }
           onCreate={(payload) =>
-            runTask("Incident created", () => createObservabilityIncident(payload))
+            runTask("Incident created", (tenantContext) =>
+              createObservabilityIncident(payload, tenantContext)
+            )
           }
           onFilter={setIncidentFilters}
           onResolve={(incidentId, payload) =>
-            runTask("Incident resolved", () => resolveObservabilityIncident(incidentId, payload))
+            runTask("Incident resolved", (tenantContext) =>
+              resolveObservabilityIncident(incidentId, payload, tenantContext)
+            )
           }
         />
         <div className="grid gap-6 2xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
@@ -165,8 +184,8 @@ export function ObservabilityPage() {
             experiments={experiments}
             filters={chaosFilters}
             onCreate={(payload) =>
-              runTask("Chaos experiment created", () =>
-                createObservabilityChaosExperiment(payload)
+              runTask("Chaos experiment created", (tenantContext) =>
+                createObservabilityChaosExperiment(payload, tenantContext)
               )
             }
             onFilter={setChaosFilters}
@@ -174,14 +193,15 @@ export function ObservabilityPage() {
             onRun={(experimentId, payload) =>
               runResultTask(
                 "Chaos experiment run completed",
-                () => runObservabilityChaosExperiment(experimentId, payload),
+                (tenantContext) =>
+                  runObservabilityChaosExperiment(experimentId, payload, tenantContext),
                 (run) => setChaosRuns((items) => [run, ...items.filter((item) => item.id !== run.id)])
               )
             }
             onStop={(runId) =>
               runResultTask(
                 "Chaos run stopped",
-                () => stopObservabilityChaosRun(runId),
+                (tenantContext) => stopObservabilityChaosRun(runId, tenantContext),
                 (run) => setChaosRuns((items) => [run, ...items.filter((item) => item.id !== run.id)])
               )
             }
@@ -190,15 +210,21 @@ export function ObservabilityPage() {
           <RolloutPanel
             filters={rolloutFilters}
             onAdvance={(rolloutId, payload) =>
-              runTask("Rollout advanced", () => advanceObservabilityRollout(rolloutId, payload))
+              runTask("Rollout advanced", (tenantContext) =>
+                advanceObservabilityRollout(rolloutId, payload, tenantContext)
+              )
             }
             onCreate={(payload) =>
-              runTask("Rollout created", () => createObservabilityRollout(payload))
+              runTask("Rollout created", (tenantContext) =>
+                createObservabilityRollout(payload, tenantContext)
+              )
             }
             onFilter={setRolloutFilters}
             onInvalidInput={(error) => setError(actionErrorMessage(error, "Invalid rollout form input"))}
             onRollback={(rolloutId, payload) =>
-              runTask("Rollout rolled back", () => rollbackObservabilityRollout(rolloutId, payload))
+              runTask("Rollout rolled back", (tenantContext) =>
+                rollbackObservabilityRollout(rolloutId, payload, tenantContext)
+              )
             }
             rollouts={rollouts}
           />

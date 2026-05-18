@@ -146,9 +146,10 @@ export function getDemoScenario(scenarioId: string, tenantContext?: TenantContex
   );
 }
 
-export function startDemoRun(scenarioId: string) {
+export function startDemoRun(scenarioId: string, tenantContext?: TenantContext) {
   return apiClient.request<DemoRun>(`/demo/scenarios/${encodeURIComponent(scenarioId)}/runs`, {
-    method: "POST"
+    method: "POST",
+    tenantContext
   });
 }
 
@@ -158,20 +159,22 @@ export function getDemoRun(runId: string, tenantContext?: TenantContext) {
   });
 }
 
-export function continueDemoRun(runId: string) {
+export function continueDemoRun(runId: string, tenantContext?: TenantContext) {
   return apiClient.request<DemoRun>(`/demo/runs/${encodeURIComponent(runId)}/continue`, {
-    method: "POST"
+    method: "POST",
+    tenantContext
   });
 }
 
-export function cancelDemoRun(runId: string) {
+export function cancelDemoRun(runId: string, tenantContext?: TenantContext) {
   return apiClient.request<DemoRun>(`/demo/runs/${encodeURIComponent(runId)}/cancel`, {
-    method: "POST"
+    method: "POST",
+    tenantContext
   });
 }
 
-export function resetDemoEnvironment(body: Record<string, unknown>) {
-  return apiClient.request<DemoResetRun>("/demo/reset", { method: "POST", body });
+export function resetDemoEnvironment(body: Record<string, unknown>, tenantContext?: TenantContext) {
+  return apiClient.request<DemoResetRun>("/demo/reset", { method: "POST", body, tenantContext });
 }
 
 export function listDemoResetRuns(params: DemoParams = {}, tenantContext?: TenantContext) {
@@ -245,7 +248,8 @@ export function useDemoMutation() {
   const queryClient = useQueryClient();
   const scope = useTenantQueryScope();
   return useMutation({
-    mutationFn: async (task: () => Promise<unknown>) => task(),
+    mutationFn: async (task: (tenantContext: TenantContext) => Promise<unknown>) =>
+      task(scope.context),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["demo"], scope) });
       void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["audit"], scope) });

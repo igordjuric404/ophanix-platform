@@ -6,7 +6,7 @@ import {
   ShieldCheck,
   Sparkles
 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 
 import type { TenantContext } from "../../api/client";
 import {
@@ -70,6 +70,7 @@ export function MarketplacePage() {
   const [pluginFilters, setPluginFilters] = useState<MarketplaceParams>({});
   const [reviewFilters, setReviewFilters] = useState<MarketplaceParams>({});
   const [selectedPluginId, setSelectedPluginId] = useState<string | null>(null);
+  const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
   const [policyResult, setPolicyResult] = useState<PluginPolicyResult | null>(null);
   const [qualityAssessment, setQualityAssessment] = useState<PluginQualityAssessment | null>(null);
   const [trustEvents, setTrustEvents] = useState<PluginTrustEvent[]>([]);
@@ -87,10 +88,21 @@ export function MarketplacePage() {
   const pluginDetailQuery = useMarketplacePlugin(activePluginId);
   const activePlugin =
     pluginDetailQuery.data ?? plugins.find((plugin) => plugin.id === activePluginId) ?? null;
-  const activeVersion = activePlugin?.versions[0] ?? null;
+  const activeVersion =
+    activePlugin?.versions.find((version) => version.id === selectedVersionId) ??
+    activePlugin?.versions[0] ??
+    null;
+  const activeVersionId = activeVersion?.id ?? null;
   const installations = installationsQuery.data ?? [];
   const reviews = reviewsQuery.data ?? [];
   const signingKeys = signingKeysQuery.data ?? [];
+  const activePolicyResult =
+    policyResult?.plugin_version_id === activeVersionId ? policyResult : null;
+  const activeQualityAssessment =
+    qualityAssessment?.plugin_version_id === activeVersionId ? qualityAssessment : null;
+  const activeTrustEvents = trustEvents.filter(
+    (event) => event.plugin_version_id === activeVersionId
+  );
 
   async function runTask(
     label: string,
@@ -153,7 +165,10 @@ export function MarketplacePage() {
                 importMarketplacePlugin(payload, tenantContext)
               )
             }
-            onSelect={setSelectedPluginId}
+            onSelect={(pluginId) => {
+              setSelectedPluginId(pluginId);
+              setSelectedVersionId(null);
+            }}
             plugins={plugins}
             selectedPluginId={activePlugin?.id ?? null}
           />
@@ -170,7 +185,9 @@ export function MarketplacePage() {
                 submitMarketplacePluginReview(versionId, payload, tenantContext)
               )
             }
+            onSelectVersion={setSelectedVersionId}
             plugin={activePlugin}
+            selectedVersionId={activeVersion?.id ?? null}
           />
         </div>
         <div className="grid gap-6 2xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
@@ -188,7 +205,7 @@ export function MarketplacePage() {
                 createMarketplaceInstallation(payload, tenantContext)
               )
             }
-            policyResult={policyResult}
+            policyResult={activePolicyResult}
             version={activeVersion}
           />
           <InstalledPanel
@@ -228,8 +245,8 @@ export function MarketplacePage() {
           />
         </div>
         <QualityTrustPanel
-          assessment={qualityAssessment}
-          events={trustEvents}
+          assessment={activeQualityAssessment}
+          events={activeTrustEvents}
           onRecompute={(versionId, payload) =>
             runResultTask(
               "Plugin trust recomputed",
@@ -388,14 +405,19 @@ function CatalogPanel({
 
 function PluginDetailPanel({
   onAssess,
+  onSelectVersion,
   onSubmitReview,
-  plugin
+  plugin,
+  selectedVersionId
 }: {
   onAssess: (versionId: string) => void;
+  onSelectVersion: (versionId: string) => void;
   onSubmitReview: (versionId: string, payload: Record<string, unknown>) => void;
   plugin: MarketplacePlugin | null;
+  selectedVersionId: string | null;
 }) {
-  const version = plugin?.versions[0] ?? null;
+  const version =
+    plugin?.versions.find((item) => item.id === selectedVersionId) ?? plugin?.versions[0] ?? null;
   if (!plugin || !version) {
     return (
       <Card>
@@ -428,14 +450,29 @@ function PluginDetailPanel({
                   <TableHead>Version</TableHead>
                   <TableHead>Quality</TableHead>
                   <TableHead>Capabilities</TableHead>
+                  <TableHead />
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {plugin.versions.map((item) => (
-                  <TableRow data-marketplace-version-row={item.id} key={item.id}>
+                  <TableRow
+                    className={item.id === version.id ? "bg-accent/50" : undefined}
+                    data-marketplace-version-row={item.id}
+                    key={item.id}
+                  >
                     <TableCell>{item.version}</TableCell>
                     <TableCell>{item.quality_score}</TableCell>
                     <TableCell>{item.required_capabilities.length}</TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        aria-pressed={item.id === version.id}
+                        onClick={() => onSelectVersion(item.id)}
+                        type="button"
+                        variant={item.id === version.id ? "default" : "outline"}
+                      >
+                        Select
+                      </Button>
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -931,12 +968,14 @@ function Field({
   readOnly?: boolean;
   type?: string;
 }) {
+  const reactId = useId();
+  const id = `${reactId}-${name}`;
   return (
     <div className="space-y-1">
-      <Label htmlFor={name}>{label}</Label>
+      <Label htmlFor={id}>{label}</Label>
       <Input
         defaultValue={defaultValue}
-        id={name}
+        id={id}
         name={name}
         placeholder={placeholder}
         readOnly={readOnly}
@@ -957,13 +996,15 @@ function TextAreaField({
   name: string;
   rows?: number;
 }) {
+  const reactId = useId();
+  const id = `${reactId}-${name}`;
   return (
     <div className="space-y-1">
-      <Label htmlFor={name}>{label}</Label>
+      <Label htmlFor={id}>{label}</Label>
       <textarea
         className="min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
         defaultValue={defaultValue}
-        id={name}
+        id={id}
         name={name}
         rows={rows}
       />
@@ -982,13 +1023,15 @@ function SelectField({
   name: string;
   options: string[];
 }) {
+  const reactId = useId();
+  const id = `${reactId}-${name}`;
   return (
     <div className="space-y-1">
-      <Label htmlFor={name}>{label}</Label>
+      <Label htmlFor={id}>{label}</Label>
       <select
         className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
         defaultValue={defaultValue}
-        id={name}
+        id={id}
         name={name}
       >
         {options.map((option) => (
