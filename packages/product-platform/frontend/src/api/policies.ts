@@ -149,14 +149,20 @@ export interface PolicyEvaluationSummary {
 
 export type PolicyParams = Record<string, string | number | boolean | null | undefined>;
 
-export function listPolicies(params: PolicyParams = {}, tenantContext?: TenantContext) {
+export function listPolicies(
+  params: PolicyParams = {},
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
+) {
   return apiClient.request<PolicySummary[]>(`/policies${queryString(params)}`, {
+    signal,
     tenantContext
   });
 }
 
-export function getPolicy(policyId: string, tenantContext?: TenantContext) {
+export function getPolicy(policyId: string, tenantContext?: TenantContext, signal?: AbortSignal) {
   return apiClient.request<PolicyDetail>(`/policies/${encodeURIComponent(policyId)}`, {
+    signal,
     tenantContext
   });
 }
@@ -226,10 +232,14 @@ export function listPolicyLintResults(policyId: string, versionId: string) {
   );
 }
 
-export function getPolicyAffectedResources(policyId: string, tenantContext?: TenantContext) {
+export function getPolicyAffectedResources(
+  policyId: string,
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
+) {
   return apiClient.request<PolicyAffectedResources>(
     `/policies/${encodeURIComponent(policyId)}/affected-resources`,
-    { tenantContext }
+    { signal, tenantContext }
   );
 }
 
@@ -283,8 +293,13 @@ export function exportPolicy(
   });
 }
 
-export function listPolicyBindings(params: PolicyParams = {}, tenantContext?: TenantContext) {
+export function listPolicyBindings(
+  params: PolicyParams = {},
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
+) {
   return apiClient.request<PolicyBinding[]>(`/policy-bindings${queryString(params)}`, {
+    signal,
     tenantContext
   });
 }
@@ -338,8 +353,13 @@ export function createPolicyException(
   );
 }
 
-export function listPolicyExceptions(params: PolicyParams = {}, tenantContext?: TenantContext) {
+export function listPolicyExceptions(
+  params: PolicyParams = {},
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
+) {
   return apiClient.request<PolicyException[]>(`/policy-exceptions${queryString(params)}`, {
+    signal,
     tenantContext
   });
 }
@@ -363,26 +383,36 @@ export function evaluatePolicy(body: Record<string, unknown>, tenantContext?: Te
   });
 }
 
-export function listPolicyEvaluations(params: PolicyParams = {}, tenantContext?: TenantContext) {
+export function listPolicyEvaluations(
+  params: PolicyParams = {},
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
+) {
   return apiClient.request<PolicyEvaluation[]>(`/policy-evaluations${queryString(params)}`, {
+    signal,
     tenantContext
   });
 }
 
 export function getPolicyEvaluationSummary(
   params: PolicyParams = {},
-  tenantContext?: TenantContext
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
 ) {
   return apiClient.request<PolicyEvaluationSummary>(
     `/policy-evaluations/summary${queryString(params)}`,
-    { tenantContext }
+    { signal, tenantContext }
   );
 }
 
-export function getPolicyEvaluation(evaluationId: string, tenantContext?: TenantContext) {
+export function getPolicyEvaluation(
+  evaluationId: string,
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
+) {
   return apiClient.request<PolicyEvaluation>(
     `/policy-evaluations/${encodeURIComponent(evaluationId)}`,
-    { tenantContext }
+    { signal, tenantContext }
   );
 }
 
@@ -394,7 +424,7 @@ export function usePolicies(params: PolicyParams = {}) {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["policies", params], scope),
-    queryFn: () => listPolicies(params, scope.context)
+    queryFn: ({ signal }) => listPolicies(params, scope.context, signal)
   });
 }
 
@@ -403,7 +433,7 @@ export function usePolicyDetail(policyId: string | null) {
   return useQuery({
     enabled: Boolean(policyId),
     queryKey: scopedQueryKey(["policies", policyId, "detail"], scope),
-    queryFn: () => getPolicy(policyId as string, scope.context)
+    queryFn: ({ signal }) => getPolicy(policyId as string, scope.context, signal)
   });
 }
 
@@ -412,7 +442,8 @@ export function usePolicyAffectedResources(policyId: string | null) {
   return useQuery({
     enabled: Boolean(policyId),
     queryKey: scopedQueryKey(["policies", policyId, "affected-resources"], scope),
-    queryFn: () => getPolicyAffectedResources(policyId as string, scope.context)
+    queryFn: ({ signal }) =>
+      getPolicyAffectedResources(policyId as string, scope.context, signal)
   });
 }
 
@@ -420,7 +451,7 @@ export function usePolicyBindings(params: PolicyParams = {}) {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["policies", "bindings", params], scope),
-    queryFn: () => listPolicyBindings(params, scope.context)
+    queryFn: ({ signal }) => listPolicyBindings(params, scope.context, signal)
   });
 }
 
@@ -428,7 +459,7 @@ export function usePolicyExceptions(params: PolicyParams = {}) {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["policies", "exceptions", params], scope),
-    queryFn: () => listPolicyExceptions(params, scope.context)
+    queryFn: ({ signal }) => listPolicyExceptions(params, scope.context, signal)
   });
 }
 
@@ -436,7 +467,7 @@ export function usePolicyEvaluations(params: PolicyParams = {}) {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["policies", "evaluations", params], scope),
-    queryFn: () => listPolicyEvaluations(params, scope.context)
+    queryFn: ({ signal }) => listPolicyEvaluations(params, scope.context, signal)
   });
 }
 
@@ -444,7 +475,7 @@ export function usePolicyEvaluationSummary(params: PolicyParams = {}) {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["policies", "evaluations", "summary", params], scope),
-    queryFn: () => getPolicyEvaluationSummary(params, scope.context)
+    queryFn: ({ signal }) => getPolicyEvaluationSummary(params, scope.context, signal)
   });
 }
 

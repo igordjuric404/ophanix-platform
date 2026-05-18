@@ -2,7 +2,7 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { renderWithQueryClient } from "../../test/test-utils";
-import { McpPage, mcpProxyCallPayloadFromForm } from "./McpPage";
+import { McpPage, mcpProxyCallPayloadFromForm, mcpRateLimitPayloadFromForm } from "./McpPage";
 
 const mcpServer = {
   id: "mcpsrv_1",
@@ -161,7 +161,8 @@ describe("McpPage", () => {
     expect(screen.getByText("Tool Registry")).toBeInTheDocument();
     expect(screen.getAllByText("claims.lookup").length).toBeGreaterThan(0);
     expect(screen.getAllByText("sha256:new").length).toBeGreaterThan(0);
-    expect(screen.getByText("Version History")).toBeInTheDocument();
+    fireEvent.click(within(mcpToolRow("mcptool_1")).getByRole("button", { name: "Details" }));
+    expect(await screen.findByText("Version History")).toBeInTheDocument();
     expect(screen.getByText("Scan History")).toBeInTheDocument();
     expect(screen.getAllByText("Sensitive claim field exposed").length).toBeGreaterThan(0);
     expect(screen.getByText("Proxy Traffic")).toBeInTheDocument();
@@ -210,6 +211,7 @@ describe("McpPage", () => {
     await waitFor(() =>
       expect(calls.some((call) => call.path === "/api/v1/mcp/findings?status=open&severity=critical")).toBe(true)
     );
+    fireEvent.click(within(await waitFor(() => mcpFindingRow("mcpf_1"))).getByRole("button", { name: "Details" }));
     const riskReason = await within(findingsPanel).findByLabelText("Risk Reason");
     fireEvent.change(riskReason, {
       target: { value: "Accepted for demo" }
@@ -299,6 +301,32 @@ describe("McpPage", () => {
 
     expect(() => mcpProxyCallPayloadFromForm(form)).toThrow("Params JSON must be a JSON object.");
   });
+
+  it("rejects invalid MCP rate-limit numeric values", () => {
+    expect(() =>
+      mcpRateLimitPayloadFromForm(
+        formWithValues({
+          enabled: "on",
+          max_calls: "many",
+          target_id: "mcptool_1",
+          target_type: "mcp-tool",
+          window_seconds: "60"
+        })
+      )
+    ).toThrow("Max Calls must be a valid integer.");
+
+    expect(() =>
+      mcpRateLimitPayloadFromForm(
+        formWithValues({
+          enabled: "on",
+          max_calls: "10",
+          target_id: "mcptool_1",
+          target_type: "mcp-tool",
+          window_seconds: "0"
+        })
+      )
+    ).toThrow("Window Seconds must be at least 1.");
+  });
 });
 
 interface RecordedCall {
@@ -378,4 +406,27 @@ function json(value: unknown, status = 200) {
     status,
     headers: { "Content-Type": "application/json" }
   });
+}
+
+function mcpToolRow(toolId: string) {
+  const row = document.querySelector(`[data-mcp-tool-row="${toolId}"]`);
+  expect(row).not.toBeNull();
+  return row as HTMLElement;
+}
+
+function mcpFindingRow(findingId: string) {
+  const row = document.querySelector(`[data-mcp-finding-row="${findingId}"]`);
+  expect(row).not.toBeNull();
+  return row as HTMLElement;
+}
+
+function formWithValues(values: Record<string, string>) {
+  const form = document.createElement("form");
+  for (const [name, value] of Object.entries(values)) {
+    const input = document.createElement("input");
+    input.name = name;
+    input.value = value;
+    form.append(input);
+  }
+  return form;
 }

@@ -30,6 +30,8 @@ export function parseJsonObjectField(
 export interface NumericFieldOptions {
   emptyFallback?: number;
   integer?: boolean;
+  max?: number;
+  min?: number;
 }
 
 export function parseRequiredNumberField(
@@ -48,6 +50,12 @@ export function parseRequiredNumberField(
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || (options.integer && !Number.isInteger(parsed))) {
     throw new Error(`${fieldName} must be a valid ${options.integer ? "integer" : "number"}.`);
+  }
+  if (options.min !== undefined && parsed < options.min) {
+    throw new Error(`${fieldName} must be at least ${options.min}.`);
+  }
+  if (options.max !== undefined && parsed > options.max) {
+    throw new Error(`${fieldName} must be at most ${options.max}.`);
   }
   return parsed;
 }

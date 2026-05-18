@@ -7,6 +7,8 @@ import type { UserPrincipal } from "../../api/types";
 import { renderWithQueryClient } from "../../test/test-utils";
 import {
   PoliciesPage,
+  policyBindingCreatePayloadFromForm,
+  policyBindingPromotePayloadFromForm,
   policyEvaluationMatchesFilters,
   upsertPolicyEvaluationFeed
 } from "./PoliciesPage";
@@ -162,8 +164,9 @@ describe("PoliciesPage", () => {
     renderPoliciesPage();
 
     expect((await screen.findAllByText("Runtime Guardrails")).length).toBeGreaterThan(0);
+    fireEvent.click(within(policyRow("policy_1")).getByRole("button", { name: "Open" }));
 
-    fireEvent.click(screen.getByRole("button", { name: "Lint" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Lint" }));
     expect(await screen.findByText("schema.unknown_operator")).toBeInTheDocument();
     expect(screen.getByText("line 7")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save Version" })).toBeDisabled();
@@ -189,6 +192,9 @@ describe("PoliciesPage", () => {
   it("requires confirmation before archiving a policy version", async () => {
     const calls = mockPolicyFetch();
     renderPoliciesPage();
+
+    expect((await screen.findAllByText("Runtime Guardrails")).length).toBeGreaterThan(0);
+    fireEvent.click(within(policyRow("policy_1")).getByRole("button", { name: "Open" }));
 
     const versionRow = (await screen.findAllByText("v2"))
       .find((element) => element.closest("[data-policy-version-row='pver_2']"))
@@ -236,6 +242,45 @@ describe("PoliciesPage", () => {
         (row) => row.id
       )
     ).toEqual(["peval_2", "peval_1"]);
+  });
+
+  it("rejects invalid policy binding numeric values", () => {
+    expect(() =>
+      policyBindingCreatePayloadFromForm(
+        formWithValues({
+          mode: "shadow",
+          policy_id: "policy_1",
+          priority: "first",
+          rollout_percentage: "50",
+          target_id: "agent_1",
+          target_type: "agent"
+        })
+      )
+    ).toThrow("Priority must be a valid integer.");
+
+    expect(() =>
+      policyBindingCreatePayloadFromForm(
+        formWithValues({
+          mode: "shadow",
+          policy_id: "policy_1",
+          priority: "1",
+          rollout_percentage: "150",
+          target_id: "agent_1",
+          target_type: "agent"
+        })
+      )
+    ).toThrow("Rollout must be at most 100.");
+
+    expect(() =>
+      policyBindingPromotePayloadFromForm(
+        formWithValues({
+          mode: "enforce",
+          reason: "promote",
+          rollout_percentage: "-1"
+        }),
+        binding
+      )
+    ).toThrow("Rollout must be at least 0.");
   });
 
   it("renders live evaluation rows emitted through the shared event stream", async () => {
@@ -430,4 +475,21 @@ function json(body: unknown, status = 200) {
       status
     })
   );
+}
+
+function policyRow(policyId: string) {
+  const row = document.querySelector(`[data-policy-row="${policyId}"]`);
+  expect(row).not.toBeNull();
+  return row as HTMLElement;
+}
+
+function formWithValues(values: Record<string, string>) {
+  const form = document.createElement("form");
+  for (const [name, value] of Object.entries(values)) {
+    const input = document.createElement("input");
+    input.name = name;
+    input.value = value;
+    form.append(input);
+  }
+  return form;
 }

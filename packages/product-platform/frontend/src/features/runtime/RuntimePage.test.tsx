@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderWithQueryClient } from "../../test/test-utils";
 import {
   RuntimePage,
+  killSwitchConfirmationPhrase,
+  runtimeKillSwitchPayloadFromForm,
   runtimeRingRulePayloadFromForm,
   runtimeSagaStepPayloadFromForm,
   runtimeSandboxProfilePayloadFromForm
@@ -161,15 +163,18 @@ describe("RuntimePage", () => {
 
     expect(await screen.findByText("Runtime Sessions")).toBeInTheDocument();
     expect((await screen.findAllByText("Claims Agent")).length).toBeGreaterThan(0);
-    expect(screen.getByText("Session Timeline")).toBeInTheDocument();
+    fireEvent.click(within(runtimeSessionRow("rtssn_1")).getByRole("button", { name: "Open" }));
+    fireEvent.click(within(await waitFor(() => runtimeSagaRow("saga_1"))).getByRole("button", { name: "Open" }));
+    fireEvent.click(within(runtimeSandboxProfileRow("sbx_1")).getByRole("button", { name: "Open" }));
+    expect(await screen.findByText("Session Timeline")).toBeInTheDocument();
     expect(screen.getByText("Ring Decisions")).toBeInTheDocument();
     expect(screen.getAllByText("Ring 1 requires higher trust").length).toBeGreaterThan(0);
     expect(screen.getByText("Ring Rule Editor")).toBeInTheDocument();
     expect(screen.getByText("Saga Builder")).toBeInTheDocument();
     expect(screen.getAllByText("Refund Saga").length).toBeGreaterThan(0);
-    expect(screen.getByText("Lookup order")).toBeInTheDocument();
+    expect(await screen.findByText("Lookup order")).toBeInTheDocument();
     expect(screen.getAllByText("Sandbox Profiles").length).toBeGreaterThan(0);
-    expect(screen.getByText(/demo-only/)).toBeInTheDocument();
+    expect(await screen.findByText(/demo-only/)).toBeInTheDocument();
     expect(screen.getByText("Kill Switch")).toBeInTheDocument();
     expect(screen.getByText("operator stop")).toBeInTheDocument();
   });
@@ -180,6 +185,7 @@ describe("RuntimePage", () => {
 
     expect(await screen.findByText("Runtime Sessions")).toBeInTheDocument();
     expect((await screen.findAllByText("Claims Agent")).length).toBeGreaterThan(0);
+    fireEvent.click(within(runtimeSessionRow("rtssn_1")).getByRole("button", { name: "Open" }));
 
     const sessionsPanel = document.querySelector("[data-runtime-sessions]") as HTMLElement;
     fireEvent.change(within(sessionsPanel).getByLabelText("Agent ID"), {
@@ -254,6 +260,7 @@ describe("RuntimePage", () => {
       expect(calls.some((call) => call.path === "/api/v1/runtime/sagas?status=draft")).toBe(true)
     );
 
+    fireEvent.click(within(await findRuntimeSagaRow("saga_1")).getByRole("button", { name: "Open" }));
     const sagaMonitor = await waitFor(() => {
       const element = document.querySelector("[data-runtime-saga-monitor='saga_1']");
       expect(element).not.toBeNull();
@@ -288,6 +295,7 @@ describe("RuntimePage", () => {
     );
 
     const sandboxPanel = document.querySelector("[data-runtime-sandbox]") as HTMLElement;
+    fireEvent.click(within(runtimeSandboxProfileRow("sbx_1")).getByRole("button", { name: "Open" }));
     fireEvent.change(within(sandboxPanel).getByLabelText("Name"), {
       target: { value: "Node Restricted" }
     });
@@ -312,7 +320,7 @@ describe("RuntimePage", () => {
       target: { value: "operator stop" }
     });
     fireEvent.change(within(killSwitchPanel).getByLabelText("Confirmation"), {
-      target: { value: "CONFIRM" }
+      target: { value: "KILL session:rtssn_1" }
     });
     fireEvent.click(within(killSwitchPanel).getByRole("button", { name: "Trigger" }));
     await waitFor(() =>
@@ -353,6 +361,38 @@ describe("RuntimePage", () => {
         })
       )
     ).toThrow("Timeout Seconds must be a valid integer.");
+  });
+
+  it("requires exact kill-switch confirmation text", () => {
+    expect(killSwitchConfirmationPhrase("session", "rtssn_1")).toBe("KILL session:rtssn_1");
+
+    expect(() =>
+      runtimeKillSwitchPayloadFromForm(
+        formWithValues({
+          confirmation: "CONFIRM",
+          reason: "operator stop",
+          scope: "target",
+          target_id: "rtssn_1",
+          target_type: "session"
+        })
+      )
+    ).toThrow("Confirmation must exactly match KILL session:rtssn_1.");
+
+    expect(
+      runtimeKillSwitchPayloadFromForm(
+        formWithValues({
+          confirmation: "KILL session:rtssn_1",
+          reason: "operator stop",
+          scope: "target",
+          target_id: "rtssn_1",
+          target_type: "session"
+        })
+      )
+    ).toMatchObject({
+      confirmation: "KILL session:rtssn_1",
+      target_id: "rtssn_1",
+      target_type: "session"
+    });
   });
 });
 
@@ -448,6 +488,28 @@ function json(value: unknown, status = 200) {
     status,
     headers: { "Content-Type": "application/json" }
   });
+}
+
+function runtimeSessionRow(sessionId: string) {
+  const row = document.querySelector(`[data-runtime-session-row="${sessionId}"]`);
+  expect(row).not.toBeNull();
+  return row as HTMLElement;
+}
+
+function runtimeSagaRow(sagaId: string) {
+  const row = document.querySelector(`[data-runtime-saga-row="${sagaId}"]`);
+  expect(row).not.toBeNull();
+  return row as HTMLElement;
+}
+
+function findRuntimeSagaRow(sagaId: string) {
+  return waitFor(() => runtimeSagaRow(sagaId));
+}
+
+function runtimeSandboxProfileRow(profileId: string) {
+  const row = document.querySelector(`[data-runtime-sandbox-profile-row="${profileId}"]`);
+  expect(row).not.toBeNull();
+  return row as HTMLElement;
 }
 
 function formWithValues(values: Record<string, string>) {

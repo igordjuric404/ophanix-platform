@@ -37,7 +37,11 @@ import {
 import type { TenantContext } from "../../api/client";
 import { useDetailDrawer } from "../../app/drawerContext";
 import { PageHeader } from "../../components/layout/PageHeader";
-import { ActionFeedback, useActionFeedback } from "../../components/shared/ActionFeedback";
+import {
+  ActionFeedback,
+  actionErrorMessage,
+  useActionFeedback
+} from "../../components/shared/ActionFeedback";
 import { EmptyState } from "../../components/shared/EmptyState";
 import { QueryErrorSummary } from "../../components/shared/ErrorState";
 import { StatusBadge } from "../../components/shared/StatusBadge";
@@ -55,6 +59,8 @@ import {
   TableHeader,
   TableRow
 } from "../../components/ui/table";
+import { canRevokeTrustCard } from "../../lib/actionAvailability";
+import { parseRequiredNumberField } from "../../lib/forms";
 import { cn } from "../../lib/utils";
 
 const dimensions = [
@@ -74,7 +80,7 @@ export function TrustPage() {
   const [selectedHandshakeId, setSelectedHandshakeId] = useState<string | null>(null);
   const [verification, setVerification] = useState<TrustCardVerification | null>(null);
   const [simulation, setSimulation] = useState<TrustHandshake | null>(null);
-  const { feedback, runWithFeedback } = useActionFeedback();
+  const { feedback, runWithFeedback, setError } = useActionFeedback();
 
   const scoresQuery = useTrustScores();
   const eventsQuery = useTrustEvents(eventFilters);
@@ -90,12 +96,16 @@ export function TrustPage() {
   const cards = cardsQuery.data ?? [];
   const thresholds = thresholdsQuery.data ?? [];
   const handshakes = handshakesQuery.data ?? [];
-  const activeCardId = selectedCardId ?? cards[0]?.id ?? null;
+  const activeCardId = selectedCardId;
   const cardDetailQuery = useTrustCardDetail(activeCardId);
   const selectedCard =
-    cardDetailQuery.data ?? cards.find((card) => card.id === activeCardId) ?? cards[0] ?? null;
+    activeCardId
+      ? cardDetailQuery.data ?? cards.find((card) => card.id === activeCardId) ?? null
+      : null;
   const selectedHandshake =
-    handshakes.find((handshake) => handshake.id === selectedHandshakeId) ?? handshakes[0] ?? null;
+    selectedHandshakeId
+      ? handshakes.find((handshake) => handshake.id === selectedHandshakeId) ?? null
+      : null;
 
   async function runTask(label: string, task: (tenantContext: TenantContext) => Promise<unknown>) {
     await runWithFeedback(() => mutation.mutateAsync(task), {
@@ -180,6 +190,9 @@ export function TrustPage() {
           }}
         />
         <TrustThresholdsPanel
+          onInvalidInput={(error) =>
+            setError(actionErrorMessage(error, "Invalid trust threshold input"))
+          }
           onCreate={(payload) =>
             runTask("Trust threshold created", (tenantContext) =>
               createTrustThreshold(payload, tenantContext)
@@ -572,9 +585,13 @@ function TrustCardDetail({
     return <EmptyState title="No card selected" description="Issue or select a card." />;
   }
   const activeCard = card;
+  const canRevoke = canRevokeTrustCard(activeCard);
   const payload = JSON.stringify(activeCard.card ?? {}, null, 2);
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!canRevoke) {
+      return;
+    }
     onRevoke(activeCard.id, trustCardRevokePayloadFromForm(event.currentTarget));
   }
 
@@ -615,8 +632,8 @@ function TrustCardDetail({
       </dl>
       <pre className="mt-4 max-h-48 overflow-auto rounded-md bg-muted p-3 text-xs">{payload}</pre>
       <form className="mt-4 grid gap-3 md:grid-cols-[1fr_auto]" onSubmit={onSubmit}>
-        <Field compact label="Revocation Reason" name="reason" />
-        <Button className="self-end" type="submit" variant="outline">
+        <Field compact disabled={!canRevoke} label="Revocation Reason" name="reason" />
+        <Button className="self-end" disabled={!canRevoke} type="submit" variant="outline">
           Revoke
         </Button>
       </form>
@@ -625,17 +642,23 @@ function TrustCardDetail({
 }
 
 function TrustThresholdsPanel({
+  onInvalidInput,
   onCreate,
   onPatch,
   thresholds
 }: {
+  onInvalidInput: (error: unknown) => void;
   onCreate: (payload: Record<string, unknown>) => void;
   onPatch: (thresholdId: string, payload: Record<string, unknown>) => void;
   thresholds: TrustThreshold[];
 }) {
   function onCreateSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    onCreate(trustThresholdPayloadFromForm(event.currentTarget));
+    try {
+      onCreate(trustThresholdPayloadFromForm(event.currentTarget));
+    } catch (error) {
+      onInvalidInput(error);
+    }
   }
 
   return (
@@ -692,7 +715,11 @@ function TrustThresholdsPanel({
                   </TableCell>
                   <TableCell>{threshold.enabled ? "enabled" : "disabled"}</TableCell>
                   <TableCell>
-                    <ThresholdPatchForm onPatch={onPatch} threshold={threshold} />
+                    <ThresholdPatchForm
+                      onInvalidInput={onInvalidInput}
+                      onPatch={onPatch}
+                      threshold={threshold}
+                    />
                   </TableCell>
                 </TableRow>
               ))}
@@ -705,15 +732,21 @@ function TrustThresholdsPanel({
 }
 
 function ThresholdPatchForm({
+  onInvalidInput,
   onPatch,
   threshold
 }: {
+  onInvalidInput: (error: unknown) => void;
   onPatch: (thresholdId: string, payload: Record<string, unknown>) => void;
   threshold: TrustThreshold;
 }) {
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    onPatch(threshold.id, trustThresholdPatchPayloadFromForm(event.currentTarget));
+    try {
+      onPatch(threshold.id, trustThresholdPatchPayloadFromForm(event.currentTarget));
+    } catch (error) {
+      onInvalidInput(error);
+    }
   }
 
   return (
@@ -982,7 +1015,12 @@ export function trustThresholdPayloadFromForm(form: HTMLFormElement) {
     threshold_type: String(values.threshold_type ?? ""),
     target_type: String(values.target_type ?? "environment"),
     target_id: blankToNull(values.target_id),
-    min_score: Number(values.min_score ?? 0),
+    min_score: parseRequiredNumberField(values.min_score, "Minimum Score", {
+      emptyFallback: 0,
+      integer: true,
+      max: 1000,
+      min: 0
+    }),
     required_tier: String(values.required_tier ?? "standard"),
     enabled: true
   };
@@ -991,7 +1029,12 @@ export function trustThresholdPayloadFromForm(form: HTMLFormElement) {
 export function trustThresholdPatchPayloadFromForm(form: HTMLFormElement) {
   const values = Object.fromEntries(new FormData(form));
   return {
-    min_score: Number(values.min_score ?? 0),
+    min_score: parseRequiredNumberField(values.min_score, "Minimum Score", {
+      emptyFallback: 0,
+      integer: true,
+      max: 1000,
+      min: 0
+    }),
     required_tier: String(values.required_tier ?? "standard"),
     enabled: Boolean(form.elements.namedItem("enabled") instanceof HTMLInputElement
       ? (form.elements.namedItem("enabled") as HTMLInputElement).checked

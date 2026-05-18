@@ -3,7 +3,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DetailDrawerProvider } from "../../app/drawerContext";
 import { renderWithQueryClient } from "../../test/test-utils";
-import { TrustPage } from "./TrustPage";
+import {
+  TrustPage,
+  trustThresholdPatchPayloadFromForm,
+  trustThresholdPayloadFromForm
+} from "./TrustPage";
 
 const trustScore = {
   id: "tscore_1",
@@ -114,7 +118,8 @@ describe("TrustPage", () => {
     expect(screen.getByText("Score Movement")).toBeInTheDocument();
     expect(screen.getByText("Score Events")).toBeInTheDocument();
     expect(screen.getByText("Card Inventory")).toBeInTheDocument();
-    expect(screen.getByText("did:mesh:claims")).toBeInTheDocument();
+    fireEvent.click(within(trustCardRow("tcard_1")).getByRole("button", { name: "Open" }));
+    expect(await screen.findByText("did:mesh:claims")).toBeInTheDocument();
     expect(screen.getByText("Protected Actions")).toBeInTheDocument();
     expect(screen.getByText("Peer Attempts")).toBeInTheDocument();
     expect(screen.getByText("Signal Mapping")).toBeInTheDocument();
@@ -151,6 +156,7 @@ describe("TrustPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Issue" }));
     await waitFor(() => expect(calls).toContain("/api/v1/trust/cards:POST"));
 
+    fireEvent.click(within(trustCardRow("tcard_1")).getByRole("button", { name: "Open" }));
     fireEvent.click(screen.getByRole("button", { name: "Verify" }));
     expect(await screen.findByText("Verified signature_valid")).toBeInTheDocument();
 
@@ -177,6 +183,29 @@ describe("TrustPage", () => {
     fireEvent.change(screen.getByLabelText("Sim Target"), { target: { value: "target_high" } });
     fireEvent.click(screen.getByRole("button", { name: "Simulate" }));
     expect(await screen.findByText("allowed trust_threshold_satisfied")).toBeInTheDocument();
+  });
+
+  it("rejects invalid trust threshold scores", () => {
+    expect(() =>
+      trustThresholdPayloadFromForm(
+        formWithValues({
+          min_score: "trusted",
+          required_tier: "trusted",
+          target_type: "environment",
+          threshold_type: "handoff"
+        })
+      )
+    ).toThrow("Minimum Score must be a valid integer.");
+
+    expect(() =>
+      trustThresholdPatchPayloadFromForm(
+        formWithValues({
+          enabled: "on",
+          min_score: "1001",
+          required_tier: "trusted"
+        })
+      )
+    ).toThrow("Minimum Score must be at most 1000.");
   });
 });
 
@@ -217,6 +246,9 @@ function mockTrustFetch() {
     }
     if (path === "/api/v1/trust/cards/tcard_1") {
       return json(trustCard);
+    }
+    if (path === "/api/v1/trust/cards/tcard_2") {
+      return json({ ...trustCard, id: "tcard_2" });
     }
     if (path === "/api/v1/trust/cards/tcard_1/verify") {
       return json({
@@ -297,4 +329,21 @@ function json(body: unknown, status = 200) {
     status,
     headers: { "Content-Type": "application/json" }
   });
+}
+
+function trustCardRow(cardId: string) {
+  const row = document.querySelector(`[data-trust-card-row="${cardId}"]`);
+  expect(row).not.toBeNull();
+  return row as HTMLElement;
+}
+
+function formWithValues(values: Record<string, string>) {
+  const form = document.createElement("form");
+  for (const [name, value] of Object.entries(values)) {
+    const input = document.createElement("input");
+    input.name = name;
+    input.value = value;
+    form.append(input);
+  }
+  return form;
 }

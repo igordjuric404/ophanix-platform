@@ -60,7 +60,7 @@ import {
   TableHeader,
   TableRow
 } from "../../components/ui/table";
-import { parseJsonObjectField } from "../../lib/forms";
+import { parseJsonObjectField, parseRequiredNumberField } from "../../lib/forms";
 import { cn } from "../../lib/utils";
 
 const authTypes = ["none", "api_key", "bearer", "oauth", "mtls", "custom"];
@@ -94,17 +94,22 @@ export function McpPage() {
   const traffic = trafficQuery.data ?? [];
   const approvals = approvalsQuery.data ?? [];
   const rateLimits = rateLimitsQuery.data ?? [];
-  const activeToolId = selectedToolId ?? tools[0]?.id ?? null;
+  const activeToolId = selectedToolId;
   const selectedToolQuery = useMcpToolDetail(activeToolId);
-  const selectedTool = selectedToolQuery.data ?? tools.find((tool) => tool.id === activeToolId) ?? null;
+  const selectedTool = activeToolId
+    ? selectedToolQuery.data ?? tools.find((tool) => tool.id === activeToolId) ?? null
+    : null;
   const selectedFinding =
-    findings.find((finding) => finding.id === selectedFindingId) ?? findings[0] ?? null;
+    selectedFindingId
+      ? findings.find((finding) => finding.id === selectedFindingId) ?? null
+      : null;
 
   async function runTask(label: string, task: (tenantContext: TenantContext) => Promise<unknown>) {
-    await runWithFeedback(() => mutation.mutateAsync(task), {
+    const result = await runWithFeedback(() => mutation.mutateAsync(task), {
       errorMessage: `${label} failed`,
       successMessage: label
     });
+    return result !== null;
   }
 
   return (
@@ -200,6 +205,9 @@ export function McpPage() {
             onFilter={setApprovalFilters}
           />
           <RateLimitsPanel
+            onInvalidInput={(error) =>
+              setError(actionErrorMessage(error, "Invalid MCP rate limit input"))
+            }
             onCreate={(payload) =>
               runTask("Rate limit created", (tenantContext) =>
                 createMcpRateLimit(payload, tenantContext)
@@ -954,16 +962,24 @@ function ApprovalsPanel({
 }
 
 function RateLimitsPanel({
+  onInvalidInput,
   onCreate,
   rateLimits
 }: {
-  onCreate: (payload: Record<string, unknown>) => void;
+  onInvalidInput: (error: unknown) => void;
+  onCreate: (payload: Record<string, unknown>) => Promise<boolean>;
   rateLimits: McpRateLimit[];
 }) {
-  function onSubmit(event: FormEvent<HTMLFormElement>) {
+  async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    onCreate(mcpRateLimitPayloadFromForm(event.currentTarget));
-    event.currentTarget.reset();
+    try {
+      const succeeded = await onCreate(mcpRateLimitPayloadFromForm(event.currentTarget));
+      if (succeeded) {
+        event.currentTarget.reset();
+      }
+    } catch (error) {
+      onInvalidInput(error);
+    }
   }
 
   return (
@@ -1306,8 +1322,11 @@ function formString(form: HTMLFormElement, name: string, fallback = "") {
 }
 
 function formNumber(form: HTMLFormElement, name: string, fallback: number) {
-  const parsed = Number.parseInt(formString(form, name, String(fallback)), 10);
-  return Number.isFinite(parsed) ? parsed : fallback;
+  return parseRequiredNumberField(formString(form, name), humanizeFieldName(name), {
+    emptyFallback: fallback,
+    integer: true,
+    min: 1
+  });
 }
 
 function formBoolean(form: HTMLFormElement, name: string) {
@@ -1318,4 +1337,11 @@ function formBoolean(form: HTMLFormElement, name: string) {
 function emptyToNull(value: string) {
   const stripped = value.trim();
   return stripped || null;
+}
+
+function humanizeFieldName(name: string) {
+  return name
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }

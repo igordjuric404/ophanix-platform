@@ -35,6 +35,14 @@ import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
+import {
+  canActivateAgent,
+  canApproveAgent,
+  canIssueAgentCredential,
+  canRevokeCredential,
+  canRotateCredential,
+  canSuspendAgent
+} from "../../lib/actionAvailability";
 import { cn } from "../../lib/utils";
 
 const registrationSteps = [
@@ -66,7 +74,7 @@ export function AgentsPage() {
 
   const agentsQuery = useAgents(filters);
   const agents = agentsQuery.data ?? [];
-  const activeAgentId = selectedAgentId ?? agents[0]?.id ?? null;
+  const activeAgentId = selectedAgentId;
   const detailQuery = useAgentDetail(activeAgentId);
   const timelineQuery = useAgentTimeline(activeAgentId);
   const auditQuery = useAgentAudit(activeAgentId);
@@ -447,6 +455,8 @@ function AgentOperations({
 
   const summary = detail?.summary ?? agents.find((agent) => agent.id === activeAgentId) ?? null;
   const activePanelId = `agent-detail-panel-${tabDomId(activeTab)}`;
+  const approveAvailable = canApproveAgent(summary);
+  const activateAvailable = canActivateAgent(summary);
 
   function moveTabFocus(tab: string) {
     setActiveTab(tab);
@@ -489,11 +499,15 @@ function AgentOperations({
         </div>
         <div className="flex flex-wrap gap-2">
           <Button
-            onClick={() =>
+            disabled={!approveAvailable}
+            onClick={() => {
+              if (!approveAvailable) {
+                return;
+              }
               onRunTask("Agent approved", (tenantContext) =>
                 approveAgent(activeAgentId, {}, tenantContext)
-              )
-            }
+              );
+            }}
             type="button"
             variant="outline"
           >
@@ -501,11 +515,15 @@ function AgentOperations({
             Approve
           </Button>
           <Button
-            onClick={() =>
+            disabled={!activateAvailable}
+            onClick={() => {
+              if (!activateAvailable) {
+                return;
+              }
               onRunTask("Agent activated", (tenantContext) =>
                 activateAgent(activeAgentId, {}, tenantContext)
-              )
-            }
+              );
+            }}
             type="button"
             variant="outline"
           >
@@ -595,6 +613,7 @@ function AgentDetailTab({
     return (
       <CredentialsTab
         activeAgentId={activeAgentId}
+        agent={summary}
         credentials={credentials}
         expiringCredentials={expiringCredentials}
         onRunTask={onRunTask}
@@ -602,7 +621,14 @@ function AgentDetailTab({
     );
   }
   if (activeTab === "Lifecycle") {
-    return <LifecycleTab activeAgentId={activeAgentId} onRunTask={onRunTask} timeline={timeline} />;
+    return (
+      <LifecycleTab
+        activeAgentId={activeAgentId}
+        agent={summary}
+        onRunTask={onRunTask}
+        timeline={timeline}
+      />
+    );
   }
   if (activeTab === "Audit") {
     return <AuditTab auditEvents={auditEvents} />;
@@ -670,13 +696,16 @@ function IdentityTab({ detail }: { detail: AgentDetail | null }) {
 
 function LifecycleTab({
   activeAgentId,
+  agent,
   onRunTask,
   timeline
 }: {
   activeAgentId: string;
+  agent: AgentSummary | null;
   onRunTask: (label: string, task: (tenantContext: TenantContext) => Promise<unknown>) => Promise<void>;
   timeline: AgentLifecycleEvent[];
 }) {
+  const suspendAvailable = canSuspendAgent(agent);
   return (
     <div className="grid gap-4 lg:grid-cols-[22rem_1fr]" data-agent-lifecycle>
       <div className="rounded-lg border p-4">
@@ -685,6 +714,9 @@ function LifecycleTab({
           className="mt-4 space-y-3"
           onSubmit={(event) => {
             event.preventDefault();
+            if (!suspendAvailable) {
+              return;
+            }
             const reason = formString(new FormData(event.currentTarget), "reason");
             void onRunTask("Agent suspended", (tenantContext) =>
               runLifecycleAction(activeAgentId, "suspend", { reason }, tenantContext)
@@ -692,9 +724,15 @@ function LifecycleTab({
           }}
         >
           <Label htmlFor="lifecycle-reason">Reason</Label>
-          <Input id="lifecycle-reason" name="reason" required placeholder="Change request" />
+          <Input
+            disabled={!suspendAvailable}
+            id="lifecycle-reason"
+            name="reason"
+            required
+            placeholder="Change request"
+          />
           <div className="flex flex-wrap gap-2">
-            <Button type="submit" variant="outline">
+            <Button disabled={!suspendAvailable} type="submit" variant="outline">
               Suspend
             </Button>
             <Button
@@ -737,15 +775,18 @@ function LifecycleTab({
 
 function CredentialsTab({
   activeAgentId,
+  agent,
   credentials,
   expiringCredentials,
   onRunTask
 }: {
   activeAgentId: string;
+  agent: AgentSummary | null;
   credentials: AgentCredential[];
   expiringCredentials: AgentCredential[];
   onRunTask: (label: string, task: (tenantContext: TenantContext) => Promise<unknown>) => Promise<void>;
 }) {
+  const issueAvailable = canIssueAgentCredential(agent);
   return (
     <div className="space-y-4" data-agent-credentials-table>
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -756,15 +797,19 @@ function CredentialsTab({
           </p>
         </div>
         <Button
-          onClick={() =>
-            onRunTask("Credential issued", (tenantContext) =>
+          disabled={!issueAvailable}
+          onClick={() => {
+            if (!issueAvailable) {
+              return;
+            }
+            void onRunTask("Credential issued", (tenantContext) =>
               issueAgentCredential(
                 activeAgentId,
                 { scopes: [{ scope: "claims:read" }] },
                 tenantContext
               )
-            )
-          }
+            );
+          }}
           type="button"
           variant="outline"
         >
@@ -788,48 +833,65 @@ function CredentialsTab({
               </tr>
             </thead>
             <tbody>
-              {credentials.map((credential) => (
-                <tr className="border-b last:border-b-0" key={credential.id}>
-                  <td className="py-3 pr-3 font-medium">{credential.id}</td>
-                  <td className="py-3 pr-3">
-                    <StatusBadge status={credential.status} />
-                  </td>
-                  <td className="py-3 pr-3">{credential.issuer ?? "n/a"}</td>
-                  <td className="py-3 pr-3">{credential.expires_at ?? "n/a"}</td>
-                  <td className="py-3 pr-3">{scopeSummary(credential.scopes)}</td>
-                  <td className="py-3 pr-3">
-                    <div className="flex flex-wrap gap-2">
-                      <Button
-                        onClick={() =>
-                          onRunTask("Credential rotated", (tenantContext) =>
-                            rotateCredential(credential.id, { reason: "scheduled" }, tenantContext)
-                          )
-                        }
-                        type="button"
-                        variant="outline"
-                      >
-                        <RotateCcw className="h-4 w-4" />
-                        Rotate
-                      </Button>
-                      <form
-                        className="flex gap-2"
-                        onSubmit={(event) => {
-                          event.preventDefault();
-                          const reason = formString(new FormData(event.currentTarget), "reason");
-                          void onRunTask("Credential revoked", (tenantContext) =>
-                            revokeCredential(credential.id, { reason }, tenantContext)
-                          );
-                        }}
-                      >
-                        <Input className="w-32" name="reason" required placeholder="Reason" />
-                        <Button type="submit" variant="outline">
-                          Revoke
+              {credentials.map((credential) => {
+                const rotateAvailable = canRotateCredential(credential);
+                const revokeAvailable = canRevokeCredential(credential);
+                return (
+                  <tr className="border-b last:border-b-0" key={credential.id}>
+                    <td className="py-3 pr-3 font-medium">{credential.id}</td>
+                    <td className="py-3 pr-3">
+                      <StatusBadge status={credential.status} />
+                    </td>
+                    <td className="py-3 pr-3">{credential.issuer ?? "n/a"}</td>
+                    <td className="py-3 pr-3">{credential.expires_at ?? "n/a"}</td>
+                    <td className="py-3 pr-3">{scopeSummary(credential.scopes)}</td>
+                    <td className="py-3 pr-3">
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          disabled={!rotateAvailable}
+                          onClick={() => {
+                            if (!rotateAvailable) {
+                              return;
+                            }
+                            void onRunTask("Credential rotated", (tenantContext) =>
+                              rotateCredential(credential.id, { reason: "scheduled" }, tenantContext)
+                            );
+                          }}
+                          type="button"
+                          variant="outline"
+                        >
+                          <RotateCcw className="h-4 w-4" />
+                          Rotate
                         </Button>
-                      </form>
-                    </div>
-                  </td>
-                </tr>
-              ))}
+                        <form
+                          className="flex gap-2"
+                          onSubmit={(event) => {
+                            event.preventDefault();
+                            if (!revokeAvailable) {
+                              return;
+                            }
+                            const reason = formString(new FormData(event.currentTarget), "reason");
+                            void onRunTask("Credential revoked", (tenantContext) =>
+                              revokeCredential(credential.id, { reason }, tenantContext)
+                            );
+                          }}
+                        >
+                          <Input
+                            className="w-32"
+                            disabled={!revokeAvailable}
+                            name="reason"
+                            required
+                            placeholder="Reason"
+                          />
+                          <Button disabled={!revokeAvailable} type="submit" variant="outline">
+                            Revoke
+                          </Button>
+                        </form>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

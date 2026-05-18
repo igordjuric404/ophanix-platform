@@ -140,8 +140,13 @@ export function createMcpServer(body: Record<string, unknown>, tenantContext?: T
   return apiClient.request<McpServer>("/mcp/servers", { method: "POST", body, tenantContext });
 }
 
-export function listMcpServers(params: McpParams = {}, tenantContext?: TenantContext) {
+export function listMcpServers(
+  params: McpParams = {},
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
+) {
   return apiClient.request<McpServer[]>(`/mcp/servers${queryString(params)}`, {
+    signal,
     tenantContext
   });
 }
@@ -171,12 +176,20 @@ export function discoverMcpServerTools(serverId: string, tenantContext?: TenantC
   );
 }
 
-export function listMcpTools(params: McpParams = {}, tenantContext?: TenantContext) {
-  return apiClient.request<McpTool[]>(`/mcp/tools${queryString(params)}`, { tenantContext });
+export function listMcpTools(
+  params: McpParams = {},
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
+) {
+  return apiClient.request<McpTool[]>(`/mcp/tools${queryString(params)}`, {
+    signal,
+    tenantContext
+  });
 }
 
-export function getMcpTool(toolId: string, tenantContext?: TenantContext) {
+export function getMcpTool(toolId: string, tenantContext?: TenantContext, signal?: AbortSignal) {
   return apiClient.request<McpTool>(`/mcp/tools/${encodeURIComponent(toolId)}`, {
+    signal,
     tenantContext
   });
 }
@@ -188,18 +201,31 @@ export function runMcpSecurityScan(serverId: string, tenantContext?: TenantConte
   });
 }
 
-export function listMcpScans(params: McpParams = {}, tenantContext?: TenantContext) {
-  return apiClient.request<McpScanRun[]>(`/mcp/scans${queryString(params)}`, { tenantContext });
-}
-
-export function getMcpScan(scanId: string, tenantContext?: TenantContext) {
-  return apiClient.request<McpScanRun>(`/mcp/scans/${encodeURIComponent(scanId)}`, {
+export function listMcpScans(
+  params: McpParams = {},
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
+) {
+  return apiClient.request<McpScanRun[]>(`/mcp/scans${queryString(params)}`, {
+    signal,
     tenantContext
   });
 }
 
-export function listMcpFindings(params: McpParams = {}, tenantContext?: TenantContext) {
+export function getMcpScan(scanId: string, tenantContext?: TenantContext, signal?: AbortSignal) {
+  return apiClient.request<McpScanRun>(`/mcp/scans/${encodeURIComponent(scanId)}`, {
+    signal,
+    tenantContext
+  });
+}
+
+export function listMcpFindings(
+  params: McpParams = {},
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
+) {
   return apiClient.request<McpFinding[]>(`/mcp/findings${queryString(params)}`, {
+    signal,
     tenantContext
   });
 }
@@ -246,14 +272,24 @@ export function createMcpProxyCall(body: Record<string, unknown>, tenantContext?
   });
 }
 
-export function listMcpTraffic(params: McpParams = {}, tenantContext?: TenantContext) {
+export function listMcpTraffic(
+  params: McpParams = {},
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
+) {
   return apiClient.request<McpToolCall[]>(`/mcp/traffic${queryString(params)}`, {
+    signal,
     tenantContext
   });
 }
 
-export function listMcpApprovals(params: McpParams = {}, tenantContext?: TenantContext) {
+export function listMcpApprovals(
+  params: McpParams = {},
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
+) {
   return apiClient.request<McpApproval[]>(`/mcp/approvals${queryString(params)}`, {
+    signal,
     tenantContext
   });
 }
@@ -281,8 +317,13 @@ export function denyMcpApproval(
   });
 }
 
-export function listMcpRateLimits(params: McpParams = {}, tenantContext?: TenantContext) {
+export function listMcpRateLimits(
+  params: McpParams = {},
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
+) {
   return apiClient.request<McpRateLimit[]>(`/mcp/rate-limits${queryString(params)}`, {
+    signal,
     tenantContext
   });
 }
@@ -299,7 +340,7 @@ export function useMcpServers(params: McpParams = {}) {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["mcp", "servers", params], scope),
-    queryFn: () => listMcpServers(params, scope.context)
+    queryFn: ({ signal }) => listMcpServers(params, scope.context, signal)
   });
 }
 
@@ -307,7 +348,7 @@ export function useMcpTools(params: McpParams = {}) {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["mcp", "tools", params], scope),
-    queryFn: () => listMcpTools(params, scope.context)
+    queryFn: ({ signal }) => listMcpTools(params, scope.context, signal)
   });
 }
 
@@ -316,7 +357,7 @@ export function useMcpToolDetail(toolId: string | null) {
   return useQuery({
     enabled: Boolean(toolId),
     queryKey: scopedQueryKey(["mcp", "tools", toolId], scope),
-    queryFn: () => getMcpTool(toolId as string, scope.context)
+    queryFn: ({ signal }) => getMcpTool(toolId as string, scope.context, signal)
   });
 }
 
@@ -324,7 +365,7 @@ export function useMcpScans(params: McpParams = {}) {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["mcp", "scans", params], scope),
-    queryFn: () => listMcpScans(params, scope.context)
+    queryFn: ({ signal }) => listMcpScans(params, scope.context, signal)
   });
 }
 
@@ -333,7 +374,7 @@ export function useMcpScanDetail(scanId: string | null) {
   return useQuery({
     enabled: Boolean(scanId),
     queryKey: scopedQueryKey(["mcp", "scans", scanId], scope),
-    queryFn: () => getMcpScan(scanId as string, scope.context)
+    queryFn: ({ signal }) => getMcpScan(scanId as string, scope.context, signal)
   });
 }
 
@@ -341,7 +382,7 @@ export function useMcpFindings(params: McpParams = {}) {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["mcp", "findings", params], scope),
-    queryFn: () => listMcpFindings(params, scope.context)
+    queryFn: ({ signal }) => listMcpFindings(params, scope.context, signal)
   });
 }
 
@@ -349,7 +390,7 @@ export function useMcpTraffic(params: McpParams = {}) {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["mcp", "traffic", params], scope),
-    queryFn: () => listMcpTraffic(params, scope.context)
+    queryFn: ({ signal }) => listMcpTraffic(params, scope.context, signal)
   });
 }
 
@@ -357,7 +398,7 @@ export function useMcpApprovals(params: McpParams = {}) {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["mcp", "approvals", params], scope),
-    queryFn: () => listMcpApprovals(params, scope.context)
+    queryFn: ({ signal }) => listMcpApprovals(params, scope.context, signal)
   });
 }
 
@@ -365,7 +406,7 @@ export function useMcpRateLimits(params: McpParams = {}) {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["mcp", "rate-limits", params], scope),
-    queryFn: () => listMcpRateLimits(params, scope.context)
+    queryFn: ({ signal }) => listMcpRateLimits(params, scope.context, signal)
   });
 }
 

@@ -175,14 +175,24 @@ export function createRuntimeSession(body: Record<string, unknown>, tenantContex
   });
 }
 
-export function listRuntimeSessions(params: RuntimeParams = {}, tenantContext?: TenantContext) {
+export function listRuntimeSessions(
+  params: RuntimeParams = {},
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
+) {
   return apiClient.request<RuntimeSession[]>(`/runtime/sessions${queryString(params)}`, {
+    signal,
     tenantContext
   });
 }
 
-export function getRuntimeSession(sessionId: string, tenantContext?: TenantContext) {
+export function getRuntimeSession(
+  sessionId: string,
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
+) {
   return apiClient.request<RuntimeSession>(`/runtime/sessions/${encodeURIComponent(sessionId)}`, {
+    signal,
     tenantContext
   });
 }
@@ -211,16 +221,22 @@ export function createRuntimeAction(
 
 export function listRuntimeRingDecisions(
   params: RuntimeParams = {},
-  tenantContext?: TenantContext
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
 ) {
   return apiClient.request<RuntimeRingDecision[]>(
     `/runtime/ring-decisions${queryString(params)}`,
-    { tenantContext }
+    { signal, tenantContext }
   );
 }
 
-export function listRuntimeRingRules(params: RuntimeParams = {}, tenantContext?: TenantContext) {
+export function listRuntimeRingRules(
+  params: RuntimeParams = {},
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
+) {
   return apiClient.request<RuntimeRingRule[]>(`/runtime/ring-rules${queryString(params)}`, {
+    signal,
     tenantContext
   });
 }
@@ -240,14 +256,24 @@ export function createRuntimeSaga(body: Record<string, unknown>, tenantContext?:
   return apiClient.request<RuntimeSaga>("/runtime/sagas", { method: "POST", body, tenantContext });
 }
 
-export function listRuntimeSagas(params: RuntimeParams = {}, tenantContext?: TenantContext) {
+export function listRuntimeSagas(
+  params: RuntimeParams = {},
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
+) {
   return apiClient.request<RuntimeSaga[]>(`/runtime/sagas${queryString(params)}`, {
+    signal,
     tenantContext
   });
 }
 
-export function getRuntimeSaga(sagaId: string, tenantContext?: TenantContext) {
+export function getRuntimeSaga(
+  sagaId: string,
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
+) {
   return apiClient.request<RuntimeSaga>(`/runtime/sagas/${encodeURIComponent(sagaId)}`, {
+    signal,
     tenantContext
   });
 }
@@ -299,11 +325,12 @@ export function createRuntimeSandboxProfile(
 
 export function listRuntimeSandboxProfiles(
   params: RuntimeParams = {},
-  tenantContext?: TenantContext
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
 ) {
   return apiClient.request<RuntimeSandboxProfile[]>(
     `/runtime/sandbox-profiles${queryString(params)}`,
-    { tenantContext }
+    { signal, tenantContext }
   );
 }
 
@@ -342,11 +369,12 @@ export function triggerRuntimeKillSwitch(
 
 export function listRuntimeKillSwitchEvents(
   params: RuntimeParams = {},
-  tenantContext?: TenantContext
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
 ) {
   return apiClient.request<RuntimeKillSwitchEvent[]>(
     `/runtime/kill-switch/events${queryString(params)}`,
-    { tenantContext }
+    { signal, tenantContext }
   );
 }
 
@@ -354,7 +382,7 @@ export function useRuntimeSessions(params: RuntimeParams = {}) {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["runtime", "sessions", params], scope),
-    queryFn: () => listRuntimeSessions(params, scope.context)
+    queryFn: ({ signal }) => listRuntimeSessions(params, scope.context, signal)
   });
 }
 
@@ -363,7 +391,7 @@ export function useRuntimeSessionDetail(sessionId: string | null) {
   return useQuery({
     enabled: Boolean(sessionId),
     queryKey: scopedQueryKey(["runtime", "sessions", sessionId], scope),
-    queryFn: () => getRuntimeSession(sessionId as string, scope.context)
+    queryFn: ({ signal }) => getRuntimeSession(sessionId as string, scope.context, signal)
   });
 }
 
@@ -371,7 +399,7 @@ export function useRuntimeRingDecisions(params: RuntimeParams = {}) {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["runtime", "ring-decisions", params], scope),
-    queryFn: () => listRuntimeRingDecisions(params, scope.context)
+    queryFn: ({ signal }) => listRuntimeRingDecisions(params, scope.context, signal)
   });
 }
 
@@ -379,7 +407,7 @@ export function useRuntimeRingRules(params: RuntimeParams = {}) {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["runtime", "ring-rules", params], scope),
-    queryFn: () => listRuntimeRingRules(params, scope.context)
+    queryFn: ({ signal }) => listRuntimeRingRules(params, scope.context, signal)
   });
 }
 
@@ -387,7 +415,7 @@ export function useRuntimeSagas(params: RuntimeParams = {}) {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["runtime", "sagas", params], scope),
-    queryFn: () => listRuntimeSagas(params, scope.context)
+    queryFn: ({ signal }) => listRuntimeSagas(params, scope.context, signal)
   });
 }
 
@@ -396,7 +424,7 @@ export function useRuntimeSagaDetail(sagaId: string | null) {
   return useQuery({
     enabled: Boolean(sagaId),
     queryKey: scopedQueryKey(["runtime", "sagas", sagaId], scope),
-    queryFn: () => getRuntimeSaga(sagaId as string, scope.context)
+    queryFn: ({ signal }) => getRuntimeSaga(sagaId as string, scope.context, signal)
   });
 }
 
@@ -404,7 +432,7 @@ export function useRuntimeSandboxProfiles(params: RuntimeParams = {}) {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["runtime", "sandbox-profiles", params], scope),
-    queryFn: () => listRuntimeSandboxProfiles(params, scope.context)
+    queryFn: ({ signal }) => listRuntimeSandboxProfiles(params, scope.context, signal)
   });
 }
 
@@ -412,7 +440,7 @@ export function useRuntimeKillSwitchEvents(params: RuntimeParams = {}) {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["runtime", "kill-switch-events", params], scope),
-    queryFn: () => listRuntimeKillSwitchEvents(params, scope.context)
+    queryFn: ({ signal }) => listRuntimeKillSwitchEvents(params, scope.context, signal)
   });
 }
 

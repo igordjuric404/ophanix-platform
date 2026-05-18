@@ -124,8 +124,8 @@ export interface AgentTrustCard {
   warning?: string | null;
 }
 
-export function listTrustScores(tenantContext?: TenantContext) {
-  return apiClient.request<TrustScore[]>("/trust/scores", { tenantContext });
+export function listTrustScores(tenantContext?: TenantContext, signal?: AbortSignal) {
+  return apiClient.request<TrustScore[]>("/trust/scores", { signal, tenantContext });
 }
 
 export function getTrustScore(agentId: string, tenantContext?: TenantContext) {
@@ -134,8 +134,13 @@ export function getTrustScore(agentId: string, tenantContext?: TenantContext) {
   });
 }
 
-export function listTrustEvents(params: TrustParams = {}, tenantContext?: TenantContext) {
+export function listTrustEvents(
+  params: TrustParams = {},
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
+) {
   return apiClient.request<TrustEvent[]>(`/trust/events${queryString(params)}`, {
+    signal,
     tenantContext
   });
 }
@@ -151,8 +156,13 @@ export function recalculateTrust(
   });
 }
 
-export function listTrustRules(params: TrustParams = {}, tenantContext?: TenantContext) {
+export function listTrustRules(
+  params: TrustParams = {},
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
+) {
   return apiClient.request<TrustRule[]>(`/trust/rules${queryString(params)}`, {
+    signal,
     tenantContext
   });
 }
@@ -169,8 +179,13 @@ export function patchTrustRule(
   });
 }
 
-export function listTrustThresholds(params: TrustParams = {}, tenantContext?: TenantContext) {
+export function listTrustThresholds(
+  params: TrustParams = {},
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
+) {
   return apiClient.request<TrustThreshold[]>(`/trust/thresholds${queryString(params)}`, {
+    signal,
     tenantContext
   });
 }
@@ -195,8 +210,13 @@ export function patchTrustThreshold(
   });
 }
 
-export function listTrustHandshakes(params: TrustParams = {}, tenantContext?: TenantContext) {
+export function listTrustHandshakes(
+  params: TrustParams = {},
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
+) {
   return apiClient.request<TrustHandshake[]>(`/trust/handshakes${queryString(params)}`, {
+    signal,
     tenantContext
   });
 }
@@ -224,14 +244,20 @@ export function issueTrustCard(body: Record<string, unknown>, tenantContext?: Te
   return apiClient.request<TrustCard>("/trust/cards", { method: "POST", body, tenantContext });
 }
 
-export function listTrustCards(params: TrustParams = {}, tenantContext?: TenantContext) {
+export function listTrustCards(
+  params: TrustParams = {},
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
+) {
   return apiClient.request<TrustCard[]>(`/trust/cards${queryString(params)}`, {
+    signal,
     tenantContext
   });
 }
 
-export function getTrustCard(cardId: string, tenantContext?: TenantContext) {
+export function getTrustCard(cardId: string, tenantContext?: TenantContext, signal?: AbortSignal) {
   return apiClient.request<TrustCard>(`/trust/cards/${encodeURIComponent(cardId)}`, {
+    signal,
     tenantContext
   });
 }
@@ -255,8 +281,13 @@ export function revokeTrustCard(
   });
 }
 
-export function getAgentTrustCard(agentId: string, tenantContext?: TenantContext) {
+export function getAgentTrustCard(
+  agentId: string,
+  tenantContext?: TenantContext,
+  signal?: AbortSignal
+) {
   return apiClient.request<AgentTrustCard>(`/agents/${encodeURIComponent(agentId)}/trust-card`, {
+    signal,
     tenantContext
   });
 }
@@ -265,7 +296,7 @@ export function useTrustScores() {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["trust", "scores"], scope),
-    queryFn: () => listTrustScores(scope.context)
+    queryFn: ({ signal }) => listTrustScores(scope.context, signal)
   });
 }
 
@@ -273,7 +304,7 @@ export function useTrustEvents(params: TrustParams = {}) {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["trust", "events", params], scope),
-    queryFn: () => listTrustEvents(params, scope.context)
+    queryFn: ({ signal }) => listTrustEvents(params, scope.context, signal)
   });
 }
 
@@ -281,7 +312,7 @@ export function useTrustRules(params: TrustParams = {}) {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["trust", "rules", params], scope),
-    queryFn: () => listTrustRules(params, scope.context)
+    queryFn: ({ signal }) => listTrustRules(params, scope.context, signal)
   });
 }
 
@@ -289,7 +320,7 @@ export function useTrustThresholds(params: TrustParams = {}) {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["trust", "thresholds", params], scope),
-    queryFn: () => listTrustThresholds(params, scope.context)
+    queryFn: ({ signal }) => listTrustThresholds(params, scope.context, signal)
   });
 }
 
@@ -297,7 +328,7 @@ export function useTrustHandshakes(params: TrustParams = {}) {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["trust", "handshakes", params], scope),
-    queryFn: () => listTrustHandshakes(params, scope.context)
+    queryFn: ({ signal }) => listTrustHandshakes(params, scope.context, signal)
   });
 }
 
@@ -305,7 +336,7 @@ export function useTrustCards(params: TrustParams = {}) {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["trust", "cards", params], scope),
-    queryFn: () => listTrustCards(params, scope.context)
+    queryFn: ({ signal }) => listTrustCards(params, scope.context, signal)
   });
 }
 
@@ -314,7 +345,7 @@ export function useTrustCardDetail(cardId: string | null) {
   return useQuery({
     enabled: Boolean(cardId),
     queryKey: scopedQueryKey(["trust", "cards", cardId], scope),
-    queryFn: () => getTrustCard(cardId as string, scope.context)
+    queryFn: ({ signal }) => getTrustCard(cardId as string, scope.context, signal)
   });
 }
 
@@ -323,7 +354,7 @@ export function useAgentTrustCard(agentId: string | null) {
   return useQuery({
     enabled: Boolean(agentId),
     queryKey: scopedQueryKey(["agents", agentId, "trust-card"], scope),
-    queryFn: () => getAgentTrustCard(agentId as string, scope.context)
+    queryFn: ({ signal }) => getAgentTrustCard(agentId as string, scope.context, signal)
   });
 }
 

@@ -64,10 +64,17 @@ import {
 } from "../../components/ui/table";
 import {
   ActionFeedback,
+  actionErrorMessage,
   useActionFeedback
 } from "../../components/shared/ActionFeedback";
 import type { TenantContext } from "../../api/client";
 import { QueryErrorSummary } from "../../components/shared/ErrorState";
+import {
+  canAddRuntimeSagaStep,
+  canCancelRuntimeSaga,
+  canEndRuntimeSession,
+  canExecuteRuntimeSaga
+} from "../../lib/actionAvailability";
 import { parseOptionalNumberField, parseRequiredNumberField } from "../../lib/forms";
 import { cn } from "../../lib/utils";
 
@@ -85,7 +92,7 @@ export function RuntimePage() {
   const [selectedSagaId, setSelectedSagaId] = useState<string | null>(null);
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
   const [sandboxDecision, setSandboxDecision] = useState<RuntimeSandboxDecision | null>(null);
-  const { feedback, runWithFeedback } = useActionFeedback();
+  const { feedback, runWithFeedback, setError } = useActionFeedback();
 
   const sessionsQuery = useRuntimeSessions(sessionFilters);
   const decisionsQuery = useRuntimeRingDecisions(decisionFilters);
@@ -101,21 +108,28 @@ export function RuntimePage() {
   const sagas = sagasQuery.data ?? [];
   const profiles = sandboxProfilesQuery.data ?? [];
   const killSwitchEvents = killSwitchEventsQuery.data ?? [];
-  const activeSessionId = selectedSessionId ?? sessions[0]?.id ?? null;
-  const activeSagaId = selectedSagaId ?? sagas[0]?.id ?? null;
-  const activeProfileId = selectedProfileId ?? profiles[0]?.id ?? null;
+  const activeSessionId = selectedSessionId;
+  const activeSagaId = selectedSagaId;
+  const activeProfileId = selectedProfileId;
   const sessionDetailQuery = useRuntimeSessionDetail(activeSessionId);
   const sagaDetailQuery = useRuntimeSagaDetail(activeSagaId);
   const selectedSession =
-    sessionDetailQuery.data ?? sessions.find((session) => session.id === activeSessionId) ?? null;
-  const selectedSaga = sagaDetailQuery.data ?? sagas.find((saga) => saga.id === activeSagaId) ?? null;
-  const selectedProfile = profiles.find((profile) => profile.id === activeProfileId) ?? null;
+    activeSessionId
+      ? sessionDetailQuery.data ?? sessions.find((session) => session.id === activeSessionId) ?? null
+      : null;
+  const selectedSaga = activeSagaId
+    ? sagaDetailQuery.data ?? sagas.find((saga) => saga.id === activeSagaId) ?? null
+    : null;
+  const selectedProfile = activeProfileId
+    ? profiles.find((profile) => profile.id === activeProfileId) ?? null
+    : null;
 
   async function runTask(label: string, task: (tenantContext: TenantContext) => Promise<unknown>) {
-    await runWithFeedback(() => mutation.mutateAsync(task), {
+    const result = await runWithFeedback(() => mutation.mutateAsync(task), {
       errorMessage: `${label} failed`,
       successMessage: label
     });
+    return result !== null;
   }
 
   return (
@@ -245,6 +259,9 @@ export function RuntimePage() {
           />
           <KillSwitchPanel
             events={killSwitchEvents}
+            onInvalidInput={(error) =>
+              setError(actionErrorMessage(error, "Invalid kill-switch input"))
+            }
             onTrigger={(payload) =>
               runTask("Kill switch triggered", (tenantContext) =>
                 triggerRuntimeKillSwitch(payload, tenantContext)
@@ -406,6 +423,7 @@ function SessionDetailPanel({
   }
   const sessionId = session.id;
   const actions = session.actions ?? [];
+  const canEndSession = canEndRuntimeSession(session);
 
   function submitAction(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -415,6 +433,9 @@ function SessionDetailPanel({
 
   function submitEnd(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!canEndSession) {
+      return;
+    }
     onEnd(sessionId, runtimeSessionEndPayloadFromForm(event.currentTarget));
     event.currentTarget.reset();
   }
@@ -440,7 +461,9 @@ function SessionDetailPanel({
         </form>
         <form className="grid gap-3 md:grid-cols-[1fr_auto]" data-runtime-session-end-form onSubmit={submitEnd}>
           <Field idPrefix="runtime-session-end" label="End Reason" name="reason" />
-          <Button className="self-end" type="submit" variant="outline">End Session</Button>
+          <Button className="self-end" disabled={!canEndSession} type="submit" variant="outline">
+            End Session
+          </Button>
         </form>
         {actions.length === 0 ? (
           <EmptyState title="No actions" description="Submit an action for ring evaluation." />
@@ -732,20 +755,32 @@ function SagaMonitor({
   const steps = saga.steps ?? [];
   const events = saga.events ?? [];
   const nextOrder = nextSagaStepOrder(steps);
+  const canAddStep = canAddRuntimeSagaStep(saga);
+  const canExecuteSaga = canExecuteRuntimeSaga(saga);
+  const canCancelSaga = canCancelRuntimeSaga(saga);
 
   function submitStep(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!canAddStep) {
+      return;
+    }
     onAddStep(sagaId, runtimeSagaStepPayloadFromForm(event.currentTarget));
     event.currentTarget.reset();
   }
 
   function submitExecute(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!canExecuteSaga) {
+      return;
+    }
     onExecute(sagaId, runtimeSagaExecutePayloadFromForm(event.currentTarget));
   }
 
   function submitCancel(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!canCancelSaga) {
+      return;
+    }
     onCancel(sagaId, runtimeSagaCancelPayloadFromForm(event.currentTarget));
     event.currentTarget.reset();
   }
@@ -777,16 +812,16 @@ function SagaMonitor({
           <Field idPrefix="runtime-saga-step" label="Compensation" name="compensation_action" />
           <Field defaultValue="300" idPrefix="runtime-saga-step" label="Timeout" min={1} name="timeout_seconds" required type="number" />
           <Field defaultValue="0" idPrefix="runtime-saga-step" label="Retries" min={0} name="retry_count" required type="number" />
-          <Button className="self-end" disabled={saga.status !== "draft"} type="submit">Add Step</Button>
+          <Button className="self-end" disabled={!canAddStep} type="submit">Add Step</Button>
         </form>
         <div className="grid gap-3 md:grid-cols-2">
           <form className="grid gap-3" data-runtime-saga-execute-form onSubmit={submitExecute}>
             <Field idPrefix="runtime-saga-execute" label="Failure Actions" name="failure_actions" />
-            <Button type="submit"><Play className="h-4 w-4" />Execute / Retry</Button>
+            <Button disabled={!canExecuteSaga} type="submit"><Play className="h-4 w-4" />Execute / Retry</Button>
           </form>
           <form className="grid gap-3" data-runtime-saga-cancel-form onSubmit={submitCancel}>
             <Field idPrefix="runtime-saga-cancel" label="Cancel Reason" name="reason" />
-            <Button type="submit" variant="outline"><Square className="h-4 w-4" />Cancel</Button>
+            <Button disabled={!canCancelSaga} type="submit" variant="outline"><Square className="h-4 w-4" />Cancel</Button>
           </form>
         </div>
         {steps.length === 0 ? (
@@ -959,15 +994,23 @@ function SandboxPanel({
 
 function KillSwitchPanel({
   events,
+  onInvalidInput,
   onTrigger
 }: {
   events: RuntimeKillSwitchEvent[];
-  onTrigger: (payload: Record<string, unknown>) => void;
+  onInvalidInput: (error: unknown) => void;
+  onTrigger: (payload: Record<string, unknown>) => Promise<boolean>;
 }) {
-  function submitTrigger(event: FormEvent<HTMLFormElement>) {
+  async function submitTrigger(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    onTrigger(runtimeKillSwitchPayloadFromForm(event.currentTarget));
-    event.currentTarget.reset();
+    try {
+      const succeeded = await onTrigger(runtimeKillSwitchPayloadFromForm(event.currentTarget));
+      if (succeeded) {
+        event.currentTarget.reset();
+      }
+    } catch (error) {
+      onInvalidInput(error);
+    }
   }
 
   return (
@@ -981,7 +1024,17 @@ function KillSwitchPanel({
           <Field idPrefix="runtime-kill-switch" label="Target ID" name="target_id" required />
           <Field defaultValue="target" idPrefix="runtime-kill-switch" label="Scope" name="scope" required />
           <Field idPrefix="runtime-kill-switch" label="Reason" name="reason" required />
-          <Field idPrefix="runtime-kill-switch" label="Confirmation" name="confirmation" required />
+          <Field
+            aria-describedby="runtime-kill-switch-confirmation-help"
+            idPrefix="runtime-kill-switch"
+            label="Confirmation"
+            name="confirmation"
+            placeholder="KILL session:rtssn_123"
+            required
+          />
+          <p className="text-xs text-muted-foreground" id="runtime-kill-switch-confirmation-help">
+            Type KILL target_type:target_id exactly.
+          </p>
           <Button type="submit" variant="destructive">Trigger</Button>
         </form>
         {events.length === 0 ? (
@@ -1248,13 +1301,24 @@ export function runtimeSandboxTestPayloadFromForm(form: HTMLFormElement) {
 }
 
 export function runtimeKillSwitchPayloadFromForm(form: HTMLFormElement) {
+  const targetType = formString(form, "target_type");
+  const targetId = formString(form, "target_id");
+  const confirmation = formString(form, "confirmation");
+  const expectedConfirmation = killSwitchConfirmationPhrase(targetType, targetId);
+  if (confirmation !== expectedConfirmation) {
+    throw new Error(`Confirmation must exactly match ${expectedConfirmation}.`);
+  }
   return {
-    target_type: formString(form, "target_type"),
-    target_id: formString(form, "target_id"),
+    target_type: targetType,
+    target_id: targetId,
     scope: formString(form, "scope", "target"),
     reason: formString(form, "reason"),
-    confirmation: formString(form, "confirmation")
+    confirmation
   };
+}
+
+export function killSwitchConfirmationPhrase(targetType: string, targetId: string) {
+  return `KILL ${targetType}:${targetId}`;
 }
 
 function nextSagaStepOrder(steps: RuntimeSaga["steps"] = []) {

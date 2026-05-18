@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DetailDrawerProvider } from "../../app/drawerContext";
@@ -109,6 +109,8 @@ describe("AgentsPage", () => {
     expect(screen.getAllByText("Suspend").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Decommission").length).toBeGreaterThan(0);
 
+    fireEvent.click(within(agentRow("agent_1")).getByRole("button", { name: "Open" }));
+
     fireEvent.click(screen.getByRole("tab", { name: "Identity" }));
     expect(await screen.findByText("did:mesh:abc")).toBeInTheDocument();
     expect(screen.getByText("fingerprint_1")).toBeInTheDocument();
@@ -193,6 +195,12 @@ function mockAgentFetch() {
     return json({});
   });
   return calls;
+}
+
+function agentRow(agentId: string) {
+  const row = document.querySelector(`[data-agent-row="${agentId}"]`);
+  expect(row).not.toBeNull();
+  return row as HTMLElement;
 }
 
 function json(body: unknown, status = 200) {

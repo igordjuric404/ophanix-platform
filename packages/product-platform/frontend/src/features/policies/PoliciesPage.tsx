@@ -55,7 +55,11 @@ import { scopedQueryKey, useTenantQueryScope } from "../../api/queryScope";
 import { useEnvironments } from "../../api/system";
 import type { Environment } from "../../api/types";
 import { PageHeader } from "../../components/layout/PageHeader";
-import { ActionFeedback, useActionFeedback } from "../../components/shared/ActionFeedback";
+import {
+  ActionFeedback,
+  actionErrorMessage,
+  useActionFeedback
+} from "../../components/shared/ActionFeedback";
 import { ConfirmDialog } from "../../components/shared/ConfirmDialog";
 import { EmptyState } from "../../components/shared/EmptyState";
 import { QueryErrorSummary } from "../../components/shared/ErrorState";
@@ -76,7 +80,7 @@ import {
 } from "../../components/ui/table";
 import { datetimeLocalToIso } from "../../lib/dates";
 import { useEventStream } from "../../lib/eventSource";
-import { parseJsonObjectField } from "../../lib/forms";
+import { parseJsonObjectField, parseRequiredNumberField } from "../../lib/forms";
 import { permissions, userHasPermission } from "../../lib/rbac";
 import { cn } from "../../lib/utils";
 
@@ -110,7 +114,7 @@ export function PoliciesPage() {
   }>({ id: null, scopeKey: "" });
   const [simulationResult, setSimulationResult] = useState<PolicyEvaluation | null>(null);
   const [simulationError, setSimulationError] = useState<string | null>(null);
-  const { feedback, runWithFeedback } = useActionFeedback();
+  const { feedback, runWithFeedback, setError } = useActionFeedback();
   const scope = useTenantQueryScope();
   const currentUser = useCurrentUserPrincipal();
   const canWritePolicies = userHasPermission(currentUser, permissions.POLICY_WRITE);
@@ -141,13 +145,12 @@ export function PoliciesPage() {
 
   const policiesQuery = usePolicies(filters);
   const policies = policiesQuery.data ?? [];
-  const activePolicyId = selectedPolicyId ?? policies[0]?.id ?? null;
+  const activePolicyId = selectedPolicyId;
   const detailQuery = usePolicyDetail(activePolicyId);
   const selectedPolicy =
-    detailQuery.data ??
-    policies.find((policy) => policy.id === activePolicyId) ??
-    policies[0] ??
-    null;
+    activePolicyId
+      ? detailQuery.data ?? policies.find((policy) => policy.id === activePolicyId) ?? null
+      : null;
   const affectedQuery = usePolicyAffectedResources(activePolicyId);
   const bindingsQuery = usePolicyBindings({});
   const exceptionsQuery = usePolicyExceptions({});
@@ -178,7 +181,8 @@ export function PoliciesPage() {
   const selectedEvaluationQuery = useQuery({
     enabled: Boolean(selectedEvaluationId),
     queryKey: scopedQueryKey(["policies", "evaluations", selectedEvaluationId], scope),
-    queryFn: () => getPolicyEvaluation(selectedEvaluationId as string, scope.context)
+    queryFn: ({ signal }) =>
+      getPolicyEvaluation(selectedEvaluationId as string, scope.context, signal)
   });
   const mutation = usePolicyMutation();
   const evaluationRows = useMemo(() => {
@@ -330,7 +334,7 @@ export function PoliciesPage() {
           }}
           onSelect={selectPolicy}
           policies={policies}
-          selectedPolicyId={activePolicyId}
+          selectedPolicyId={selectedPolicyId}
         />
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(28rem,0.8fr)]">
           <PolicyVersionHistory
@@ -429,6 +433,7 @@ export function PoliciesPage() {
               createPolicyException(bindingId, payload, tenantContext)
             );
           }}
+          onInvalidInput={(error) => setError(actionErrorMessage(error, "Invalid policy binding input"))}
           onPromote={async (bindingId, payload) => {
             await runTask("Policy binding promoted", (tenantContext) =>
               promotePolicyBinding(bindingId, payload, tenantContext)
@@ -984,6 +989,7 @@ function PolicyBindingsPanel({
   isActionPending,
   onCreateBinding,
   onCreateException,
+  onInvalidInput,
   onPromote,
   policies,
   selectedPolicy
@@ -996,6 +1002,7 @@ function PolicyBindingsPanel({
   isActionPending: boolean;
   onCreateBinding: (payload: Record<string, unknown>) => void;
   onCreateException: (bindingId: string, payload: Record<string, unknown>) => void;
+  onInvalidInput: (error: unknown) => void;
   onPromote: (bindingId: string, payload: Record<string, unknown>) => void;
   policies: PolicySummary[];
   selectedPolicy: PolicyDetail | PolicySummary | null;
@@ -1013,16 +1020,11 @@ function PolicyBindingsPanel({
 
   function submitCreate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    onCreateBinding({
-      policy_id: formString(form, "policy_id"),
-      policy_version_id: formString(form, "policy_version_id") || undefined,
-      target_type: formString(form, "target_type") || "agent",
-      target_id: formString(form, "target_id"),
-      mode: formString(form, "mode") || "shadow",
-      rollout_percentage: Number(formString(form, "rollout_percentage") || 100),
-      priority: Number(formString(form, "priority") || 0)
-    });
+    try {
+      onCreateBinding(policyBindingCreatePayloadFromForm(event.currentTarget));
+    } catch (error) {
+      onInvalidInput(error);
+    }
   }
 
   return (
@@ -1040,10 +1042,11 @@ function PolicyBindingsPanel({
               <span className="text-sm font-medium">Policy</span>
               <select
                 className="h-9 w-full rounded-md border bg-background px-3 text-sm"
-                defaultValue={selectedPolicy?.id ?? policies[0]?.id ?? ""}
+                defaultValue={selectedPolicy?.id ?? ""}
                 name="policy_id"
                 required
               >
+                <option value="">Select policy</option>
                 {policies.map((policy) => (
                   <option key={policy.id} value={policy.id}>
                     {policy.name}
@@ -1085,8 +1088,15 @@ function PolicyBindingsPanel({
               name="mode"
               options={["shadow", "audit-only", "enforce", "disabled"]}
             />
-            <Field label="Rollout" name="rollout_percentage" type="number" defaultValue="100" />
-            <Field label="Priority" name="priority" type="number" defaultValue="0" />
+            <Field
+              label="Rollout"
+              name="rollout_percentage"
+              type="number"
+              min={0}
+              max={100}
+              defaultValue="100"
+            />
+            <Field label="Priority" name="priority" type="number" min={0} defaultValue="0" />
             <div className="flex items-end md:col-span-8">
               <Button disabled={isActionPending} type="submit">
                 Create Binding
@@ -1153,6 +1163,7 @@ function PolicyBindingsPanel({
                             binding={binding}
                             isActionPending={isActionPending}
                             onCreateException={onCreateException}
+                            onInvalidInput={onInvalidInput}
                             onPromote={onPromote}
                           />
                         </TableCell>
@@ -1178,11 +1189,13 @@ function BindingControls({
   binding,
   isActionPending,
   onCreateException,
+  onInvalidInput,
   onPromote
 }: {
   binding: PolicyBinding;
   isActionPending: boolean;
   onCreateException: (bindingId: string, payload: Record<string, unknown>) => void;
+  onInvalidInput: (error: unknown) => void;
   onPromote: (bindingId: string, payload: Record<string, unknown>) => void;
 }) {
   return (
@@ -1191,14 +1204,11 @@ function BindingControls({
         className="grid min-w-72 gap-2"
         onSubmit={(event) => {
           event.preventDefault();
-          const form = new FormData(event.currentTarget);
-          onPromote(binding.id, {
-            mode: formString(form, "mode"),
-            rollout_percentage: Number(
-              formString(form, "rollout_percentage") || binding.rollout_percentage
-            ),
-            reason: formString(form, "reason")
-          });
+          try {
+            onPromote(binding.id, policyBindingPromotePayloadFromForm(event.currentTarget, binding));
+          } catch (error) {
+            onInvalidInput(error);
+          }
         }}
       >
         <div className="grid grid-cols-[1fr_5rem] gap-2">
@@ -1216,6 +1226,8 @@ function BindingControls({
           <Input
             name="rollout_percentage"
             type="number"
+            min={0}
+            max={100}
             defaultValue={binding.rollout_percentage}
           />
         </div>
@@ -1874,6 +1886,45 @@ function withSelectedTenant(params: PolicyParams, context: TenantContext) {
     ...(!params.environment_id && context.environmentId
       ? { environment_id: context.environmentId }
       : {})
+  };
+}
+
+export function policyBindingCreatePayloadFromForm(form: HTMLFormElement) {
+  const data = new FormData(form);
+  return {
+    policy_id: formString(data, "policy_id"),
+    policy_version_id: formString(data, "policy_version_id") || undefined,
+    target_type: formString(data, "target_type") || "agent",
+    target_id: formString(data, "target_id"),
+    mode: formString(data, "mode") || "shadow",
+    rollout_percentage: parseRequiredNumberField(formString(data, "rollout_percentage"), "Rollout", {
+      emptyFallback: 100,
+      integer: true,
+      max: 100,
+      min: 0
+    }),
+    priority: parseRequiredNumberField(formString(data, "priority"), "Priority", {
+      emptyFallback: 0,
+      integer: true,
+      min: 0
+    })
+  };
+}
+
+export function policyBindingPromotePayloadFromForm(
+  form: HTMLFormElement,
+  binding: Pick<PolicyBinding, "mode" | "rollout_percentage">
+) {
+  const data = new FormData(form);
+  return {
+    mode: formString(data, "mode") || binding.mode,
+    rollout_percentage: parseRequiredNumberField(formString(data, "rollout_percentage"), "Rollout", {
+      emptyFallback: binding.rollout_percentage,
+      integer: true,
+      max: 100,
+      min: 0
+    }),
+    reason: formString(data, "reason")
   };
 }
 

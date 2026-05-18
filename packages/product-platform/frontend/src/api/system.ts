@@ -8,27 +8,27 @@ const rootApiClient = createApiClient({ baseUrl: "" });
 export function useSystemDependencies() {
   return useQuery({
     queryKey: ["system", "dependencies"],
-    queryFn: () => apiClient.request<SystemDependency[]>("/system/dependencies")
+    queryFn: ({ signal }) => apiClient.request<SystemDependency[]>("/system/dependencies", { signal })
   });
 }
 
 export function useVersionInfo() {
   return useQuery({
     queryKey: ["system", "version"],
-    queryFn: () => rootApiClient.request<VersionInfo>("/version")
+    queryFn: ({ signal }) => rootApiClient.request<VersionInfo>("/version", { signal })
   });
 }
 
 export function useOrganizations() {
   return useQuery({
     queryKey: ["tenant", "organizations"],
-    queryFn: () => apiClient.request<Organization[]>("/organizations")
+    queryFn: ({ signal }) => apiClient.request<Organization[]>("/organizations", { signal })
   });
 }
 
 export function useEnvironments() {
   return useQuery({
     queryKey: ["tenant", "environments"],
-    queryFn: () => apiClient.request<Environment[]>("/environments")
+    queryFn: ({ signal }) => apiClient.request<Environment[]>("/environments", { signal })
   });
 }

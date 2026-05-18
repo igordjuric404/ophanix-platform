@@ -67,6 +67,11 @@ import {
   parseOptionalNumberField,
   parseRequiredNumberField
 } from "../../lib/forms";
+import {
+  canAdvanceRollout,
+  canRollbackRollout,
+  canRunChaosExperiment
+} from "../../lib/actionAvailability";
 
 const targetTypes = ["agent", "mcp-server", "runtime", "environment"];
 const incidentSeverities = ["info", "warning", "critical"];
@@ -789,33 +794,57 @@ function ChaosPanel({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {experiments.map((experiment) => (
-                <TableRow data-observability-chaos-row={experiment.id} key={experiment.id}>
-                  <TableCell>{experiment.name}</TableCell>
-                  <TableCell>{experiment.fault_type}</TableCell>
-                  <TableCell>
-                    <StatusBadge status={experiment.status} />
-                  </TableCell>
-                  <TableCell>
-                    <form
-                      className="grid gap-2"
-                      onSubmit={(event) => {
-                        event.preventDefault();
-                        onRun(experiment.id, observabilityChaosRunPayloadFromForm(event.currentTarget));
-                      }}
-                    >
-                      <div className="flex gap-2">
-                        <Input aria-label={`${experiment.name} error rate`} className="w-24" defaultValue="0.01" name="error_rate" type="number" />
-                        <Input aria-label={`${experiment.name} duration`} className="w-24" defaultValue="10" name="duration_seconds" type="number" />
-                      </div>
-                      <CheckboxField label="Acknowledge blast radius" name="acknowledge_blast_radius" />
-                      <Button type="submit" variant="outline">
-                        Run Experiment
-                      </Button>
-                    </form>
-                  </TableCell>
-                </TableRow>
-              ))}
+              {experiments.map((experiment) => {
+                const canRun = canRunChaosExperiment(experiment);
+                return (
+                  <TableRow data-observability-chaos-row={experiment.id} key={experiment.id}>
+                    <TableCell>{experiment.name}</TableCell>
+                    <TableCell>{experiment.fault_type}</TableCell>
+                    <TableCell>
+                      <StatusBadge status={experiment.status} />
+                    </TableCell>
+                    <TableCell>
+                      <form
+                        className="grid gap-2"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          if (!canRun) {
+                            return;
+                          }
+                          onRun(experiment.id, observabilityChaosRunPayloadFromForm(event.currentTarget));
+                        }}
+                      >
+                        <div className="flex gap-2">
+                          <Input
+                            aria-label={`${experiment.name} error rate`}
+                            className="w-24"
+                            defaultValue="0.01"
+                            disabled={!canRun}
+                            name="error_rate"
+                            type="number"
+                          />
+                          <Input
+                            aria-label={`${experiment.name} duration`}
+                            className="w-24"
+                            defaultValue="10"
+                            disabled={!canRun}
+                            name="duration_seconds"
+                            type="number"
+                          />
+                        </div>
+                        <CheckboxField
+                          disabled={!canRun}
+                          label="Acknowledge blast radius"
+                          name="acknowledge_blast_radius"
+                        />
+                        <Button disabled={!canRun} type="submit" variant="outline">
+                          Run Experiment
+                        </Button>
+                      </form>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
             </TableBody>
           </Table>
         )}
@@ -923,46 +952,75 @@ function RolloutPanel({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {rollouts.map((rollout) => (
-                <TableRow data-observability-rollout-row={rollout.id} key={rollout.id}>
-                  <TableCell>{rollout.name}</TableCell>
-                  <TableCell>
-                    <StatusBadge status={rollout.status} />
-                  </TableCell>
-                  <TableCell>
-                    <RolloutTimeline rollout={rollout} />
-                  </TableCell>
-                  <TableCell>
-                    <div className="grid gap-2">
-                      <form
-                        className="flex flex-wrap gap-2"
-                        onSubmit={(event) => {
-                          event.preventDefault();
-                          onAdvance(rollout.id, observabilityRolloutAdvancePayloadFromForm(event.currentTarget));
-                        }}
-                      >
-                        <Input aria-label={`${rollout.name} SLO status`} className="w-28" defaultValue="healthy" name="slo_status" />
-                        <Input aria-label={`${rollout.name} trust score`} className="w-24" defaultValue="1000" name="trust_score" type="number" />
-                        <Button type="submit" variant="outline">
-                          Advance
-                        </Button>
-                      </form>
-                      <form
-                        className="flex flex-wrap gap-2"
-                        onSubmit={(event) => {
-                          event.preventDefault();
-                          onRollback(rollout.id, observabilityRolloutRollbackPayloadFromForm(event.currentTarget));
-                        }}
-                      >
-                        <Input aria-label={`${rollout.name} rollback reason`} className="w-48" name="reason" placeholder="Rollback reason" />
-                        <Button type="submit" variant="outline">
-                          Rollback
-                        </Button>
-                      </form>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))}
+              {rollouts.map((rollout) => {
+                const canAdvance = canAdvanceRollout(rollout);
+                const canRollback = canRollbackRollout(rollout);
+                return (
+                  <TableRow data-observability-rollout-row={rollout.id} key={rollout.id}>
+                    <TableCell>{rollout.name}</TableCell>
+                    <TableCell>
+                      <StatusBadge status={rollout.status} />
+                    </TableCell>
+                    <TableCell>
+                      <RolloutTimeline rollout={rollout} />
+                    </TableCell>
+                    <TableCell>
+                      <div className="grid gap-2">
+                        <form
+                          className="flex flex-wrap gap-2"
+                          onSubmit={(event) => {
+                            event.preventDefault();
+                            if (!canAdvance) {
+                              return;
+                            }
+                            onAdvance(rollout.id, observabilityRolloutAdvancePayloadFromForm(event.currentTarget));
+                          }}
+                        >
+                          <Input
+                            aria-label={`${rollout.name} SLO status`}
+                            className="w-28"
+                            defaultValue="healthy"
+                            disabled={!canAdvance}
+                            name="slo_status"
+                          />
+                          <Input
+                            aria-label={`${rollout.name} trust score`}
+                            className="w-24"
+                            defaultValue="1000"
+                            disabled={!canAdvance}
+                            name="trust_score"
+                            type="number"
+                          />
+                          <Button disabled={!canAdvance} type="submit" variant="outline">
+                            Advance
+                          </Button>
+                        </form>
+                        <form
+                          className="flex flex-wrap gap-2"
+                          onSubmit={(event) => {
+                            event.preventDefault();
+                            if (!canRollback) {
+                              return;
+                            }
+                            onRollback(rollout.id, observabilityRolloutRollbackPayloadFromForm(event.currentTarget));
+                          }}
+                        >
+                          <Input
+                            aria-label={`${rollout.name} rollback reason`}
+                            className="w-48"
+                            disabled={!canRollback}
+                            name="reason"
+                            placeholder="Rollback reason"
+                          />
+                          <Button disabled={!canRollback} type="submit" variant="outline">
+                            Rollback
+                          </Button>
+                        </form>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
             </TableBody>
           </Table>
         )}
@@ -1076,10 +1134,18 @@ function SelectField({
   );
 }
 
-function CheckboxField({ label, name }: { label: string; name: string }) {
+function CheckboxField({
+  disabled = false,
+  label,
+  name
+}: {
+  disabled?: boolean;
+  label: string;
+  name: string;
+}) {
   return (
     <label className="flex items-center gap-2 text-sm">
-      <input name={name} type="checkbox" />
+      <input disabled={disabled} name={name} type="checkbox" />
       {label}
     </label>
   );

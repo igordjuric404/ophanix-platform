@@ -1,14 +1,16 @@
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 
-import { apiClient, setApiTenantContext } from "./client";
+import { apiClient, setApiTenantContext, type TenantContext } from "./client";
 import type { AuthResponse, DevLoginRequest, UserPrincipal } from "./types";
 
 export const currentUserQueryKey = ["auth", "me"] as const;
+const tenantNeutralContext: TenantContext = { organizationId: null, environmentId: null };
 
 export function useCurrentUser() {
   return useQuery({
     queryKey: currentUserQueryKey,
-    queryFn: () => apiClient.request<UserPrincipal>("/auth/me"),
+    queryFn: ({ signal }) =>
+      apiClient.request<UserPrincipal>("/auth/me", { signal, tenantContext: tenantNeutralContext }),
     retry: false
   });
 }
@@ -19,7 +21,8 @@ export function useDevLogin() {
     mutationFn: (body: DevLoginRequest) =>
       apiClient.request<AuthResponse>("/auth/dev-login", {
         method: "POST",
-        body: body as unknown as BodyInit
+        body,
+        tenantContext: tenantNeutralContext
       }),
     onSuccess: async (response) => {
       await clearSessionServerState(queryClient);
@@ -31,7 +34,11 @@ export function useDevLogin() {
 export function useLogout() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: () => apiClient.request<null>("/auth/logout", { method: "POST" }),
+    mutationFn: () =>
+      apiClient.request<null>("/auth/logout", {
+        method: "POST",
+        tenantContext: tenantNeutralContext
+      }),
     onSettled: async () => {
       await clearSessionServerState(queryClient);
     }
