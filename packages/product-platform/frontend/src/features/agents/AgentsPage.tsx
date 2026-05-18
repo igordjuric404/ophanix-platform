@@ -130,7 +130,7 @@ export function AgentsPage() {
       />
       <div className="space-y-6 p-6">
         {message ? (
-          <div className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
+          <div className="feedback-success">
             {message}
           </div>
         ) : null}

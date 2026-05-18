@@ -72,7 +72,7 @@ export function OverviewPage() {
             className="absolute inset-0 z-20 flex items-center justify-center bg-background/70 backdrop-blur-sm"
             role="status"
           >
-            <div className="flex items-center gap-2 rounded-md border bg-background px-4 py-3 text-sm shadow-sm">
+            <div className="flex items-center gap-2 rounded-md border border-border/80 bg-card px-4 py-3 text-sm shadow-[var(--shadow-panel)]">
               <LoaderCircle className="h-4 w-4 animate-spin text-primary" />
               Refreshing overview
             </div>
@@ -120,15 +120,15 @@ export function OverviewPage() {
             </CardHeader>
             <CardContent className="space-y-3 text-sm">
               <div className="flex items-center gap-2">
-                <ShieldCheck className="h-4 w-4 text-emerald-600" />
+                <ShieldCheck className="h-4 w-4 text-brand-teal" />
                 Session cookie auth with `/api/v1/auth/dev-login`
               </div>
               <div className="flex items-center gap-2">
-                <Activity className="h-4 w-4 text-sky-600" />
+                <Activity className="h-4 w-4 text-primary" />
                 TanStack Query server state
               </div>
               <div className="flex items-center gap-2">
-                <Database className="h-4 w-4 text-indigo-600" />
+                <Database className="h-4 w-4 text-brand-warm" />
                 Vite static build and Docker-ready assets
               </div>
             </CardContent>

@@ -45,13 +45,14 @@ export function LoginScreen() {
         : null;
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-muted/40 px-4">
+    <main className="flex min-h-screen items-center justify-center bg-canvas px-4 py-10">
+      <div className="fixed inset-x-0 top-0 h-0.5 bg-gradient-to-r from-brand-warm via-brand-cream to-brand-teal" />
       <Card className="w-full max-w-md">
         <CardHeader>
-          <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-md bg-primary text-primary-foreground">
+          <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-lg bg-primary text-primary-foreground">
             <ShieldCheck className="h-5 w-5" />
           </div>
-          <CardTitle>Ophanix Product Platform</CardTitle>
+          <CardTitle className="text-xl">Ophanix Product Platform</CardTitle>
           <CardDescription>Sign in to the local governance control plane.</CardDescription>
         </CardHeader>
         <CardContent>
@@ -66,7 +67,7 @@ export function LoginScreen() {
             <div className="space-y-2">
               <Label htmlFor="role">Role</Label>
               <select
-                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="flex h-9 w-full rounded-md border border-input bg-background/90 px-3 py-1 text-sm outline-none focus-visible:border-ring focus-visible:ring-4 focus-visible:ring-ring/15"
                 id="role"
                 {...form.register("role")}
               >
@@ -88,4 +89,3 @@ export function LoginScreen() {
     </main>
   );
 }
-

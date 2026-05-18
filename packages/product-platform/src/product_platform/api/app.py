@@ -740,7 +740,7 @@ def _error_response(
 
 
 def _is_local_environment(environment: str) -> bool:
-    return environment.strip().lower() in {"development", "dev", "local", "test"}
+    return environment.strip().lower() in {"development", "dev", "local", "local-demo", "test"}
 
 
 def _validate_production_settings(settings: Settings) -> None:

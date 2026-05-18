@@ -27,6 +27,7 @@ const pageSize = 25;
 const filterKeys = [
   "action_status",
   "decision_id",
+  "correlation_id",
   "agent_id",
   "tool_id",
   "created_from",
@@ -130,25 +131,37 @@ export function ToolDecisionsPage() {
                 <TableBody>
                   {actions.map((action) => (
                     <TableRow data-testid="tool-runtime-action-row" key={action.id}>
-                      <TableCell className="whitespace-nowrap">{formatTimestamp(action.created_at)}</TableCell>
+                      <TableCell className="whitespace-nowrap">
+                        {formatTimestamp(action.created_at)}
+                      </TableCell>
                       <TableCell>
                         <div className="flex flex-col gap-1">
                           <StatusBadge status={decisionForAction(action)} />
-                          <small className="text-muted-foreground">{humanize(action.action_status)}</small>
+                          <small className="text-muted-foreground">
+                            {humanize(action.action_status)}
+                          </small>
                         </div>
                       </TableCell>
                       <TableCell>
                         <strong>{action.request_id}</strong>
-                        <small className="block text-muted-foreground">{action.decision_id ?? "no decision"}</small>
+                        <small className="block text-muted-foreground">
+                          {action.decision_id ?? "no decision"}
+                        </small>
                       </TableCell>
                       <TableCell>{action.agent_id ?? "unknown"}</TableCell>
                       <TableCell>{action.tool_id ?? "unknown"}</TableCell>
-                      <TableCell>{humanize(action.reason_code ?? action.error_code ?? "n/a")}</TableCell>
+                      <TableCell>
+                        {humanize(action.reason_code ?? action.error_code ?? "n/a")}
+                      </TableCell>
                       <TableCell>{action.upstream_status_code ?? "n/a"}</TableCell>
                       <TableCell>{formatLatency(action.latency_ms)}</TableCell>
                       <TableCell>{action.correlation_id ?? "none"}</TableCell>
                       <TableCell>
-                        <Button onClick={() => setSelectedActionId(action.id)} type="button" variant="outline">
+                        <Button
+                          onClick={() => setSelectedActionId(action.id)}
+                          type="button"
+                          variant="outline"
+                        >
                           Open
                         </Button>
                       </TableCell>
@@ -194,14 +207,21 @@ function ToolRuntimeFilters({
 }) {
   return (
     <form
-      className="grid gap-3 border-b px-4 py-3 md:grid-cols-[minmax(8rem,0.8fr)_repeat(5,minmax(8rem,1fr))_auto_auto]"
+      className="grid gap-3 border-b px-4 py-3 md:grid-cols-[minmax(8rem,0.8fr)_repeat(6,minmax(8rem,1fr))_auto_auto]"
       onSubmit={onApply}
     >
       <SelectField
         label="Status"
         name="action_status"
         onChange={(value) => onUpdate("action_status", value)}
-        options={["", "completed", "denied", "upstream_failed", "response_blocked", "authentication_failed"]}
+        options={[
+          "",
+          "completed",
+          "denied",
+          "upstream_failed",
+          "response_blocked",
+          "authentication_failed"
+        ]}
         value={filters.action_status}
       />
       <Field
@@ -209,6 +229,12 @@ function ToolRuntimeFilters({
         name="decision_id"
         onChange={(value) => onUpdate("decision_id", value)}
         value={filters.decision_id}
+      />
+      <Field
+        label="Correlation"
+        name="correlation_id"
+        onChange={(value) => onUpdate("correlation_id", value)}
+        value={filters.correlation_id}
       />
       <Field
         label="Agent ID"
@@ -351,11 +377,21 @@ function Pagination({
     >
       <span className="text-sm text-muted-foreground">Offset {offset}</span>
       <div className="flex gap-2">
-        <Button disabled={!canGoPrevious || isFetching} onClick={onPrevious} type="button" variant="outline">
+        <Button
+          disabled={!canGoPrevious || isFetching}
+          onClick={onPrevious}
+          type="button"
+          variant="outline"
+        >
           <ChevronLeft className="h-4 w-4" />
           Previous
         </Button>
-        <Button disabled={!canGoNext || isFetching} onClick={onNext} type="button" variant="outline">
+        <Button
+          disabled={!canGoNext || isFetching}
+          onClick={onNext}
+          type="button"
+          variant="outline"
+        >
           Next
           <ChevronRight className="h-4 w-4" />
         </Button>
@@ -388,7 +424,9 @@ function ToolRuntimeDetailDrawer({
         <div className="flex items-start justify-between gap-4 border-b px-5 py-4">
           <div>
             <h2 className="text-lg font-semibold">Runtime Action Detail</h2>
-            <p className="text-sm text-muted-foreground">{detail?.request_id ?? "Loading action"}</p>
+            <p className="text-sm text-muted-foreground">
+              {detail?.request_id ?? "Loading action"}
+            </p>
           </div>
           <Button aria-label="Close" onClick={onClose} type="button" variant="ghost">
             <X className="h-4 w-4" />
@@ -412,7 +450,9 @@ function ToolRuntimeDetailDrawer({
                 {detail.redaction_applied || summaryHasRedaction(detail.response_summary) ? (
                   <Badge tone="warning">Redacted</Badge>
                 ) : null}
-                {isResponseHidden(detail.response_summary) ? <Badge tone="muted">Hidden response</Badge> : null}
+                {isResponseHidden(detail.response_summary) ? (
+                  <Badge tone="muted">Hidden response</Badge>
+                ) : null}
               </div>
               <MetadataGrid detail={detail} />
               <SummaryBlock title="Payload Summary" value={detail.payload_summary} />
@@ -443,7 +483,10 @@ function MetadataGrid({ detail }: { detail: ToolRuntimeActionDetail }) {
       <div className="rounded-md border p-3">
         <div className="text-xs font-medium text-muted-foreground">Agent</div>
         {detail.agent_id ? (
-          <a className="text-sm font-medium text-primary underline-offset-2 hover:underline" href={`/agents?agent_id=${encodeURIComponent(detail.agent_id)}`}>
+          <a
+            className="text-sm font-medium text-primary underline-offset-2 hover:underline"
+            href={`/agents?agent_id=${encodeURIComponent(detail.agent_id)}`}
+          >
             {detail.agent_id}
           </a>
         ) : (
@@ -488,7 +531,9 @@ function SummaryBlock({
           {JSON.stringify(value, null, 2)}
         </pre>
       ) : (
-        <div className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">No summary</div>
+        <div className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
+          No summary
+        </div>
       )}
     </section>
   );
@@ -499,14 +544,18 @@ function Timeline({ events }: { events: ToolRuntimeActionDetail["events"] }) {
     <section className="space-y-2">
       <h3 className="text-sm font-semibold">Event Timeline</h3>
       {events.length === 0 ? (
-        <div className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">No events</div>
+        <div className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
+          No events
+        </div>
       ) : (
         <ol className="space-y-2">
           {events.map((event) => (
             <li className="rounded-md border p-3" key={event.id}>
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <strong className="text-sm">{event.event_type}</strong>
-                <span className="text-xs text-muted-foreground">{formatTimestamp(event.created_at)}</span>
+                <span className="text-xs text-muted-foreground">
+                  {formatTimestamp(event.created_at)}
+                </span>
               </div>
               <pre className="mt-2 overflow-auto rounded-md bg-muted p-2 text-xs">
                 {JSON.stringify(event.event_summary, null, 2)}
@@ -524,12 +573,9 @@ function decisionForAction(action: ToolRuntimeAction) {
     return "allow";
   }
   if (
-    [
-      "authentication_failed",
-      "denied",
-      "response_blocked",
-      "upstream_failed"
-    ].includes(action.action_status)
+    ["authentication_failed", "denied", "response_blocked", "upstream_failed"].includes(
+      action.action_status
+    )
   ) {
     return "deny";
   }
@@ -569,6 +615,7 @@ function emptyFilters(): FilterState {
   return {
     action_status: "",
     decision_id: "",
+    correlation_id: "",
     agent_id: "",
     tool_id: "",
     created_from: "",
@@ -591,7 +638,10 @@ function readOffsetFromUrl() {
   if (typeof window === "undefined") {
     return 0;
   }
-  const parsed = Number.parseInt(new URLSearchParams(window.location.search).get("offset") ?? "0", 10);
+  const parsed = Number.parseInt(
+    new URLSearchParams(window.location.search).get("offset") ?? "0",
+    10
+  );
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 

@@ -19,24 +19,24 @@ export function DetailDrawer({ controller }: { controller: DetailDrawerControlle
   }
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/30" data-drawer-open>
+    <div className="fixed inset-0 z-50 bg-brand-deep/50 backdrop-blur-sm" data-drawer-open>
       <aside
         aria-describedby="detail-drawer-description"
         aria-labelledby="detail-drawer-title"
         aria-modal="true"
-        className="fixed right-0 top-0 flex h-full w-[min(100vw,46rem)] flex-col border-l bg-background shadow-xl"
+        className="fixed right-0 top-0 flex h-full w-[min(100vw,46rem)] flex-col border-l border-border/80 bg-background shadow-[var(--shadow-popover)]"
         role="dialog"
       >
-        <header className="border-b p-5">
+        <header className="border-b border-border/80 bg-card p-5">
           <div className="flex items-start justify-between gap-4">
             <div>
-              <p className="text-xs font-semibold uppercase text-muted-foreground">
+              <p className="text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">
                 {drawer.kind ?? "detail"}
               </p>
-              <h2 className="mt-1 text-xl font-semibold" id="detail-drawer-title">
+              <h2 className="mt-1 font-display text-xl font-semibold" id="detail-drawer-title">
                 {drawer.title}
               </h2>
-              <p className="mt-1 text-sm text-muted-foreground" id="detail-drawer-description">
+              <p className="mt-1 text-sm leading-5 text-muted-foreground" id="detail-drawer-description">
                 {drawer.subtitle}
               </p>
             </div>
@@ -67,18 +67,18 @@ export function DetailDrawer({ controller }: { controller: DetailDrawerControlle
             <Badge tone={drawer.status.toLowerCase().includes("deny") ? "danger" : "muted"}>
               {drawer.status}
             </Badge>
-            <a className="text-sm font-medium text-primary" href={`/observability?event_id=${drawer.resourceId ?? ""}`}>
+            <a className="text-sm font-medium text-primary underline-offset-2 hover:underline" href={`/observability?event_id=${drawer.resourceId ?? ""}`}>
               Open in Audit Explorer
             </a>
           </div>
-          <nav aria-label="Detail tabs" className="mt-4 flex gap-1 rounded-md bg-muted p-1">
+          <nav aria-label="Detail tabs" className="mt-4 flex gap-1 rounded-md border border-border/80 bg-muted/60 p-1">
             {tabs.map((tab) => (
               <button
                 className={cn(
-                  "flex-1 rounded px-3 py-2 text-sm font-medium",
+                  "flex-1 rounded-sm px-3 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring/20",
                   drawer.activeTab === tab.id
                     ? "bg-background text-foreground shadow-sm"
-                    : "text-muted-foreground"
+                    : "text-muted-foreground hover:bg-background/60 hover:text-foreground"
                 )}
                 key={tab.id}
                 onClick={() => controller.setActiveTab(tab.id)}
@@ -98,17 +98,17 @@ export function DetailDrawer({ controller }: { controller: DetailDrawerControlle
 function renderDrawerBody(controller: DetailDrawerController) {
   const { drawer } = controller;
   if (drawer.state === "loading") {
-    return <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">Loading detail</div>;
+    return <div className="rounded-lg border border-dashed border-border/80 p-6 text-sm text-muted-foreground">Loading detail</div>;
   }
   if (drawer.state === "error") {
     return (
-      <div className="rounded-lg border border-rose-200 bg-rose-50 p-6 text-sm text-rose-800">
+      <div className="feedback-danger">
         {drawer.error ?? "Unable to load detail"}
       </div>
     );
   }
   if (!drawer.event) {
-    return <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">No detail selected</div>;
+    return <div className="rounded-lg border border-dashed border-border/80 p-6 text-sm text-muted-foreground">No detail selected</div>;
   }
   if (drawer.activeTab === "evidence") {
     return <EvidenceTab drawer={drawer} />;
@@ -190,7 +190,7 @@ function EvidenceTab({ drawer }: { drawer: DetailDrawerState }) {
         <p className="text-sm text-muted-foreground">{verificationText(drawer)}</p>
       </DrawerSection>
       <DrawerSection title="Raw Payload">
-        <pre className="max-h-96 overflow-auto rounded-md bg-muted p-4 text-xs">
+        <pre className="max-h-96 overflow-auto rounded-md border border-border/80 bg-muted/70 p-4 text-xs">
           {JSON.stringify(drawer.event?.payload_json ?? {}, null, 2)}
         </pre>
       </DrawerSection>
@@ -203,14 +203,14 @@ function RelatedTab({ controller }: { controller: DetailDrawerController }) {
     .filter((event) => event.id !== controller.drawer.event?.id)
     .sort((left, right) => String(left.created_at).localeCompare(String(right.created_at)));
   if (related.length === 0) {
-    return <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">No related events</div>;
+    return <div className="rounded-lg border border-dashed border-border/80 p-6 text-sm text-muted-foreground">No related events</div>;
   }
   return (
     <ol className="space-y-3">
       {related.map((event) => (
         <li key={event.id}>
           <button
-            className="w-full rounded-lg border bg-card p-4 text-left text-sm hover:bg-accent"
+            className="w-full rounded-lg border border-border/80 bg-card p-4 text-left text-sm transition-colors hover:bg-accent"
             onClick={() => void controller.openAuditEvent(event.id, { pushCurrent: true })}
             type="button"
           >
@@ -226,8 +226,8 @@ function RelatedTab({ controller }: { controller: DetailDrawerController }) {
 
 function DrawerSection({ children, title }: { children: React.ReactNode; title: string }) {
   return (
-    <section className="rounded-lg border bg-card p-4">
-      <h3 className="font-semibold">{title}</h3>
+    <section className="rounded-lg border border-border/80 bg-card p-4">
+      <h3 className="font-display font-semibold">{title}</h3>
       <div className="mt-3">{children}</div>
     </section>
   );
@@ -259,4 +259,3 @@ function verificationText(drawer: DetailDrawerState) {
 function stringValue(value: unknown) {
   return typeof value === "string" || typeof value === "number" ? String(value) : undefined;
 }
-

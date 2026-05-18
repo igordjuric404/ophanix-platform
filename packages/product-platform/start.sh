@@ -8,6 +8,10 @@ API_HOST="${API_HOST:-127.0.0.1}"
 API_PORT="${API_PORT:-8088}"
 FRONTEND_HOST="${FRONTEND_HOST:-127.0.0.1}"
 FRONTEND_PORT="${FRONTEND_PORT:-3000}"
+PLATFORM_MCP_PORT="${PLATFORM_MCP_PORT:-8091}"
+PLATFORM_SUPPORT_AGENT_PORT="${PLATFORM_SUPPORT_AGENT_PORT:-8092}"
+PLATFORM_REFUND_AGENT_PORT="${PLATFORM_REFUND_AGENT_PORT:-8093}"
+PLATFORM_RESEARCH_AGENT_PORT="${PLATFORM_RESEARCH_AGENT_PORT:-8094}"
 WORKER_INTERVAL_SECONDS="${WORKER_INTERVAL_SECONDS:-10}"
 MODE="local"
 
@@ -18,13 +22,14 @@ Usage: ./start.sh [--local|--docker]
 Starts the Ophanix Product Platform with no manual setup.
 
 Modes:
-  --local   Run API, worker, demo services, PostgreSQL migration/seed, and frontend proxy.
+  --local   Run API, worker, demo services, PostgreSQL migration, and frontend proxy.
             This is the default. It uses OPHANIX_DATABASE_URL or the local
             PostgreSQL URL from docker-compose.demo.yml.
   --docker  Run the full Docker Compose demo stack.
 
 Environment overrides:
   API_PORT=8088 FRONTEND_PORT=3000 ./start.sh
+  PLATFORM_MCP_PORT=8091 PLATFORM_SUPPORT_AGENT_PORT=8092 ./start.sh
 EOF
 }
 
@@ -367,14 +372,14 @@ run_local() {
 
   start_process "worker loop" \
     python3 -m product_platform.cli worker loop --interval-seconds "$WORKER_INTERVAL_SECONDS"
-  start_process "sample MCP service on http://$API_HOST:8091" \
-    python3 -m product_platform.cli demo-service serve --service mcp --host "$API_HOST" --port 8091
-  start_process "support agent on http://$API_HOST:8092" \
-    python3 -m product_platform.cli demo-service serve --service agent --agent-id agent_demo_support --host "$API_HOST" --port 8092
-  start_process "refund agent on http://$API_HOST:8093" \
-    python3 -m product_platform.cli demo-service serve --service agent --agent-id agent_demo_refund --host "$API_HOST" --port 8093
-  start_process "research agent on http://$API_HOST:8094" \
-    python3 -m product_platform.cli demo-service serve --service agent --agent-id agent_demo_research --host "$API_HOST" --port 8094
+  start_process "sample MCP service on http://$API_HOST:$PLATFORM_MCP_PORT" \
+    python3 -m product_platform.cli demo-service serve --service mcp --host "$API_HOST" --port "$PLATFORM_MCP_PORT"
+  start_process "support agent on http://$API_HOST:$PLATFORM_SUPPORT_AGENT_PORT" \
+    python3 -m product_platform.cli demo-service serve --service agent --agent-id agent_demo_support --host "$API_HOST" --port "$PLATFORM_SUPPORT_AGENT_PORT"
+  start_process "refund agent on http://$API_HOST:$PLATFORM_REFUND_AGENT_PORT" \
+    python3 -m product_platform.cli demo-service serve --service agent --agent-id agent_demo_refund --host "$API_HOST" --port "$PLATFORM_REFUND_AGENT_PORT"
+  start_process "research agent on http://$API_HOST:$PLATFORM_RESEARCH_AGENT_PORT" \
+    python3 -m product_platform.cli demo-service serve --service agent --agent-id agent_demo_research --host "$API_HOST" --port "$PLATFORM_RESEARCH_AGENT_PORT"
 
   start_process "frontend on http://$FRONTEND_HOST:$FRONTEND_PORT" \
     env VITE_API_PROXY_TARGET="http://$API_HOST:$API_PORT" \

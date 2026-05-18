@@ -8,6 +8,7 @@ import { Button } from "../ui/button";
 import { EnvironmentSelector } from "./EnvironmentSelector";
 import { NotificationCenter } from "./NotificationCenter";
 import { SystemStatusIndicator } from "./SystemStatusIndicator";
+import { ThemeToggle } from "./ThemeToggle";
 
 export function TopBar({ tenant, user }: { tenant: TenantSelection; user: UserPrincipal }) {
   const logout = useLogout();
@@ -19,16 +20,18 @@ export function TopBar({ tenant, user }: { tenant: TenantSelection; user: UserPr
   }
 
   return (
-    <div className="flex h-14 items-center justify-between border-b bg-background px-6">
-      <div className="flex items-center gap-2 text-sm font-medium">
+    <div className="sticky top-0 z-30 flex h-16 items-center justify-between border-b border-border/80 bg-background/90 px-4 backdrop-blur-xl lg:px-6">
+      <div className="flex min-w-0 items-center gap-2 text-sm font-medium">
         <ShieldCheck className="h-4 w-4 text-primary" />
-        Agent Governance Control Plane
+        <span className="hidden truncate sm:inline">Agent Governance Control Plane</span>
+        <span className="sm:hidden">Ophanix</span>
       </div>
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-2 sm:gap-3">
         <EnvironmentSelector tenant={tenant} />
         <SystemStatusIndicator />
         <NotificationCenter />
-        <div className="text-right text-sm">
+        <ThemeToggle />
+        <div className="hidden text-right text-sm sm:block">
           <div className="font-medium">{user.display_name}</div>
           <div className="text-xs text-muted-foreground">{user.roles.join(", ")}</div>
         </div>

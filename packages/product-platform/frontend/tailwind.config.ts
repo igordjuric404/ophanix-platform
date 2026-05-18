@@ -34,6 +34,19 @@ const config = {
         card: {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))"
+        },
+        brand: {
+          deep: "hsl(var(--brand-deep))",
+          deeper: "hsl(var(--brand-deeper))",
+          cream: "hsl(var(--brand-cream))",
+          warm: "hsl(var(--brand-warm))",
+          teal: "hsl(var(--brand-teal))"
+        },
+        canvas: "hsl(var(--app-canvas))",
+        sidebar: {
+          DEFAULT: "hsl(var(--sidebar))",
+          foreground: "hsl(var(--sidebar-foreground))",
+          muted: "hsl(var(--sidebar-muted))"
         }
       },
       borderRadius: {
@@ -42,7 +55,20 @@ const config = {
         sm: "calc(var(--radius) - 4px)"
       },
       fontFamily: {
-        sans: ["Inter", "ui-sans-serif", "system-ui", "sans-serif"]
+        sans: [
+          "Google Sans",
+          "Google Sans Text",
+          "ui-sans-serif",
+          "system-ui",
+          "sans-serif"
+        ],
+        display: [
+          "Google Sans",
+          "Google Sans Text",
+          "ui-sans-serif",
+          "system-ui",
+          "sans-serif"
+        ]
       }
     }
   },
@@ -50,4 +76,3 @@ const config = {
 } satisfies Config;
 
 export default config;
-

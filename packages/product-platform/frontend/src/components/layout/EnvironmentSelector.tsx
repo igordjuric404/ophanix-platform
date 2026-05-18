@@ -65,14 +65,14 @@ export function EnvironmentSelector({ tenant }: { tenant: TenantSelection }) {
       {open ? (
         <div
           aria-labelledby={buttonId}
-          className="absolute right-0 z-30 mt-2 w-64 rounded-lg border bg-background p-1 text-sm shadow-lg"
+          className="absolute right-0 z-30 mt-2 w-64 rounded-lg border border-border/80 bg-card p-1 text-sm shadow-[var(--shadow-popover)]"
           id={popoverId}
           role="listbox"
         >
           {environments.map((environment) => (
             <button
               aria-selected={tenant.selectedEnvironment?.id === environment.id}
-              className="flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-left hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:outline-none"
+              className="flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-left transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring/20"
               key={environment.id}
               onClick={() => selectEnvironment(environment.id)}
               role="option"

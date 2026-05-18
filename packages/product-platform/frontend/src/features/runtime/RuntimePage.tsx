@@ -121,7 +121,7 @@ export function RuntimePage() {
       />
       <div className="space-y-6 p-6">
         {message ? (
-          <div className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
+          <div className="feedback-success">
             {message}
           </div>
         ) : null}
@@ -846,7 +846,7 @@ function SandboxPanel({
           <Button className="self-end" type="submit">Create</Button>
         </form>
         {selectedProfile?.provider_warning ? (
-          <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900" data-runtime-sandbox-warning>
+          <p className="feedback-warning px-3 py-2" data-runtime-sandbox-warning>
             {selectedProfile.provider_warning}
           </p>
         ) : null}

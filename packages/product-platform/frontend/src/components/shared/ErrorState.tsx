@@ -3,7 +3,7 @@ import { Button } from "../ui/button";
 export function ErrorState({ message, onRetry }: { message: string; onRetry?: () => void }) {
   return (
     <div
-      className="rounded-lg border border-rose-200 bg-rose-50 p-5 text-sm text-rose-800"
+      className="feedback-danger"
       role="alert"
     >
       <div className="font-medium">Unable to load data</div>
@@ -16,4 +16,3 @@ export function ErrorState({ message, onRetry }: { message: string; onRetry?: ()
     </div>
   );
 }
-

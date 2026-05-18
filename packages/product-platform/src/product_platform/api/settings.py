@@ -32,6 +32,7 @@ def _environment_is_local() -> bool:
         "development",
         "dev",
         "local",
+        "local-demo",
         "test",
     }
 

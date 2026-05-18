@@ -104,7 +104,7 @@ export function TrustPage() {
       <PageHeader title="Trust" description="Trust scores, cards, thresholds, and handshakes." />
       <div className="space-y-6 p-6">
         {message ? (
-          <div className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
+          <div className="feedback-success">
             {message}
           </div>
         ) : null}
@@ -551,7 +551,7 @@ function TrustCardDetail({
       </div>
       {activeCard.status === "revoked" ? (
         <div
-          className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900"
+          className="mt-3 feedback-warning px-3 py-2"
           data-trust-card-revoked
         >
           Revoked
@@ -559,7 +559,7 @@ function TrustCardDetail({
       ) : null}
       {verification ? (
         <div
-          className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900"
+          className="mt-3 feedback-success px-3 py-2"
           data-trust-card-verification
         >
           {verification.verified ? "Verified" : "Invalid"} {verification.reason}
@@ -778,7 +778,7 @@ function TrustHandshakesPanel({
         </form>
         {simulation ? (
           <div
-            className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900"
+            className="feedback-success"
             data-trust-handshake-simulation
           >
             {simulation.result} {simulation.reason}

@@ -16,10 +16,10 @@ export function DialogContent({
 }: ComponentPropsWithoutRef<typeof DialogPrimitive.Content>) {
   return (
     <DialogPrimitive.Portal>
-      <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/35" />
+      <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-brand-deep/55 backdrop-blur-sm" />
       <DialogPrimitive.Content
         className={cn(
-          "fixed left-1/2 top-1/2 z-50 w-[min(92vw,32rem)] -translate-x-1/2 -translate-y-1/2 rounded-lg border bg-background p-5 shadow-lg",
+          "fixed left-1/2 top-1/2 z-50 w-[min(92vw,32rem)] -translate-x-1/2 -translate-y-1/2 rounded-lg border border-border/80 bg-card p-5 text-card-foreground shadow-[var(--shadow-popover)]",
           className
         )}
         {...props}
@@ -43,6 +43,26 @@ export function DialogHeader({ className, ...props }: ComponentPropsWithoutRef<"
   return <div className={cn("space-y-1.5 pr-8", className)} {...props} />;
 }
 
-export const DialogTitle = DialogPrimitive.Title;
-export const DialogDescription = DialogPrimitive.Description;
+export function DialogTitle({
+  className,
+  ...props
+}: ComponentPropsWithoutRef<typeof DialogPrimitive.Title>) {
+  return (
+    <DialogPrimitive.Title
+      className={cn("font-display text-lg font-semibold leading-6", className)}
+      {...props}
+    />
+  );
+}
 
+export function DialogDescription({
+  className,
+  ...props
+}: ComponentPropsWithoutRef<typeof DialogPrimitive.Description>) {
+  return (
+    <DialogPrimitive.Description
+      className={cn("text-sm leading-5 text-muted-foreground", className)}
+      {...props}
+    />
+  );
+}

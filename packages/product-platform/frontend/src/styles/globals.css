@@ -2,45 +2,222 @@
 @tailwind components;
 @tailwind utilities;
 
+@font-face {
+  font-family: "Google Sans";
+  src:
+    local("Google Sans"),
+    local("GoogleSans-Regular");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Google Sans";
+  src:
+    local("Google Sans Medium"),
+    local("GoogleSans-Medium");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Google Sans";
+  src:
+    local("Google Sans Bold"),
+    local("GoogleSans-Bold");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222 47% 11%;
+    color-scheme: light;
+    --background: 42 48% 98%;
+    --foreground: 214 54% 13%;
     --card: 0 0% 100%;
-    --card-foreground: 222 47% 11%;
-    --primary: 224 64% 33%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 162 45% 92%;
-    --secondary-foreground: 167 70% 18%;
-    --muted: 210 40% 96%;
-    --muted-foreground: 215 16% 47%;
-    --accent: 207 60% 94%;
-    --accent-foreground: 224 64% 24%;
-    --destructive: 0 72% 51%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214 32% 91%;
-    --input: 214 32% 91%;
-    --ring: 224 64% 33%;
+    --card-foreground: 214 54% 13%;
+    --primary: 212 68% 16%;
+    --primary-foreground: 38 100% 92%;
+    --secondary: 176 47% 92%;
+    --secondary-foreground: 180 68% 18%;
+    --muted: 214 36% 94%;
+    --muted-foreground: 216 17% 42%;
+    --accent: 38 100% 91%;
+    --accent-foreground: 214 54% 16%;
+    --destructive: 354 70% 46%;
+    --destructive-foreground: 38 100% 96%;
+    --border: 214 27% 84%;
+    --input: 214 27% 82%;
+    --ring: 176 72% 34%;
+
+    --brand-deep: 212 68% 9%;
+    --brand-deeper: 232 59% 10%;
+    --brand-cream: 38 100% 90%;
+    --brand-warm: 16 88% 54%;
+    --brand-teal: 174 72% 36%;
+    --app-canvas: 214 42% 96%;
+    --sidebar: 212 62% 11%;
+    --sidebar-foreground: 38 100% 90%;
+    --sidebar-muted: 38 72% 78%;
+    --status-success-bg: 171 57% 93%;
+    --status-success-fg: 176 76% 21%;
+    --status-success-border: 171 43% 74%;
+    --status-warning-bg: 38 100% 92%;
+    --status-warning-fg: 25 83% 28%;
+    --status-warning-border: 32 86% 74%;
+    --status-danger-bg: 354 87% 96%;
+    --status-danger-fg: 354 72% 35%;
+    --status-danger-border: 354 66% 78%;
+    --shadow-panel: 0 1px 2px hsl(214 54% 13% / 0.06), 0 18px 52px hsl(214 54% 13% / 0.08);
+    --shadow-popover: 0 22px 70px hsl(214 54% 13% / 0.18);
     --radius: 0.5rem;
+  }
+
+  .dark {
+    color-scheme: dark;
+    --background: 212 68% 9%;
+    --foreground: 39 74% 91%;
+    --card: 212 50% 12%;
+    --card-foreground: 39 74% 91%;
+    --primary: 38 100% 90%;
+    --primary-foreground: 212 68% 9%;
+    --secondary: 212 39% 17%;
+    --secondary-foreground: 39 74% 91%;
+    --muted: 212 35% 16%;
+    --muted-foreground: 39 28% 68%;
+    --accent: 174 43% 20%;
+    --accent-foreground: 38 100% 92%;
+    --destructive: 354 72% 57%;
+    --destructive-foreground: 38 100% 96%;
+    --border: 39 28% 24%;
+    --input: 39 22% 28%;
+    --ring: 174 72% 56%;
+
+    --brand-teal: 174 72% 56%;
+    --app-canvas: 214 62% 7%;
+    --sidebar: 232 59% 10%;
+    --sidebar-foreground: 38 100% 90%;
+    --sidebar-muted: 38 38% 66%;
+    --status-success-bg: 174 45% 14%;
+    --status-success-fg: 171 82% 78%;
+    --status-success-border: 174 34% 31%;
+    --status-warning-bg: 27 52% 16%;
+    --status-warning-fg: 38 100% 78%;
+    --status-warning-border: 26 45% 36%;
+    --status-danger-bg: 354 45% 17%;
+    --status-danger-fg: 354 100% 84%;
+    --status-danger-border: 354 42% 39%;
+    --shadow-panel: 0 1px 0 hsl(38 100% 90% / 0.03), 0 24px 80px hsl(0 0% 0% / 0.25);
+    --shadow-popover: 0 24px 80px hsl(0 0% 0% / 0.45);
   }
 
   * {
     border-color: hsl(var(--border));
   }
 
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    background: hsl(var(--background));
+  }
+
   body {
     margin: 0;
     min-width: 320px;
-    background: hsl(var(--background));
+    background:
+      linear-gradient(180deg, hsl(var(--background)) 0%, hsl(var(--app-canvas)) 100%);
     color: hsl(var(--foreground));
     font-family:
-      Inter,
+      "Google Sans",
+      "Google Sans Text",
       ui-sans-serif,
       system-ui,
       -apple-system,
       BlinkMacSystemFont,
       "Segoe UI",
+      Roboto,
+      Arial,
       sans-serif;
+    font-feature-settings:
+      "cv02" 1,
+      "cv03" 1,
+      "cv04" 1;
+    letter-spacing: 0;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+
+  select,
+  textarea {
+    border-color: hsl(var(--input));
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+  }
+
+  ::selection {
+    background: hsl(var(--brand-teal) / 0.25);
+    color: hsl(var(--foreground));
+  }
+
+  :focus-visible {
+    outline-color: hsl(var(--ring));
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      scroll-behavior: auto !important;
+      transition-duration: 0.01ms !important;
+    }
   }
 }
 
+@layer components {
+  .feedback-success,
+  .feedback-warning,
+  .feedback-danger {
+    border: 1px solid;
+    border-radius: var(--radius);
+    padding: 0.75rem 1rem;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+  }
+
+  .feedback-success {
+    border-color: hsl(var(--status-success-border));
+    background: hsl(var(--status-success-bg));
+    color: hsl(var(--status-success-fg));
+  }
+
+  .feedback-warning {
+    border-color: hsl(var(--status-warning-border));
+    background: hsl(var(--status-warning-bg));
+    color: hsl(var(--status-warning-fg));
+  }
+
+  .feedback-danger {
+    border-color: hsl(var(--status-danger-border));
+    background: hsl(var(--status-danger-bg));
+    color: hsl(var(--status-danger-fg));
+  }
+
+  .focus-ring {
+    @apply focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring/20;
+  }
+}

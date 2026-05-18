@@ -6,10 +6,13 @@ type BadgeTone = "default" | "success" | "warning" | "danger" | "muted";
 
 const tones: Record<BadgeTone, string> = {
   default: "border-transparent bg-primary text-primary-foreground",
-  success: "border-emerald-200 bg-emerald-50 text-emerald-700",
-  warning: "border-amber-200 bg-amber-50 text-amber-800",
-  danger: "border-rose-200 bg-rose-50 text-rose-700",
-  muted: "border-border bg-muted text-muted-foreground"
+  success:
+    "border-[hsl(var(--status-success-border))] bg-[hsl(var(--status-success-bg))] text-[hsl(var(--status-success-fg))]",
+  warning:
+    "border-[hsl(var(--status-warning-border))] bg-[hsl(var(--status-warning-bg))] text-[hsl(var(--status-warning-fg))]",
+  danger:
+    "border-[hsl(var(--status-danger-border))] bg-[hsl(var(--status-danger-bg))] text-[hsl(var(--status-danger-fg))]",
+  muted: "border-border/80 bg-muted/70 text-muted-foreground"
 };
 
 export function Badge({
@@ -20,7 +23,7 @@ export function Badge({
   return (
     <span
       className={cn(
-        "inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium",
+        "inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-semibold leading-5",
         tones[tone],
         className
       )}
@@ -28,4 +31,3 @@ export function Badge({
     />
   );
 }
-

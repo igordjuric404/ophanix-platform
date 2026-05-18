@@ -11,11 +11,16 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const variants: Record<ButtonVariant, string> = {
-  default: "bg-primary text-primary-foreground hover:bg-primary/90",
-  secondary: "bg-secondary text-secondary-foreground hover:bg-secondary/80",
-  outline: "border border-input bg-background hover:bg-accent hover:text-accent-foreground",
-  ghost: "hover:bg-accent hover:text-accent-foreground",
-  destructive: "bg-destructive text-destructive-foreground hover:bg-destructive/90"
+  default:
+    "border-primary bg-primary text-primary-foreground shadow-sm hover:bg-primary/90 hover:shadow",
+  secondary:
+    "border-border bg-secondary text-secondary-foreground hover:border-primary/30 hover:bg-secondary/80",
+  outline:
+    "border-border bg-background/80 text-foreground shadow-sm hover:border-primary/45 hover:bg-accent hover:text-accent-foreground",
+  ghost:
+    "border-transparent bg-transparent text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+  destructive:
+    "border-destructive bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90"
 };
 
 export function Button({
@@ -28,7 +33,7 @@ export function Button({
   return (
     <Comp
       className={cn(
-        "inline-flex h-9 items-center justify-center gap-2 rounded-md px-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50",
+        "inline-flex h-9 items-center justify-center gap-2 rounded-md border px-3 text-sm font-medium tracking-normal transition-all duration-150 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring/20 disabled:pointer-events-none disabled:opacity-50",
         variants[variant],
         className
       )}
@@ -36,4 +41,3 @@ export function Button({
     />
   );
 }
-

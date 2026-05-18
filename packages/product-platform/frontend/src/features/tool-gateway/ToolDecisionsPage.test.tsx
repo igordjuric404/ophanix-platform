@@ -116,7 +116,10 @@ describe("ToolDecisionsPage", () => {
   });
 
   it("renders a recoverable API error state", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => json({ message: "backend unavailable" }, 500)));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => json({ message: "backend unavailable" }, 500))
+    );
 
     renderWithQueryClient(<ToolDecisionsPage />);
 
@@ -125,11 +128,13 @@ describe("ToolDecisionsPage", () => {
   });
 
   it("paginates with limit and offset query parameters", async () => {
-    const calls = mockToolRuntimeFetch(Array.from({ length: 25 }, (_, index) => ({
-      ...allowedAction,
-      id: `toolrun_${index}`,
-      request_id: `req-${index}`
-    })));
+    const calls = mockToolRuntimeFetch(
+      Array.from({ length: 25 }, (_, index) => ({
+        ...allowedAction,
+        id: `toolrun_${index}`,
+        request_id: `req-${index}`
+      }))
+    );
 
     renderWithQueryClient(<ToolDecisionsPage />);
 
@@ -138,7 +143,9 @@ describe("ToolDecisionsPage", () => {
     fireEvent.click(within(pager).getByRole("button", { name: "Next" }));
 
     await waitFor(() =>
-      expect(calls.some((call) => call === "/api/v1/tool-runtime/actions?limit=25&offset=25")).toBe(true)
+      expect(calls.some((call) => call === "/api/v1/tool-runtime/actions?limit=25&offset=25")).toBe(
+        true
+      )
     );
   });
 
@@ -170,12 +177,28 @@ describe("ToolDecisionsPage", () => {
     );
   });
 
+  it("applies the correlation filter to the API query", async () => {
+    const calls = mockToolRuntimeFetch([allowedAction]);
+
+    renderWithQueryClient(<ToolDecisionsPage />);
+
+    expect(await screen.findByText("req-allowed")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Correlation"), { target: { value: "corr-allowed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply filters" }));
+
+    await waitFor(() =>
+      expect(calls.some((call) => call.includes("correlation_id=corr-allowed"))).toBe(true)
+    );
+  });
+
   it("reset clears filters and pagination", async () => {
-    const calls = mockToolRuntimeFetch(Array.from({ length: 25 }, (_, index) => ({
-      ...allowedAction,
-      id: `toolrun_reset_${index}`,
-      request_id: `req-reset-${index}`
-    })));
+    const calls = mockToolRuntimeFetch(
+      Array.from({ length: 25 }, (_, index) => ({
+        ...allowedAction,
+        id: `toolrun_reset_${index}`,
+        request_id: `req-reset-${index}`
+      }))
+    );
 
     renderWithQueryClient(<ToolDecisionsPage />);
 
@@ -201,15 +224,17 @@ describe("ToolDecisionsPage", () => {
     window.history.replaceState(
       null,
       "",
-      "/tool-gateway/decisions?action_status=denied&tool_id=tool_claims&offset=25"
+      "/tool-gateway/decisions?action_status=denied&correlation_id=corr-denied&tool_id=tool_claims&offset=25"
     );
 
     renderWithQueryClient(<ToolDecisionsPage />);
 
     expect(await screen.findByText("req-denied")).toBeInTheDocument();
     expect(screen.getByLabelText("Status")).toHaveValue("denied");
+    expect(screen.getByLabelText("Correlation")).toHaveValue("corr-denied");
     expect(screen.getByLabelText("Tool ID")).toHaveValue("tool_claims");
     expect(calls[0]).toContain("action_status=denied");
+    expect(calls[0]).toContain("correlation_id=corr-denied");
     expect(calls[0]).toContain("tool_id=tool_claims");
     expect(calls[0]).toContain("offset=25");
   });
@@ -259,9 +284,12 @@ describe("ToolDecisionsPage", () => {
   });
 
   it("marks redacted responses in the drawer", async () => {
-    mockToolRuntimeFetch([{ ...allowedAction, id: "toolrun_redacted", request_id: "req-redacted" }], {
-      toolrun_redacted: redactedDetail
-    });
+    mockToolRuntimeFetch(
+      [{ ...allowedAction, id: "toolrun_redacted", request_id: "req-redacted" }],
+      {
+        toolrun_redacted: redactedDetail
+      }
+    );
 
     renderWithQueryClient(<ToolDecisionsPage />);
 

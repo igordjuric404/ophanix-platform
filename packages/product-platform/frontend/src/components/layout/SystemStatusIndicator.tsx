@@ -62,11 +62,11 @@ export function SystemStatusIndicator() {
       </Button>
       {open ? (
         <div
-          className="absolute right-0 z-30 mt-2 w-80 rounded-lg border bg-background p-4 text-sm shadow-lg"
+          className="absolute right-0 z-30 mt-2 w-80 rounded-lg border border-border/80 bg-card p-4 text-sm shadow-[var(--shadow-popover)]"
           id={popoverId}
           role="dialog"
         >
-          <div className="font-medium">System status</div>
+          <div className="font-display font-semibold">System status</div>
           <p className="mt-1 text-muted-foreground">
             {status === "healthy"
               ? "Required dependencies are healthy."
@@ -76,7 +76,7 @@ export function SystemStatusIndicator() {
                   ? "System status could not be fully loaded."
                   : "Optional dependencies need attention."}
           </p>
-          <div className="mt-3 rounded-md bg-muted/50 p-3 text-xs text-muted-foreground">
+          <div className="mt-3 rounded-md border border-border/80 bg-muted/60 p-3 text-xs text-muted-foreground">
             API build: {version.data?.build_sha ?? version.data?.version ?? "unknown"}
           </div>
           <ul className="mt-3 space-y-2">

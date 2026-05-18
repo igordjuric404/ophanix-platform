@@ -96,19 +96,19 @@ export function NotificationCenter() {
       </Button>
       {open ? (
         <div
-          className="absolute right-0 z-30 mt-2 w-72 rounded-lg border bg-background p-4 text-sm shadow-lg"
+          className="absolute right-0 z-30 mt-2 w-72 rounded-lg border border-border/80 bg-card p-4 text-sm shadow-[var(--shadow-popover)]"
           id={popoverId}
           role="dialog"
         >
           <div className="flex items-center justify-between gap-3">
-            <div className="font-medium">Notifications</div>
+            <div className="font-display font-semibold">Notifications</div>
           </div>
           {notificationCount > 0 ? (
             <ul className="mt-3 space-y-3">
               {notifications.map((notification) => (
-                <li className="flex items-start gap-2 rounded-md border p-2" key={notification.id}>
+                <li className="flex items-start gap-2 rounded-md border border-border/80 p-2" key={notification.id}>
                   <a
-                    className="min-w-0 flex-1 rounded-sm p-1 hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    className="min-w-0 flex-1 rounded-sm p-1 hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring/20"
                     href={notification.href}
                     onClick={() => setOpen(false)}
                   >
