@@ -44,6 +44,30 @@ describe("EnvironmentSelector", () => {
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
 
+  it("supports keyboard navigation through environment options", async () => {
+    const tenant = tenantSelection();
+    render(<EnvironmentSelector tenant={tenant} />);
+
+    fireEvent.keyDown(screen.getByRole("button", { name: /Environment Development/ }), {
+      key: "ArrowDown"
+    });
+
+    const listbox = await screen.findByRole("listbox");
+    fireEvent.keyDown(listbox, { key: "ArrowDown" });
+    fireEvent.keyDown(listbox, { key: "Enter" });
+
+    expect(tenant.setSelectedEnvironmentId).toHaveBeenCalledWith("env_prod");
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("is available at mobile viewport widths", () => {
+    render(<EnvironmentSelector tenant={tenantSelection()} />);
+
+    expect(screen.getByRole("button", { name: /Environment Development/ })).not.toHaveClass(
+      "hidden"
+    );
+  });
+
   it("closes when another header popover opens or outside is clicked", async () => {
     stubHealthySystemFetch();
     renderWithQueryClient(

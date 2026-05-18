@@ -23,13 +23,18 @@ export function TableRow({ className, ...props }: HTMLAttributes<HTMLTableRowEle
   );
 }
 
-export function TableHead({ className, ...props }: ThHTMLAttributes<HTMLTableCellElement>) {
+export function TableHead({
+  className,
+  scope = "col",
+  ...props
+}: ThHTMLAttributes<HTMLTableCellElement>) {
   return (
     <th
       className={cn(
         "h-10 px-3 text-left align-middle text-xs font-semibold uppercase tracking-[0.06em] text-muted-foreground",
         className
       )}
+      scope={scope}
       {...props}
     />
   );

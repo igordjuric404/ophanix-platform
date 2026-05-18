@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode
 } from "react";
@@ -15,6 +16,7 @@ import {
   type AuditEvent,
   type AuditVerification
 } from "../api/audit";
+import { useTenantQueryScope } from "../api/queryScope";
 import { DetailDrawer } from "../components/drawers/DetailDrawer";
 
 export type DrawerKind =
@@ -73,14 +75,21 @@ const DetailDrawerContext = createContext<DetailDrawerController | null>(null);
 
 export function DetailDrawerProvider({ children }: { children: ReactNode }) {
   const [drawer, setDrawer] = useState<DetailDrawerState>(emptyDrawer);
+  const requestIdRef = useRef(0);
+  const scope = useTenantQueryScope();
 
   const closeDrawer = useCallback(() => {
+    requestIdRef.current += 1;
     setDrawer(emptyDrawer);
     clearDrawerDeepLink();
   }, []);
 
   const openAuditEvent = useCallback(
     async (eventId: string, options: { pushCurrent?: boolean } = {}) => {
+      const requestId = requestIdRef.current + 1;
+      requestIdRef.current = requestId;
+      const tenantContext = scope.context;
+
       setDrawer((current) => {
         const backStack =
           options.pushCurrent && current.open
@@ -101,28 +110,38 @@ export function DetailDrawerProvider({ children }: { children: ReactNode }) {
       writeDrawerDeepLink("audit-event", eventId);
 
       try {
-        const event = await getAuditEvent(eventId);
+        const event = await getAuditEvent(eventId, tenantContext);
         const [verification, relatedEvents] = await Promise.all([
-          verifyAuditEvent(eventId),
+          verifyAuditEvent(eventId, tenantContext),
           event.correlation_id
-            ? listAuditEvents({ correlation_id: event.correlation_id })
+            ? listAuditEvents({ correlation_id: event.correlation_id }, tenantContext)
             : Promise.resolve([])
         ]);
-        setDrawer((current) => ({
-          ...drawerStateForAuditEvent(event, verification, relatedEvents),
-          backStack: current.backStack
-        }));
+        setDrawer((current) => {
+          if (requestIdRef.current !== requestId || current.resourceId !== eventId) {
+            return current;
+          }
+          return {
+            ...drawerStateForAuditEvent(event, verification, relatedEvents),
+            backStack: current.backStack
+          };
+        });
       } catch (error) {
-        setDrawer((current) => ({
-          ...current,
-          title: "Audit Event",
-          status: "Error",
-          state: "error",
-          error: error instanceof Error ? error.message : "Unable to load audit event."
-        }));
+        setDrawer((current) => {
+          if (requestIdRef.current !== requestId || current.resourceId !== eventId) {
+            return current;
+          }
+          return {
+            ...current,
+            title: "Audit Event",
+            status: "Error",
+            state: "error",
+            error: error instanceof Error ? error.message : "Unable to load audit event."
+          };
+        });
       }
     },
-    []
+    [scope.context]
   );
 
   const backDrawer = useCallback(() => {

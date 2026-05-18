@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
+import type { TenantContext } from "../../api/client";
 import {
   approveMarketplaceReview,
   assessMarketplacePluginQuality,
@@ -36,6 +37,7 @@ import {
   type PluginTrustEvent,
   type PluginVersion
 } from "../../api/marketplace";
+import { useTenantQueryScope } from "../../api/queryScope";
 import { PageHeader } from "../../components/layout/PageHeader";
 import {
   ActionFeedback,
@@ -59,7 +61,6 @@ import {
   TableRow
 } from "../../components/ui/table";
 import { parseJsonObjectField } from "../../lib/forms";
-import { readSelectedEnvironmentId } from "../../lib/storage";
 
 const pluginTypes = ["", "policy_template", "integration", "agent", "validator"];
 const pluginStatuses = ["", "available", "deprecated", "disabled"];
@@ -79,6 +80,7 @@ export function MarketplacePage() {
   const reviewsQuery = useMarketplaceReviews(reviewFilters);
   const signingKeysQuery = useMarketplaceSigningKeys();
   const mutation = useMarketplaceMutation();
+  const tenantScope = useTenantQueryScope();
 
   const plugins = pluginsQuery.data ?? [];
   const activePluginId = selectedPluginId ?? plugins[0]?.id ?? null;
@@ -90,14 +92,21 @@ export function MarketplacePage() {
   const reviews = reviewsQuery.data ?? [];
   const signingKeys = signingKeysQuery.data ?? [];
 
-  async function runTask(label: string, task: () => Promise<unknown>) {
+  async function runTask(
+    label: string,
+    task: (tenantContext: TenantContext) => Promise<unknown>
+  ) {
     await runWithFeedback(() => mutation.mutateAsync(task), {
       errorMessage: `${label} failed`,
       successMessage: label
     });
   }
 
-  async function runResultTask<T>(label: string, task: () => Promise<T>, onResult: (value: T) => void) {
+  async function runResultTask<T>(
+    label: string,
+    task: (tenantContext: TenantContext) => Promise<T>,
+    onResult: (value: T) => void
+  ) {
     const result = await runWithFeedback<T>(
       () => mutation.mutateAsync(task) as Promise<T>,
       {
@@ -139,7 +148,11 @@ export function MarketplacePage() {
             isLoading={pluginsQuery.isLoading}
             onFilter={setPluginFilters}
             onInvalidInput={(error) => setError(actionErrorMessage(error, "Invalid marketplace input"))}
-            onImport={(payload) => runTask("Plugin manifest imported", () => importMarketplacePlugin(payload))}
+            onImport={(payload) =>
+              runTask("Plugin manifest imported", (tenantContext) =>
+                importMarketplacePlugin(payload, tenantContext)
+              )
+            }
             onSelect={setSelectedPluginId}
             plugins={plugins}
             selectedPluginId={activePlugin?.id ?? null}
@@ -148,13 +161,13 @@ export function MarketplacePage() {
             onAssess={(versionId) =>
               runResultTask(
                 "Quality assessment completed",
-                () => assessMarketplacePluginQuality(versionId),
+                (tenantContext) => assessMarketplacePluginQuality(versionId, tenantContext),
                 setQualityAssessment
               )
             }
             onSubmitReview={(versionId, payload) =>
-              runTask("Plugin review submitted", () =>
-                submitMarketplacePluginReview(versionId, payload)
+              runTask("Plugin review submitted", (tenantContext) =>
+                submitMarketplacePluginReview(versionId, payload, tenantContext)
               )
             }
             plugin={activePlugin}
@@ -162,15 +175,18 @@ export function MarketplacePage() {
         </div>
         <div className="grid gap-6 2xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
           <InstallPanel
+            environmentId={tenantScope.context.environmentId}
             onCheck={(versionId, payload) =>
               runResultTask(
                 "Policy compatibility checked",
-                () => checkMarketplacePluginPolicy(versionId, payload),
+                (tenantContext) => checkMarketplacePluginPolicy(versionId, payload, tenantContext),
                 setPolicyResult
               )
             }
             onInstall={(payload) =>
-              runTask("Plugin installation created", () => createMarketplaceInstallation(payload))
+              runTask("Plugin installation created", (tenantContext) =>
+                createMarketplaceInstallation(payload, tenantContext)
+              )
             }
             policyResult={policyResult}
             version={activeVersion}
@@ -178,8 +194,8 @@ export function MarketplacePage() {
           <InstalledPanel
             installations={installations}
             onUninstall={(installationId) =>
-              runTask("Plugin uninstalled", () =>
-                uninstallMarketplaceInstallation(installationId)
+              runTask("Plugin uninstalled", (tenantContext) =>
+                uninstallMarketplaceInstallation(installationId, tenantContext)
               )
             }
           />
@@ -188,10 +204,10 @@ export function MarketplacePage() {
           <ReviewsPanel
             filters={reviewFilters}
             onDecision={(reviewId, decision, payload) =>
-              runTask(`Review ${decision}`, () =>
+              runTask(`Review ${decision}`, (tenantContext) =>
                 decision === "approved"
-                  ? approveMarketplaceReview(reviewId, payload)
-                  : rejectMarketplaceReview(reviewId, payload)
+                  ? approveMarketplaceReview(reviewId, payload, tenantContext)
+                  : rejectMarketplaceReview(reviewId, payload, tenantContext)
               )
             }
             onFilter={setReviewFilters}
@@ -200,10 +216,14 @@ export function MarketplacePage() {
           <SigningKeysPanel
             keys={signingKeys}
             onCreate={(payload) =>
-              runTask("Signing key registered", () => createMarketplaceSigningKey(payload))
+              runTask("Signing key registered", (tenantContext) =>
+                createMarketplaceSigningKey(payload, tenantContext)
+              )
             }
             onRevoke={(keyId) =>
-              runTask("Signing key revoked", () => revokeMarketplaceSigningKey(keyId))
+              runTask("Signing key revoked", (tenantContext) =>
+                revokeMarketplaceSigningKey(keyId, tenantContext)
+              )
             }
           />
         </div>
@@ -213,7 +233,8 @@ export function MarketplacePage() {
           onRecompute={(versionId, payload) =>
             runResultTask(
               "Plugin trust recomputed",
-              () => recomputeMarketplacePluginTrust(versionId, payload),
+              (tenantContext) =>
+                recomputeMarketplacePluginTrust(versionId, payload, tenantContext),
               (event) => setTrustEvents((items) => [event, ...items])
             )
           }
@@ -465,17 +486,22 @@ function PluginDetailPanel({
 }
 
 function InstallPanel({
+  environmentId,
   onCheck,
   onInstall,
   policyResult,
   version
 }: {
+  environmentId: string | null;
   onCheck: (versionId: string, payload: Record<string, unknown>) => void;
   onInstall: (payload: Record<string, unknown>) => void;
   policyResult: PluginPolicyResult | null;
   version: PluginVersion | null;
 }) {
-  const environmentId = readSelectedEnvironmentId() ?? "env_default";
+  const policyAllowsInstall =
+    Boolean(version) &&
+    policyResult?.plugin_version_id === version?.id &&
+    policyResult?.result === "allowed";
   return (
     <Card>
       <CardHeader>
@@ -513,10 +539,16 @@ function InstallPanel({
               }}
             >
               <input name="plugin_version_id" type="hidden" value={version.id} />
-              <Field defaultValue={environmentId} label="Environment" name="environment_id" />
+              <Field
+                defaultValue={environmentId ?? ""}
+                key={environmentId ?? "no-environment"}
+                label="Environment"
+                name="environment_id"
+                readOnly
+              />
               <Field label="Target Agent" name="target_agent_id" placeholder="agent_123" />
               <div className="flex items-end">
-                <Button disabled={policyResult?.result === "denied"} type="submit">
+                <Button disabled={!environmentId || !policyAllowsInstall} type="submit">
                   Install
                 </Button>
               </div>
@@ -889,18 +921,27 @@ function Field({
   label,
   name,
   placeholder,
+  readOnly,
   type = "text"
 }: {
   defaultValue?: string;
   label: string;
   name: string;
   placeholder?: string;
+  readOnly?: boolean;
   type?: string;
 }) {
   return (
     <div className="space-y-1">
       <Label htmlFor={name}>{label}</Label>
-      <Input defaultValue={defaultValue} id={name} name={name} placeholder={placeholder} type={type} />
+      <Input
+        defaultValue={defaultValue}
+        id={name}
+        name={name}
+        placeholder={placeholder}
+        readOnly={readOnly}
+        type={type}
+      />
     </div>
   );
 }

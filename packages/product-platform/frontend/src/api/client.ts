@@ -85,7 +85,7 @@ export function createApiClient({
       credentials: options.credentials ?? "include"
     };
 
-    if (body && typeof body !== "string") {
+    if (body !== undefined && typeof body !== "string") {
       headers.set("Content-Type", "application/json");
       init.body = JSON.stringify(body);
     } else if (typeof body === "string") {

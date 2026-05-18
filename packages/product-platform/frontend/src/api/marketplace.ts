@@ -100,10 +100,14 @@ export interface PluginTrustEvent {
   created_at: string;
 }
 
-export function importMarketplacePlugin(body: Record<string, unknown>) {
+export function importMarketplacePlugin(
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<MarketplacePlugin>("/marketplace/plugins/import", {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
@@ -123,17 +127,25 @@ export function getMarketplacePlugin(pluginId: string, tenantContext?: TenantCon
   );
 }
 
-export function checkMarketplacePluginPolicy(versionId: string, body: Record<string, unknown>) {
+export function checkMarketplacePluginPolicy(
+  versionId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<PluginPolicyResult>(
     `/marketplace/plugins/${encodeURIComponent(versionId)}/check-policy`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
-export function submitMarketplacePluginReview(versionId: string, body: Record<string, unknown>) {
+export function submitMarketplacePluginReview(
+  versionId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<PluginReview>(
     `/marketplace/plugins/${encodeURIComponent(versionId)}/submit-review`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
@@ -146,24 +158,36 @@ export function listMarketplaceReviews(
   });
 }
 
-export function approveMarketplaceReview(reviewId: string, body: Record<string, unknown>) {
+export function approveMarketplaceReview(
+  reviewId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<PluginReview>(
     `/marketplace/reviews/${encodeURIComponent(reviewId)}/approve`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
-export function rejectMarketplaceReview(reviewId: string, body: Record<string, unknown>) {
+export function rejectMarketplaceReview(
+  reviewId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<PluginReview>(
     `/marketplace/reviews/${encodeURIComponent(reviewId)}/reject`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
-export function createMarketplaceSigningKey(body: Record<string, unknown>) {
+export function createMarketplaceSigningKey(
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<PluginSigningKey>("/marketplace/signing-keys", {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
@@ -173,31 +197,42 @@ export function listMarketplaceSigningKeys(tenantContext?: TenantContext) {
   });
 }
 
-export function revokeMarketplaceSigningKey(keyId: string) {
+export function revokeMarketplaceSigningKey(keyId: string, tenantContext?: TenantContext) {
   return apiClient.request<PluginSigningKey>(
     `/marketplace/signing-keys/${encodeURIComponent(keyId)}/revoke`,
-    { method: "POST" }
+    { method: "POST", tenantContext }
   );
 }
 
-export function assessMarketplacePluginQuality(versionId: string) {
+export function assessMarketplacePluginQuality(
+  versionId: string,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<PluginQualityAssessment>(
     `/marketplace/plugins/${encodeURIComponent(versionId)}/assess-quality`,
-    { method: "POST" }
+    { method: "POST", tenantContext }
   );
 }
 
-export function recomputeMarketplacePluginTrust(versionId: string, body: Record<string, unknown>) {
+export function recomputeMarketplacePluginTrust(
+  versionId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<PluginTrustEvent>(
     `/marketplace/plugins/${encodeURIComponent(versionId)}/recompute-trust`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
-export function createMarketplaceInstallation(body: Record<string, unknown>) {
+export function createMarketplaceInstallation(
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<PluginInstallation>("/marketplace/installations", {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
@@ -211,10 +246,13 @@ export function listMarketplaceInstallations(
   );
 }
 
-export function uninstallMarketplaceInstallation(installationId: string) {
+export function uninstallMarketplaceInstallation(
+  installationId: string,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<PluginInstallation>(
     `/marketplace/installations/${encodeURIComponent(installationId)}/uninstall`,
-    { method: "POST" }
+    { method: "POST", tenantContext }
   );
 }
 
@@ -263,7 +301,8 @@ export function useMarketplaceMutation() {
   const queryClient = useQueryClient();
   const scope = useTenantQueryScope();
   return useMutation({
-    mutationFn: async (task: () => Promise<unknown>) => task(),
+    mutationFn: async (task: (tenantContext: TenantContext) => Promise<unknown>) =>
+      task(scope.context),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["marketplace"], scope) });
       void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["artifacts"], scope) });

@@ -44,4 +44,22 @@ describe("api client", () => {
       message: "Authentication is required."
     });
   });
+
+  it("serializes falsy request bodies instead of dropping them", async () => {
+    const calls: Array<[string, RequestInit]> = [];
+    const fetchImpl: typeof fetch = async (url, init) => {
+      calls.push([String(url), init ?? {}]);
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { "Content-Type": "application/json" },
+        status: 200
+      });
+    };
+    const client = createApiClient({ fetchImpl });
+
+    await client.request("/feature-flag", { body: false, method: "POST" });
+
+    const [, init] = calls[0];
+    expect(init.body).toBe("false");
+    expect((init.headers as Headers).get("Content-Type")).toBe("application/json");
+  });
 });

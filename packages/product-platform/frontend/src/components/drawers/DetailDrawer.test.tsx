@@ -1,6 +1,7 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { setApiTenantContext } from "../../api/client";
 import { DetailDrawerProvider, useDetailDrawer } from "../../app/drawerContext";
 import { renderWithQueryClient } from "../../test/test-utils";
 
@@ -16,6 +17,7 @@ function DrawerHarness({ eventId = "evt_1" }: { eventId?: string }) {
 describe("DetailDrawer", () => {
   beforeEach(() => {
     window.history.replaceState(null, "", "/overview");
+    setApiTenantContext({ organizationId: null, environmentId: null });
   });
 
   it("opens, renders audit metadata and raw evidence, then closes", async () => {
@@ -124,9 +126,32 @@ describe("DetailDrawer", () => {
 
     expect(await screen.findByText("Audit event missing")).toBeInTheDocument();
   });
+
+  it("scopes audit drawer detail, verification, and related-event requests to the tenant", async () => {
+    setApiTenantContext({ organizationId: "org_review", environmentId: "env_review" });
+    const requests = mockAuditFetch();
+
+    renderWithQueryClient(
+      <DetailDrawerProvider>
+        <DrawerHarness />
+      </DetailDrawerProvider>
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Open audit event" }));
+
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(requests).toHaveLength(3);
+    expect(
+      requests.every(
+        (request) =>
+          request.organizationId === "org_review" && request.environmentId === "env_review"
+      )
+    ).toBe(true);
+  });
 });
 
 function mockAuditFetch(events: Record<string, Record<string, unknown>> = {}) {
+  const requests: Array<{ environmentId: string | null; organizationId: string | null; url: string }> = [];
   const eventMap = {
     evt_1: {
       id: "evt_1",
@@ -148,7 +173,14 @@ function mockAuditFetch(events: Record<string, Record<string, unknown>> = {}) {
     ...events
   };
 
-  vi.stubGlobal("fetch", async (url: string) => {
+  vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = input.toString();
+    const headers = init?.headers as Headers | undefined;
+    requests.push({
+      environmentId: headers?.get("X-Environment-ID") ?? null,
+      organizationId: headers?.get("X-Organization-ID") ?? null,
+      url
+    });
     if (url.includes("/verify")) {
       return json({ valid: true, checked_count: 1 });
     }
@@ -158,6 +190,7 @@ function mockAuditFetch(events: Record<string, Record<string, unknown>> = {}) {
     const eventId = url.split("/").pop() ?? "";
     return json(eventMap[eventId as keyof typeof eventMap]);
   });
+  return requests;
 }
 
 function json(body: unknown, status = 200) {

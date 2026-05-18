@@ -1,6 +1,7 @@
 import { fireEvent, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { setApiTenantContext } from "../../api/client";
 import { renderWithQueryClient } from "../../test/test-utils";
 import {
   MarketplacePage,
@@ -110,7 +111,8 @@ const trustEvent = {
 describe("MarketplacePage", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
-    window.localStorage.setItem("ophanix.selectedEnvironmentId", "env_default");
+    window.localStorage.setItem("ophanix.selectedEnvironmentId", "stale_env");
+    setApiTenantContext({ organizationId: "org_default", environmentId: "env_review" });
   });
 
   it("renders catalog, detail, installs, reviews, signing keys, and trust controls", async () => {
@@ -169,7 +171,15 @@ describe("MarketplacePage", () => {
     expect(await screen.findByText("Signing key registered")).toBeInTheDocument();
 
     expect(requests.some((request) => request.url.endsWith("/check-policy"))).toBe(true);
-    expect(requests.some((request) => request.url.endsWith("/installations"))).toBe(true);
+    const installRequest = requests.find(
+      (request) => request.url.endsWith("/installations") && request.method === "POST"
+    );
+    expect(installRequest?.body).toMatchObject({
+      environment_id: "env_review",
+      plugin_version_id: "plugver_1"
+    });
+    expect(installRequest?.environmentId).toBe("env_review");
+    expect(installRequest?.organizationId).toBe("org_default");
     expect(requests.some((request) => request.url.endsWith("/submit-review"))).toBe(true);
     expect(requests.some((request) => request.url.endsWith("/assess-quality"))).toBe(true);
     expect(requests.some((request) => request.url.endsWith("/recompute-trust"))).toBe(true);
@@ -199,7 +209,13 @@ describe("MarketplacePage", () => {
 });
 
 function mockMarketplaceFetch() {
-  const requests: Array<{ url: string; method: string; body?: unknown }> = [];
+  const requests: Array<{
+    body?: unknown;
+    environmentId: string | null;
+    method: string;
+    organizationId: string | null;
+    url: string;
+  }> = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -207,7 +223,14 @@ function mockMarketplaceFetch() {
       const path = new URL(url, "http://localhost").pathname;
       const method = init?.method ?? "GET";
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-      requests.push({ url: path, method, body });
+      const headers = init?.headers as Headers | undefined;
+      requests.push({
+        body,
+        environmentId: headers?.get("X-Environment-ID") ?? null,
+        method,
+        organizationId: headers?.get("X-Organization-ID") ?? null,
+        url: path
+      });
 
       if (path === "/api/v1/marketplace/plugins" && method === "GET") {
         return json([plugin]);
