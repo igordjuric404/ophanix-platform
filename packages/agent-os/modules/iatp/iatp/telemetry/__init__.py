@@ -4,6 +4,7 @@
 Telemetry and flight recorder for request/response tracking.
 """
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +12,8 @@ from typing import Any, Dict, List, Optional
 
 from iatp.models import CapabilityManifest, QuarantineSession, TracingContext
 from iatp.security import PrivacyScrubber
+
+TRACE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 
 def _get_utc_timestamp() -> str:
@@ -25,7 +28,7 @@ class FlightRecorder:
     """
 
     def __init__(self, log_dir: Optional[Path] = None):
-        self.log_dir = log_dir or Path("/tmp/iatp_logs")
+        self.log_dir = (log_dir or Path("/tmp/iatp_logs")).resolve()
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.scrubber = PrivacyScrubber()
 
@@ -127,13 +130,16 @@ class FlightRecorder:
 
     def _write_log(self, trace_id: str, entry: Dict[str, Any]) -> None:
         """Write a log entry to the flight recorder."""
-        log_file = self.log_dir / f"{trace_id}.jsonl"
+        log_file = self._path_for_trace(trace_id)
         with open(log_file, "a") as f:
             f.write(json.dumps(entry) + "\n")
 
     def get_trace_logs(self, trace_id: str) -> List[Dict[str, Any]]:
         """Retrieve all log entries for a given trace ID."""
-        log_file = self.log_dir / f"{trace_id}.jsonl"
+        try:
+            log_file = self._path_for_trace(trace_id)
+        except ValueError:
+            return []
         if not log_file.exists():
             return []
 
@@ -144,6 +150,14 @@ class FlightRecorder:
                     logs.append(json.loads(line))
         return logs
 
+    def _path_for_trace(self, trace_id: str) -> Path:
+        if not TraceIDGenerator.is_valid(trace_id):
+            raise ValueError("Trace ID contains unsafe characters.")
+        log_file = (self.log_dir / f"{trace_id}.jsonl").resolve()
+        if self.log_dir not in [log_file, *log_file.parents]:
+            raise ValueError("Trace log path escapes the log directory.")
+        return log_file
+
 
 class TraceIDGenerator:
     """Generates unique trace IDs for distributed tracing."""
@@ -152,6 +166,16 @@ class TraceIDGenerator:
     def generate() -> str:
         """Generate a new trace ID."""
         return str(uuid.uuid4())
+
+    @staticmethod
+    def is_valid(trace_id: Optional[str]) -> bool:
+        """Return whether a trace ID is safe for logging and lookup."""
+        return bool(trace_id and TRACE_ID_PATTERN.fullmatch(trace_id))
+
+    @staticmethod
+    def from_external(trace_id: Optional[str]) -> str:
+        """Accept a caller trace ID only if it is safe; otherwise mint one."""
+        return trace_id if TraceIDGenerator.is_valid(trace_id) else TraceIDGenerator.generate()
 
     @staticmethod
     def create_context(trace_id: str, agent_id: str, parent_trace_id: Optional[str] = None) -> TracingContext:

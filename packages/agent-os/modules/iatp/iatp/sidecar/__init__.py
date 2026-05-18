@@ -21,6 +21,7 @@ from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
 from iatp.attestation import ReputationManager
+from iatp.auth import IATPAuthConfig, is_user_override_confirmed, require_iatp_auth
 from iatp.models import (
     AttestationRecord,
     CapabilityManifest,
@@ -49,13 +50,19 @@ class SidecarProxy:
         manifest: CapabilityManifest,
         sidecar_host: str = "0.0.0.0",
         sidecar_port: int = 8001,
-        attestation: Optional[AttestationRecord] = None
+        attestation: Optional[AttestationRecord] = None,
+        service_token: Optional[str] = None,
+        allow_insecure_local: Optional[bool] = None,
     ):
         self.agent_url = agent_url
         self.manifest = manifest
         self.sidecar_host = sidecar_host
         self.sidecar_port = sidecar_port
         self.attestation = attestation
+        self.auth_config = IATPAuthConfig.from_env(
+            service_token=service_token,
+            allow_insecure_local=allow_insecure_local,
+        )
 
         self.app = FastAPI(title=f"IATP Sidecar for {manifest.agent_id}")
         self.validator = SecurityValidator()
@@ -111,7 +118,9 @@ class SidecarProxy:
         async def proxy_request(
             request: Request,
             x_user_override: Optional[str] = Header(None),
-            x_agent_trace_id: Optional[str] = Header(None)
+            x_agent_trace_id: Optional[str] = Header(None),
+            authorization: Optional[str] = Header(None),
+            x_iatp_token: Optional[str] = Header(None),
         ):
             """
             Main proxy endpoint that forwards requests to the backend agent.
@@ -120,13 +129,14 @@ class SidecarProxy:
             - X-User-Override: Set to "true" to bypass security warnings
             - X-Agent-Trace-ID: Optional trace ID for distributed tracing
             """
-            # Generate or use provided trace ID
-            trace_id = x_agent_trace_id or TraceIDGenerator.generate()
+            self._require_auth(authorization=authorization, x_iatp_token=x_iatp_token)
+            trace_id = TraceIDGenerator.from_external(x_agent_trace_id)
+            user_override_confirmed = is_user_override_confirmed(x_user_override)
 
             # Parse request body
             try:
                 payload = await request.json()
-            except ValueError as e:
+            except ValueError:
                 # Log JSON parsing error
                 return JSONResponse(
                     status_code=400,
@@ -193,7 +203,7 @@ class SidecarProxy:
             should_quarantine = self.validator.should_quarantine(self.manifest)
 
             # If there's a warning and no user override, return the warning
-            if warning and not x_user_override:
+            if warning and not user_override_confirmed:
                 trust_score = self.manifest.calculate_trust_score()
                 return JSONResponse(
                     status_code=449,  # Custom status for "Retry With User Override"
@@ -210,7 +220,7 @@ class SidecarProxy:
                 )
 
             # Create quarantine session if needed
-            if should_quarantine and x_user_override:
+            if should_quarantine and user_override_confirmed:
                 session = QuarantineSession(
                     session_id=TraceIDGenerator.generate(),
                     trace_id=trace_id,
@@ -357,28 +367,43 @@ class SidecarProxy:
                 )
 
         @self.app.get("/trace/{trace_id}")
-        async def get_trace(trace_id: str):
+        async def get_trace(
+            trace_id: str,
+            authorization: Optional[str] = Header(None),
+            x_iatp_token: Optional[str] = Header(None),
+        ):
             """Retrieve flight recorder logs for a trace ID."""
+            self._require_auth(authorization=authorization, x_iatp_token=x_iatp_token)
             logs = self.flight_recorder.get_trace_logs(trace_id)
             if not logs:
                 raise HTTPException(status_code=404, detail="Trace not found")
             return {"trace_id": trace_id, "logs": logs}
 
         @self.app.get("/quarantine/{trace_id}")
-        async def get_quarantine_session(trace_id: str):
+        async def get_quarantine_session(
+            trace_id: str,
+            authorization: Optional[str] = Header(None),
+            x_iatp_token: Optional[str] = Header(None),
+        ):
             """Get quarantine session info."""
+            self._require_auth(authorization=authorization, x_iatp_token=x_iatp_token)
             session = self.quarantine_sessions.get(trace_id)
             if not session:
                 raise HTTPException(status_code=404, detail="Quarantine session not found")
             return session.model_dump()
 
         @self.app.get("/reputation/{agent_id}")
-        async def get_reputation(agent_id: str):
+        async def get_reputation(
+            agent_id: str,
+            authorization: Optional[str] = Header(None),
+            x_iatp_token: Optional[str] = Header(None),
+        ):
             """
             Get reputation score for an agent.
 
             Returns the reputation score and recent events.
             """
+            self._require_auth(authorization=authorization, x_iatp_token=x_iatp_token)
             score = self.reputation_manager.get_score(agent_id)
             if not score:
                 raise HTTPException(
@@ -390,7 +415,9 @@ class SidecarProxy:
         @self.app.post("/reputation/{agent_id}/slash")
         async def slash_reputation(
             agent_id: str,
-            request: Request
+            request: Request,
+            authorization: Optional[str] = Header(None),
+            x_iatp_token: Optional[str] = Header(None),
         ):
             """
             Slash an agent's reputation due to misbehavior.
@@ -405,6 +432,7 @@ class SidecarProxy:
 
             This is typically called by cmvk when it detects hallucinations.
             """
+            self._require_auth(authorization=authorization, x_iatp_token=x_iatp_token)
             try:
                 payload = await request.json()
             except ValueError as e:
@@ -445,24 +473,33 @@ class SidecarProxy:
             }
 
         @self.app.get("/reputation/export")
-        async def export_reputation():
+        async def export_reputation(
+            authorization: Optional[str] = Header(None),
+            x_iatp_token: Optional[str] = Header(None),
+        ):
             """
             Export all reputation data for network-wide propagation.
 
             This allows other nodes to learn about agent reputations.
             """
+            self._require_auth(authorization=authorization, x_iatp_token=x_iatp_token)
             return {
                 "reputation_data": self.reputation_manager.export_reputation_data(),
                 "timestamp": _get_utc_timestamp()
             }
 
         @self.app.post("/reputation/import")
-        async def import_reputation(request: Request):
+        async def import_reputation(
+            request: Request,
+            authorization: Optional[str] = Header(None),
+            x_iatp_token: Optional[str] = Header(None),
+        ):
             """
             Import reputation data from other nodes.
 
             This enables network-wide reputation propagation.
             """
+            self._require_auth(authorization=authorization, x_iatp_token=x_iatp_token)
             try:
                 payload = await request.json()
             except ValueError as e:
@@ -489,13 +526,27 @@ class SidecarProxy:
             port=self.sidecar_port
         )
 
+    def _require_auth(
+        self,
+        *,
+        authorization: Optional[str],
+        x_iatp_token: Optional[str],
+    ) -> None:
+        require_iatp_auth(
+            authorization=authorization,
+            x_iatp_token=x_iatp_token,
+            config=self.auth_config,
+        )
+
 
 def create_sidecar(
     agent_url: str,
     manifest: CapabilityManifest,
     host: str = "0.0.0.0",
     port: int = 8001,
-    attestation: Optional[AttestationRecord] = None
+    attestation: Optional[AttestationRecord] = None,
+    service_token: Optional[str] = None,
+    allow_insecure_local: Optional[bool] = None,
 ) -> SidecarProxy:
     """
     Factory function to create a sidecar proxy.
@@ -515,5 +566,7 @@ def create_sidecar(
         manifest=manifest,
         sidecar_host=host,
         sidecar_port=port,
-        attestation=attestation
+        attestation=attestation,
+        service_token=service_token,
+        allow_insecure_local=allow_insecure_local,
     )

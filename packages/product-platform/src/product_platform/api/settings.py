@@ -119,6 +119,9 @@ class Settings:
     gateway_token_hash_pepper: str | None = field(
         default_factory=lambda: os.environ.get("OPHANIX_GATEWAY_TOKEN_HASH_PEPPER")
     )
+    api_key_hash_pepper: str | None = field(
+        default_factory=lambda: os.environ.get("OPHANIX_API_KEY_HASH_PEPPER")
+    )
     idp_issuer_url: str | None = field(default_factory=lambda: os.environ.get("OPHANIX_IDP_ISSUER_URL"))
     idp_audience: str | None = field(default_factory=lambda: os.environ.get("OPHANIX_IDP_AUDIENCE"))
     tls_certificate_ref: str | None = field(default_factory=lambda: os.environ.get("OPHANIX_TLS_CERTIFICATE_REF"))

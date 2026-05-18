@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 import unittest
 
 from fastapi.testclient import TestClient
@@ -118,10 +120,38 @@ class CompliancePhase1AuditExplorerTests(unittest.TestCase):
         self.assertEqual(payload["format"], "json")
         self.assertEqual(payload["status"], "ready")
         self.assertTrue(payload["artifact_uri"].startswith("audit-export://"))
+        self.assertNotIn("empty", payload["filters"])
         self.assertEqual(
             payload["filters"],
             {"actor_id": "user_policy", "decision": "deny", "source_component": "policy-engine"},
         )
+
+        artifacts = self.client.get(
+            "/api/v1/artifacts",
+            headers=self._headers(),
+            params={"artifact_type": "audit.export"},
+        )
+        self.assertEqual(artifacts.status_code, 200, artifacts.text)
+        artifact_id = artifacts.json()[0]["id"]
+        download = self.client.get(
+            f"/api/v1/artifacts/{artifact_id}/download",
+            headers=self._headers(),
+        )
+        self.assertEqual(download.status_code, 200, download.text)
+        content = json.loads(base64.b64decode(download.json()["content_base64"]))
+        self.assertEqual(content["event_count"], 1)
+        self.assertEqual(content["events"][0]["event_type"], "policy.decision")
+        self.assertEqual(content["events"][0]["actor_id"], "user_policy")
+
+    def test_audit_export_rejects_unknown_filters(self) -> None:
+        response = self.client.post(
+            "/api/v1/audit/export",
+            headers=self._headers(),
+            json={"format": "json", "filters": {"unsupported": "value"}},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Unsupported audit export filter", response.text)
 
 
 if __name__ == "__main__":

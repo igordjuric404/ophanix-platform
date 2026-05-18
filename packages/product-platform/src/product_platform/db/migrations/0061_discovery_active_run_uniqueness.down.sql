@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_discovery_runs_one_running_per_target;

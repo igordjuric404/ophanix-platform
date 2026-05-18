@@ -30,6 +30,8 @@ class DiscoveryScanRunner:
     async def run_created_target(self, target: Row, run: Row) -> Row:
         """Run a target that already has a persisted running record."""
 
+        if run["status"] != "running":
+            return run
         if not bool(target["enabled"]):
             raise ValueError("Discovery target is disabled.")
         if self.repository.has_running_run_for_target(

@@ -11,6 +11,7 @@ from product_platform.db.postgres import Connection, PostgresConnection
 from product_platform.db.time import utc_now_iso
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+MIGRATION_ADVISORY_LOCK_ID = 731_947_560_431
 
 
 @dataclass(frozen=True)
@@ -61,18 +62,27 @@ class MigrationRunner:
 
     def apply_all(self) -> list[str]:
         applied: list[str] = []
-        self._ensure_migration_table()
-        for migration in load_migrations():
-            if self._is_applied(migration.version):
-                continue
-            self.connection.executescript(migration.up_sql)
-            self.connection.execute(
-                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-                (migration.version, migration.name, utc_now_iso()),
-            )
-            self.connection.commit()
-            applied.append(migration.version)
-        return applied
+        self._acquire_migration_lock()
+        try:
+            self._ensure_migration_table()
+            for migration in load_migrations():
+                if self._is_applied(migration.version):
+                    continue
+                try:
+                    self.connection.execute("BEGIN")
+                    self.connection.executescript(migration.up_sql)
+                    self.connection.execute(
+                        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
+                        (migration.version, migration.name, utc_now_iso()),
+                    )
+                    self.connection.commit()
+                except Exception:
+                    self.connection.rollback()
+                    raise
+                applied.append(migration.version)
+            return applied
+        finally:
+            self._release_migration_lock()
 
     def rollback_last(self) -> str | None:
         self._ensure_migration_table()
@@ -82,13 +92,22 @@ class MigrationRunner:
         if row is None:
             return None
         migration = {migration.version: migration for migration in load_migrations()}[row["version"]]
-        self.connection.executescript(migration.down_sql)
-        if self._table_exists("schema_migrations"):
-            self.connection.execute(
-                "DELETE FROM schema_migrations WHERE version = ?",
-                (migration.version,),
-            )
-        self.connection.commit()
+        self._acquire_migration_lock()
+        try:
+            try:
+                self.connection.execute("BEGIN")
+                self.connection.executescript(migration.down_sql)
+                if self._table_exists("schema_migrations"):
+                    self.connection.execute(
+                        "DELETE FROM schema_migrations WHERE version = ?",
+                        (migration.version,),
+                    )
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+        finally:
+            self._release_migration_lock()
         return migration.version
 
     def applied_versions(self) -> list[str]:
@@ -116,6 +135,18 @@ class MigrationRunner:
             (version,),
         ).fetchone()
         return row is not None
+
+    def _acquire_migration_lock(self) -> None:
+        self.connection.execute("SELECT pg_advisory_lock(?)", (MIGRATION_ADVISORY_LOCK_ID,))
+        self.connection.commit()
+
+    def _release_migration_lock(self) -> None:
+        try:
+            self.connection.execute("SELECT pg_advisory_unlock(?)", (MIGRATION_ADVISORY_LOCK_ID,))
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
 
     def _table_exists(self, table_name: str) -> bool:
         row = self.connection.execute(

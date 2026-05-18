@@ -240,6 +240,9 @@ class DiscoveryRepository:
                 summary_json, created_at, updated_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)
+            ON CONFLICT (organization_id, environment_id, target_id)
+            WHERE status = 'running'
+            DO NOTHING
             """,
             (
                 run_id,
@@ -251,6 +254,40 @@ class DiscoveryRepository:
                 "running",
                 now,
                 "{}",
+                now,
+                now,
+            ),
+        )
+        row = self.get_run(run_id)
+        if row is None:
+            return self._create_skipped_overlap_run(target, now=now)
+        return row
+
+    def _create_skipped_overlap_run(self, target: Row, *, now: str) -> Row:
+        run_id = generate_id("run")
+        reason = "A discovery scan is already running for this target."
+        summary = {"overlap": True, "raw_finding_count": 0}
+        self.connection.execute(
+            """
+            INSERT INTO discovery_runs (
+                id, organization_id, environment_id, scanner_id, scanner_type,
+                target_id, status, started_at, finished_at, error_message,
+                summary_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                self.organization_id,
+                self.environment_id,
+                target["scanner_id"],
+                target["scanner_type"],
+                target["id"],
+                "skipped",
+                now,
+                now,
+                reason,
+                json.dumps(summary, sort_keys=True),
                 now,
                 now,
             ),

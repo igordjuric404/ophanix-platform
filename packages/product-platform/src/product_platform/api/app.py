@@ -153,6 +153,7 @@ from product_platform.compliance.models import (
 )
 from product_platform.compliance.repository import (
     AuditExportRepository,
+    AuditExportValidationError,
     ComplianceRepository,
     ComplianceReportNotFoundError,
     ComplianceReportValidationError,
@@ -160,6 +161,8 @@ from product_platform.compliance.repository import (
     ComplianceViolationNotFoundError,
     ComplianceViolationStateError,
     DuplicateComplianceResourceError,
+    audit_export_content,
+    audit_export_query,
     audit_export_response,
     control_mapping_response,
     control_response,
@@ -835,6 +838,10 @@ def _validate_production_settings(settings: Settings) -> None:
         )
     if not settings.gateway_token_hash_pepper:
         raise ValueError("OPHANIX_GATEWAY_TOKEN_HASH_PEPPER must be set in production.")
+    if not settings.api_key_hash_pepper:
+        raise ValueError("OPHANIX_API_KEY_HASH_PEPPER must be set in non-local environments.")
+    if settings.api_key_hash_pepper == settings.session_secret:
+        raise ValueError("OPHANIX_API_KEY_HASH_PEPPER must be distinct from OPHANIX_SESSION_SECRET.")
     positive_gateway_limits = {
         "OPHANIX_DATABASE_MAX_POOL_SIZE": settings.database_max_pool_size,
         "OPHANIX_API_MAX_BODY_BYTES": settings.api_max_body_bytes,
@@ -1110,7 +1117,8 @@ def create_app(
     registry = dependency_registry or create_default_dependency_registry(resolved_settings)
     auth_service = AuthService(resolved_settings)
     tenants = tenant_store or TenantStore()
-    api_keys = api_key_store or ApiKeyStore(resolved_settings.session_secret)
+    api_key_hash_pepper = resolved_settings.api_key_hash_pepper or resolved_settings.session_secret
+    api_keys = api_key_store or ApiKeyStore(api_key_hash_pepper)
     use_persistent_api_keys = api_key_store is None
     started_at = time.monotonic()
 
@@ -1672,7 +1680,7 @@ def create_app(
         )
 
     def _api_key_store(connection: Any) -> DatabaseApiKeyStore:
-        return DatabaseApiKeyStore(connection, resolved_settings.session_secret)
+        return DatabaseApiKeyStore(connection, api_key_hash_pepper)
 
     def _create_generated_artifact(
         *,
@@ -4429,18 +4437,25 @@ def create_app(
                 actor_id=current_user.id,
             )
             response = audit_export_response(row)
+            try:
+                events = AuditEventRepository(connection).query(
+                    audit_export_query(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        filters=response.filters,
+                    )
+                )
+                content_type, content = audit_export_content(response=response, events=events)
+            except AuditExportValidationError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
             _create_generated_artifact(
                 connection=connection,
                 organization_id=organization_id,
                 environment_id=environment_id,
                 artifact_type="audit.export",
                 name=f"{row['id']}.{row['format']}",
-                content_type="application/json" if row["format"] == "json" else "text/csv",
-                content=json.dumps(
-                    {"export": response.model_dump(mode="json")},
-                    sort_keys=True,
-                    indent=2,
-                ).encode("utf-8"),
+                content_type=content_type,
+                content=content,
                 actor_id=current_user.id,
                 target_type="audit_export",
                 target_id=row["id"],
@@ -8432,15 +8447,15 @@ def create_app(
                     )
                 )
                 completed = await runner.run_created_target(target, run)
+                terminal_event = {
+                    "succeeded": "discovery.scan.completed",
+                    "skipped": "discovery.scan.skipped",
+                }.get(completed["status"], "discovery.scan.failed")
                 audit.insert(
                     _discovery_scan_audit_event(
                         organization_id=organization_id,
                         environment_id=environment_id,
-                        event_type=(
-                            "discovery.scan.completed"
-                            if completed["status"] == "succeeded"
-                            else "discovery.scan.failed"
-                        ),
+                        event_type=terminal_event,
                         actor_id=current_user.id,
                         run=completed,
                         correlation_id=context.correlation_id,

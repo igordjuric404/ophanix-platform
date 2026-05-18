@@ -23,6 +23,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from iatp.auth import IATPAuthConfig, is_user_override_confirmed, require_iatp_auth
 from iatp.models import (
     AgentCapabilities,
     CapabilityManifest,
@@ -59,6 +60,7 @@ recovery_engine = IATPRecoveryEngine()
 security_validator = SecurityValidator()
 privacy_scrubber = PrivacyScrubber()
 flight_recorder = FlightRecorder()
+auth_config = IATPAuthConfig.from_env()
 
 # Build the manifest from environment
 def get_manifest() -> CapabilityManifest:
@@ -86,7 +88,7 @@ manifest = get_manifest()
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
     """Application lifespan - startup and shutdown."""
     logger.info("=" * 60)
     logger.info("IATP Sidecar Proxy Starting")
@@ -152,7 +154,9 @@ async def get_capabilities():
 async def proxy_task(
     request: Request,
     x_user_override: Optional[str] = Header(None),
-    x_agent_trace_id: Optional[str] = Header(None)
+    x_agent_trace_id: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+    x_iatp_token: Optional[str] = Header(None)
 ):
     """
     The Main Gateway - Intercepts and validates all requests.
@@ -171,7 +175,13 @@ async def proxy_task(
     - X-Agent-Trace-ID: Optional trace ID for distributed tracing
     """
     # 1. GENERATE TRACE ID
-    trace_id = x_agent_trace_id or TraceIDGenerator.generate()
+    require_iatp_auth(
+        authorization=authorization,
+        x_iatp_token=x_iatp_token,
+        config=auth_config,
+    )
+    trace_id = TraceIDGenerator.from_external(x_agent_trace_id)
+    user_override_confirmed = is_user_override_confirmed(x_user_override)
 
     # 2. PARSE PAYLOAD
     try:
@@ -235,7 +245,7 @@ async def proxy_task(
     if policy_warning:
         warning = f"{warning}\n{policy_warning}" if warning else policy_warning
 
-    if warning and not x_user_override:
+    if warning and not user_override_confirmed:
         trust_score = manifest.calculate_trust_score()
         logger.info(f"[{trace_id}] Requires user override. Trust score: {trust_score}")
         return JSONResponse(
@@ -371,12 +381,21 @@ async def proxy_task(
 
 
 @app.get("/trace/{trace_id}")
-async def get_trace(trace_id: str):
+async def get_trace(
+    trace_id: str,
+    authorization: Optional[str] = Header(None),
+    x_iatp_token: Optional[str] = Header(None),
+):
     """
     Retrieve flight recorder logs for a specific trace ID.
 
     Useful for debugging and distributed tracing across agent calls.
     """
+    require_iatp_auth(
+        authorization=authorization,
+        x_iatp_token=x_iatp_token,
+        config=auth_config,
+    )
     logs = flight_recorder.get_trace_logs(trace_id)
     if not logs:
         raise HTTPException(status_code=404, detail="Trace not found")
@@ -384,10 +403,18 @@ async def get_trace(trace_id: str):
 
 
 @app.get("/metrics")
-async def get_metrics():
+async def get_metrics(
+    authorization: Optional[str] = Header(None),
+    x_iatp_token: Optional[str] = Header(None),
+):
     """
     Get sidecar metrics and statistics.
     """
+    require_iatp_auth(
+        authorization=authorization,
+        x_iatp_token=x_iatp_token,
+        config=auth_config,
+    )
     return {
         "agent_id": AGENT_ID,
         "upstream": UPSTREAM_AGENT_URL,

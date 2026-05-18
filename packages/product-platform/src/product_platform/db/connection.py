@@ -46,6 +46,9 @@ class Database:
         connection = self._checkout_connection()
         try:
             return MigrationRunner(connection).apply_all()
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             self._release_connection(connection)
 

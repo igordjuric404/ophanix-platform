@@ -17,6 +17,16 @@ from iatp.models import (
 from iatp.sidecar import create_sidecar
 
 
+def create_test_sidecar(*, agent_url, manifest):
+    """Create a sidecar in explicit insecure-local test mode."""
+
+    return create_sidecar(
+        agent_url=agent_url,
+        manifest=manifest,
+        allow_insecure_local=True,
+    )
+
+
 @pytest.fixture
 def trusted_manifest():
     """Create a trusted agent manifest for testing."""
@@ -59,7 +69,7 @@ def untrusted_manifest():
 
 def test_health_check(trusted_manifest):
     """Test the health check endpoint."""
-    sidecar = create_sidecar(
+    sidecar = create_test_sidecar(
         agent_url="http://localhost:9999",
         manifest=trusted_manifest
     )
@@ -74,7 +84,7 @@ def test_health_check(trusted_manifest):
 
 def test_get_manifest(trusted_manifest):
     """Test getting the capability manifest."""
-    sidecar = create_sidecar(
+    sidecar = create_test_sidecar(
         agent_url="http://localhost:9999",
         manifest=trusted_manifest
     )
@@ -90,7 +100,7 @@ def test_get_manifest(trusted_manifest):
 
 def test_invalid_json_payload(trusted_manifest):
     """Test that invalid JSON is rejected."""
-    sidecar = create_sidecar(
+    sidecar = create_test_sidecar(
         agent_url="http://localhost:9999",
         manifest=trusted_manifest
     )
@@ -108,7 +118,7 @@ def test_invalid_json_payload(trusted_manifest):
 
 def test_blocked_credit_card_permanent_storage(untrusted_manifest):
     """Test that credit cards are blocked for permanent storage."""
-    sidecar = create_sidecar(
+    sidecar = create_test_sidecar(
         agent_url="http://localhost:9999",
         manifest=untrusted_manifest
     )
@@ -129,7 +139,7 @@ def test_blocked_credit_card_permanent_storage(untrusted_manifest):
 
 def test_warning_without_override(untrusted_manifest):
     """Test that untrusted agents trigger warnings."""
-    sidecar = create_sidecar(
+    sidecar = create_test_sidecar(
         agent_url="http://localhost:9999",
         manifest=untrusted_manifest
     )
@@ -148,7 +158,7 @@ def test_warning_without_override(untrusted_manifest):
 
 def test_trace_id_injection(trusted_manifest):
     """Test that trace IDs are properly handled."""
-    sidecar = create_sidecar(
+    sidecar = create_test_sidecar(
         agent_url="http://localhost:9999",
         manifest=trusted_manifest
     )
@@ -165,3 +175,54 @@ def test_trace_id_injection(trusted_manifest):
     # Even if backend fails, trace ID should be in error response
     data = response.json()
     assert "trace_id" in data
+
+
+def test_proxy_requires_auth_by_default(trusted_manifest):
+    """Protected proxy routes fail closed without service auth."""
+    sidecar = create_sidecar(
+        agent_url="http://localhost:9999",
+        manifest=trusted_manifest,
+    )
+    client = TestClient(sidecar.app)
+
+    response = client.post("/proxy", json={"task": "test"})
+
+    assert response.status_code == 503
+    assert "authentication is required" in response.json()["detail"]
+
+
+def test_proxy_accepts_service_token(trusted_manifest):
+    """Protected proxy routes accept a configured bearer token."""
+    sidecar = create_sidecar(
+        agent_url="http://localhost:9999",
+        manifest=trusted_manifest,
+        service_token="test-service-token",
+    )
+    client = TestClient(sidecar.app)
+
+    response = client.post(
+        "/proxy",
+        json={"task": "test"},
+        headers={"Authorization": "Bearer test-service-token"},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["trace_id"]
+
+
+def test_override_requires_explicit_true(untrusted_manifest):
+    """Only X-User-Override: true bypasses warning responses."""
+    sidecar = create_test_sidecar(
+        agent_url="http://localhost:9999",
+        manifest=untrusted_manifest,
+    )
+    client = TestClient(sidecar.app)
+
+    response = client.post(
+        "/proxy",
+        json={"task": "test", "data": {}},
+        headers={"X-User-Override": "false"},
+    )
+
+    assert response.status_code == 449
+    assert response.json()["requires_override"] is True

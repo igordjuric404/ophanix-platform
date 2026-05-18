@@ -108,6 +108,7 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
             "session_secret": "test-secret",
             "secret_manager_ref": "env",
             "gateway_token_hash_pepper": "test-pepper",
+            "api_key_hash_pepper": "test-api-key-pepper",
             "tool_gateway_upstream_host_allowlist": ["*.example.com"],
             "cors_origins": ["https://app.example.com"],
         }
@@ -583,6 +584,20 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "OPHANIX_GATEWAY_TOKEN_HASH_PEPPER"):
             create_app(
                 self._production_settings(gateway_token_hash_pepper=None),
+                database=self.database,
+            )
+
+    def test_api_requires_api_key_hash_pepper_in_non_local_environments(self) -> None:
+        with self.assertRaisesRegex(ValueError, "OPHANIX_API_KEY_HASH_PEPPER"):
+            create_app(
+                self._production_settings(api_key_hash_pepper=None),
+                database=self.database,
+            )
+
+    def test_api_rejects_api_key_hash_pepper_matching_session_secret(self) -> None:
+        with self.assertRaisesRegex(ValueError, "distinct"):
+            create_app(
+                self._production_settings(api_key_hash_pepper="test-secret"),
                 database=self.database,
             )
 

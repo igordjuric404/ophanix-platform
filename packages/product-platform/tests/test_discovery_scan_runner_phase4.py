@@ -138,9 +138,27 @@ class DiscoveryScanRunnerPhase4Tests(unittest.TestCase):
                 )
                 repository.create_run(target)
                 skipped = asyncio.run(DiscoveryScanRunner(repository).run_target(target["id"]))
+                running_count = connection.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM discovery_runs
+                    WHERE target_id = ? AND status = 'running'
+                    """,
+                    (target["id"],),
+                ).fetchone()["count"]
+                skipped_count = connection.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM discovery_runs
+                    WHERE target_id = ? AND status = 'skipped'
+                    """,
+                    (target["id"],),
+                ).fetchone()["count"]
 
         self.assertEqual(skipped["status"], "skipped")
         self.assertEqual(json.loads(skipped["summary_json"])["overlap"], True)
+        self.assertEqual(running_count, 1)
+        self.assertEqual(skipped_count, 1)
 
 
 if __name__ == "__main__":

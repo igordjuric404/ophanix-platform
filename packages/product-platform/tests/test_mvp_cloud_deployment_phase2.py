@@ -44,6 +44,7 @@ class MVPCloudDeploymentPhase2Tests(unittest.TestCase):
                     secret_manager_ref=None,
                     session_secret="test-secret",
                     gateway_token_hash_pepper="test-pepper",
+                    api_key_hash_pepper="test-api-key-pepper",
                     tool_gateway_upstream_host_allowlist=["*.example.com"],
                 )
             )
@@ -71,6 +72,7 @@ class MVPCloudDeploymentPhase2Tests(unittest.TestCase):
                 secret_manager_ref="projects/ophanix/secrets/product-platform",
                 session_secret="test-secret",
                 gateway_token_hash_pepper="test-pepper",
+                api_key_hash_pepper="test-api-key-pepper",
                 tool_gateway_upstream_host_allowlist=["*.example.com"],
             )
         )
@@ -96,6 +98,7 @@ class MVPCloudDeploymentPhase2Tests(unittest.TestCase):
                 secret_manager_ref="projects/ophanix/secrets/product-platform",
                 session_secret="test-secret",
                 gateway_token_hash_pepper="test-pepper",
+                api_key_hash_pepper="test-api-key-pepper",
                 tool_gateway_upstream_host_allowlist=["*.example.com"],
             )
             registry = create_default_dependency_registry(
@@ -132,6 +135,7 @@ class MVPCloudDeploymentPhase2Tests(unittest.TestCase):
                 secret_manager_ref="projects/ophanix/secrets/product-platform",
                 session_secret="test-secret",
                 gateway_token_hash_pepper="test-pepper",
+                api_key_hash_pepper="test-api-key-pepper",
                 tool_gateway_upstream_host_allowlist=["*.example.com"],
             )
             registry = create_default_dependency_registry(
@@ -179,6 +183,7 @@ class MVPCloudDeploymentPhase2Tests(unittest.TestCase):
                 secret_manager_ref="projects/ophanix/secrets/product-platform",
                 session_secret="test-secret",
                 gateway_token_hash_pepper="test-pepper",
+                api_key_hash_pepper="test-api-key-pepper",
                 tool_gateway_upstream_host_allowlist=["*.example.com"],
             )
             registry = create_default_dependency_registry(

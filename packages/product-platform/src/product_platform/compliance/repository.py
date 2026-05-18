@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 from datetime import datetime, timedelta, timezone
 from product_platform.db.postgres import Connection, IntegrityError, Row
@@ -97,6 +99,87 @@ class AuditExportRepository:
         return row
 
 
+AUDIT_EXPORT_FILTER_FIELDS = {
+    "environment_id",
+    "event_type",
+    "source_component",
+    "actor_type",
+    "actor_id",
+    "agent_id",
+    "decision",
+    "severity",
+    "policy_id",
+    "resource_type",
+    "resource_id",
+    "correlation_id",
+    "created_from",
+    "created_to",
+    "limit",
+    "offset",
+}
+
+
+class AuditExportValidationError(ValueError):
+    """Raised when audit export filters are invalid."""
+
+
+def audit_export_query(
+    *,
+    organization_id: str,
+    environment_id: str,
+    filters: dict[str, Any],
+) -> AuditEventQuery:
+    """Build a bounded audit event query from export filters."""
+
+    cleaned = _clean_filters(filters)
+    unknown = sorted(set(cleaned) - AUDIT_EXPORT_FILTER_FIELDS)
+    if unknown:
+        raise AuditExportValidationError(
+            "Unsupported audit export filter(s): " + ", ".join(unknown)
+        )
+    return AuditEventQuery(
+        organization_id=organization_id,
+        environment_id=str(cleaned.get("environment_id") or environment_id),
+        event_type=_string_filter(cleaned, "event_type"),
+        source_component=_string_filter(cleaned, "source_component"),
+        actor_type=_string_filter(cleaned, "actor_type"),
+        actor_id=_string_filter(cleaned, "actor_id"),
+        agent_id=_string_filter(cleaned, "agent_id"),
+        decision=_string_filter(cleaned, "decision"),
+        severity=_string_filter(cleaned, "severity"),
+        policy_id=_string_filter(cleaned, "policy_id"),
+        resource_type=_string_filter(cleaned, "resource_type"),
+        resource_id=_string_filter(cleaned, "resource_id"),
+        correlation_id=_string_filter(cleaned, "correlation_id"),
+        created_from=_string_filter(cleaned, "created_from"),
+        created_to=_string_filter(cleaned, "created_to"),
+        limit=_int_filter(cleaned, "limit", default=1000, minimum=1, maximum=5000),
+        offset=_int_filter(cleaned, "offset", default=0, minimum=0, maximum=1_000_000),
+    )
+
+
+def audit_export_content(
+    *,
+    response: AuditExportResponse,
+    events: list[AuditEventEnvelope],
+) -> tuple[str, bytes]:
+    """Render audit events for an export artifact."""
+
+    event_rows = [event.model_dump(mode="json") for event in events]
+    if response.format == "json":
+        payload = {
+            "export": response.model_dump(mode="json"),
+            "event_count": len(event_rows),
+            "events": event_rows,
+        }
+        return "application/json", json.dumps(payload, sort_keys=True, indent=2).encode("utf-8")
+    if response.format == "csv":
+        return "text/csv", _audit_events_csv(event_rows).encode("utf-8")
+    if response.format == "markdown":
+        return "text/markdown", _audit_events_markdown(response, event_rows).encode("utf-8")
+    raise AuditExportValidationError(f"Unsupported audit export format: {response.format}.")
+
+
 def audit_export_response(row: Row) -> AuditExportResponse:
     """Serialize an audit export row."""
 
@@ -118,6 +201,94 @@ def _clean_filters(filters: dict[str, Any]) -> dict[str, Any]:
         for key, value in filters.items()
         if value is not None and value != ""
     }
+
+
+def _string_filter(filters: dict[str, Any], key: str) -> str | None:
+    value = filters.get(key)
+    if value is None:
+        return None
+    return str(value).strip() or None
+
+
+def _int_filter(
+    filters: dict[str, Any],
+    key: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    value = filters.get(key, default)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise AuditExportValidationError(f"{key} must be an integer.") from exc
+    if parsed < minimum or parsed > maximum:
+        raise AuditExportValidationError(f"{key} must be between {minimum} and {maximum}.")
+    return parsed
+
+
+def _audit_events_csv(event_rows: list[dict[str, Any]]) -> str:
+    fields = [
+        "id",
+        "organization_id",
+        "environment_id",
+        "event_type",
+        "source_component",
+        "actor_type",
+        "actor_id",
+        "agent_id",
+        "resource_type",
+        "resource_id",
+        "decision",
+        "severity",
+        "correlation_id",
+        "trace_id",
+        "policy_id",
+        "policy_version_id",
+        "trust_delta",
+        "payload_json",
+        "created_at",
+    ]
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fields)
+    writer.writeheader()
+    for event in event_rows:
+        row = {field: event.get(field) for field in fields}
+        row["payload_json"] = json.dumps(event.get("payload_json") or {}, sort_keys=True)
+        writer.writerow(row)
+    return output.getvalue()
+
+
+def _audit_events_markdown(
+    response: AuditExportResponse,
+    event_rows: list[dict[str, Any]],
+) -> str:
+    lines = [
+        f"# Audit Export {response.id}",
+        "",
+        f"- Format: {response.format}",
+        f"- Status: {response.status}",
+        f"- Event count: {len(event_rows)}",
+        f"- Created at: {response.created_at}",
+        "",
+        "| Created at | Event type | Actor | Resource | Decision | Severity |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for event in event_rows:
+        actor = event.get("actor_id") or event.get("actor_type") or ""
+        resource = event.get("resource_id") or event.get("resource_type") or ""
+        lines.append(
+            "| {created_at} | {event_type} | {actor} | {resource} | {decision} | {severity} |".format(
+                created_at=event.get("created_at") or "",
+                event_type=event.get("event_type") or "",
+                actor=actor,
+                resource=resource,
+                decision=event.get("decision") or "",
+                severity=event.get("severity") or "",
+            )
+        )
+    return "\n".join(lines) + "\n"
 
 
 DEFAULT_FRAMEWORKS = [

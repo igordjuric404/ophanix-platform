@@ -108,6 +108,7 @@ class ProductApiShellPhase3Tests(unittest.TestCase):
                         session_secret="production-test-secret",
                         secret_manager_ref="env",
                         gateway_token_hash_pepper="test-pepper",
+                        api_key_hash_pepper="test-api-key-pepper",
                         tool_gateway_upstream_host_allowlist=["*.example.com"],
                     ),
                     database=database,

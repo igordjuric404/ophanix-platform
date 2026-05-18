@@ -36,6 +36,14 @@ def test_trace_id_generation():
     assert len(trace_id2) > 0
 
 
+def test_external_trace_id_safety():
+    """Unsafe external trace IDs are replaced before use."""
+    trace_id = TraceIDGenerator.from_external("../outside")
+
+    assert trace_id != "../outside"
+    assert TraceIDGenerator.is_valid(trace_id)
+
+
 def test_create_tracing_context():
     """Test creating a tracing context."""
     trace_id = TraceIDGenerator.generate()
@@ -173,3 +181,19 @@ def test_flight_recorder_nonexistent_trace(temp_log_dir):
     recorder = FlightRecorder(log_dir=temp_log_dir)
     logs = recorder.get_trace_logs("nonexistent-trace")
     assert logs == []
+
+
+def test_flight_recorder_rejects_path_traversal_trace_id(temp_log_dir):
+    """Trace IDs cannot escape the flight recorder log directory."""
+    recorder = FlightRecorder(log_dir=temp_log_dir)
+
+    with pytest.raises(ValueError):
+        recorder.log_request(
+            trace_id="../outside",
+            agent_id="test-agent",
+            payload={"task": "test"},
+            quarantined=False,
+        )
+
+    assert not (temp_log_dir.parent / "outside.jsonl").exists()
+    assert recorder.get_trace_logs("../outside") == []

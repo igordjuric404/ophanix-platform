@@ -298,6 +298,7 @@ class DemoEnvironmentResetPhase2Tests(unittest.TestCase):
             enable_dev_login=False,
             session_secret="staging-secret",
             gateway_token_hash_pepper="test-pepper",
+            api_key_hash_pepper="test-api-key-pepper",
             tool_gateway_upstream_host_allowlist=["api.example.com"],
         )
         token = AuthService(settings).login(
