@@ -41,9 +41,10 @@ import { PageHeader } from "../../components/layout/PageHeader";
 import {
   ActionFeedback,
   actionErrorMessage,
-  type ActionFeedbackMessage
+  useActionFeedback
 } from "../../components/shared/ActionFeedback";
 import { EmptyState } from "../../components/shared/EmptyState";
+import { QueryErrorSummary } from "../../components/shared/ErrorState";
 import { StatusBadge } from "../../components/shared/StatusBadge";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -58,6 +59,7 @@ import {
   TableHeader,
   TableRow
 } from "../../components/ui/table";
+import { parseJsonObjectField } from "../../lib/forms";
 import { cn } from "../../lib/utils";
 
 const authTypes = ["none", "api_key", "bearer", "oauth", "mtls", "custom"];
@@ -73,7 +75,7 @@ export function McpPage() {
   const [approvalFilters, setApprovalFilters] = useState<McpParams>({ status: "pending" });
   const [selectedToolId, setSelectedToolId] = useState<string | null>(null);
   const [selectedFindingId, setSelectedFindingId] = useState<string | null>(null);
-  const [feedback, setFeedback] = useState<ActionFeedbackMessage | null>(null);
+  const { feedback, runWithFeedback, setError } = useActionFeedback();
 
   const serversQuery = useMcpServers();
   const toolsQuery = useMcpTools();
@@ -98,12 +100,10 @@ export function McpPage() {
     findings.find((finding) => finding.id === selectedFindingId) ?? findings[0] ?? null;
 
   async function runTask(label: string, task: () => Promise<unknown>) {
-    try {
-      await mutation.mutateAsync(task);
-      setFeedback({ type: "success", message: label });
-    } catch (error) {
-      setFeedback({ type: "error", message: actionErrorMessage(error) });
-    }
+    await runWithFeedback(() => mutation.mutateAsync(task), {
+      errorMessage: `${label} failed`,
+      successMessage: label
+    });
   }
 
   return (
@@ -114,6 +114,18 @@ export function McpPage() {
       />
       <div className="space-y-6 p-6">
         <ActionFeedback feedback={feedback} />
+        <QueryErrorSummary
+          items={[
+            { error: serversQuery.error, isError: serversQuery.isError, label: "MCP servers", onRetry: () => void serversQuery.refetch() },
+            { error: toolsQuery.error, isError: toolsQuery.isError, label: "MCP tools", onRetry: () => void toolsQuery.refetch() },
+            { error: scansQuery.error, isError: scansQuery.isError, label: "MCP scans", onRetry: () => void scansQuery.refetch() },
+            { error: findingsQuery.error, isError: findingsQuery.isError, label: "MCP findings", onRetry: () => void findingsQuery.refetch() },
+            { error: trafficQuery.error, isError: trafficQuery.isError, label: "MCP traffic", onRetry: () => void trafficQuery.refetch() },
+            { error: approvalsQuery.error, isError: approvalsQuery.isError, label: "MCP approvals", onRetry: () => void approvalsQuery.refetch() },
+            { error: rateLimitsQuery.error, isError: rateLimitsQuery.isError, label: "MCP rate limits", onRetry: () => void rateLimitsQuery.refetch() },
+            { error: selectedToolQuery.error, isError: selectedToolQuery.isError, label: "MCP tool detail", onRetry: () => void selectedToolQuery.refetch() }
+          ]}
+        />
         <McpSummary approvals={approvals} findings={findings} servers={servers} tools={tools} />
         <ServerRegistryPanel
           isLoading={serversQuery.isLoading}
@@ -157,6 +169,7 @@ export function McpPage() {
         <TrafficPanel
           filters={trafficFilters}
           onFilter={setTrafficFilters}
+          onInvalidInput={(error) => setError(actionErrorMessage(error, "Invalid MCP proxy input"))}
           onProxyCall={(payload) => runTask("Proxy call evaluated", () => createMcpProxyCall(payload))}
           traffic={traffic}
         />
@@ -697,11 +710,13 @@ function FindingDetail({
 function TrafficPanel({
   filters,
   onFilter,
+  onInvalidInput,
   onProxyCall,
   traffic
 }: {
   filters: McpParams;
   onFilter: (params: McpParams) => void;
+  onInvalidInput: (error: unknown) => void;
   onProxyCall: (payload: Record<string, unknown>) => void;
   traffic: McpToolCall[];
 }) {
@@ -712,7 +727,12 @@ function TrafficPanel({
 
   function onProxySubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    onProxyCall(mcpProxyCallPayloadFromForm(event.currentTarget));
+    try {
+      onProxyCall(mcpProxyCallPayloadFromForm(event.currentTarget));
+    } catch (error) {
+      onInvalidInput(error);
+      return;
+    }
     event.currentTarget.reset();
   }
 
@@ -1194,7 +1214,7 @@ export function mcpProxyCallPayloadFromForm(form: HTMLFormElement) {
     source_agent_id: formString(form, "source_agent_id"),
     server_id: formString(form, "server_id"),
     tool_id: formString(form, "tool_id"),
-    params: jsonObjectFromString(formString(form, "params"), {}),
+    params: parseJsonObjectField(formString(form, "params"), "Params JSON", { emptyFallback: {} }),
     correlation_id: emptyToNull(formString(form, "correlation_id"))
   };
 }
@@ -1274,14 +1294,4 @@ function formBoolean(form: HTMLFormElement, name: string) {
 function emptyToNull(value: string) {
   const stripped = value.trim();
   return stripped || null;
-}
-
-function jsonObjectFromString(value: string, fallback: Record<string, unknown>) {
-  if (!value.trim()) {
-    return fallback;
-  }
-  const parsed = JSON.parse(value) as unknown;
-  return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-    ? (parsed as Record<string, unknown>)
-    : fallback;
 }

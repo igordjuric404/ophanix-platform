@@ -21,7 +21,9 @@ import {
   type DiscoveryTarget
 } from "../../api/discovery";
 import { PageHeader } from "../../components/layout/PageHeader";
+import { ActionFeedback, useActionFeedback } from "../../components/shared/ActionFeedback";
 import { EmptyState } from "../../components/shared/EmptyState";
+import { QueryErrorSummary } from "../../components/shared/ErrorState";
 import { RiskBadge } from "../../components/shared/RiskBadge";
 import { StatusBadge } from "../../components/shared/StatusBadge";
 import { Badge } from "../../components/ui/badge";
@@ -39,7 +41,7 @@ export function DiscoveryPage() {
   const mutation = useDiscoveryMutation();
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedFindingId, setSelectedFindingId] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const { feedback, runWithFeedback } = useActionFeedback();
 
   const scanners = scannersQuery.data ?? [];
   const targets = targetsQuery.data ?? [];
@@ -50,8 +52,10 @@ export function DiscoveryPage() {
     findings.find((finding) => finding.id === selectedFindingId) ?? findings[0] ?? null;
 
   async function runTask(label: string, task: () => Promise<unknown>) {
-    await mutation.mutateAsync(task);
-    setMessage(label);
+    await runWithFeedback(() => mutation.mutateAsync(task), {
+      errorMessage: `${label} failed`,
+      successMessage: label
+    });
   }
 
   function applyFindingFilters(event: FormEvent<HTMLFormElement>) {
@@ -74,11 +78,15 @@ export function DiscoveryPage() {
         description="Run scans, reconcile shadow agents, and turn findings into governed registry work."
       />
       <div className="space-y-6 p-6" data-discovery-workspace>
-        {message ? (
-          <div className="feedback-success" role="status">
-            {message}
-          </div>
-        ) : null}
+        <ActionFeedback feedback={feedback} />
+        <QueryErrorSummary
+          items={[
+            { error: scannersQuery.error, isError: scannersQuery.isError, label: "Scanners", onRetry: () => void scannersQuery.refetch() },
+            { error: targetsQuery.error, isError: targetsQuery.isError, label: "Targets", onRetry: () => void targetsQuery.refetch() },
+            { error: runsQuery.error, isError: runsQuery.isError, label: "Runs", onRetry: () => void runsQuery.refetch() },
+            { error: findingsQuery.error, isError: findingsQuery.isError, label: "Findings", onRetry: () => void findingsQuery.refetch() }
+          ]}
+        />
         <ScannerCards scanners={scanners} isLoading={scannersQuery.isLoading} />
         <DiscoveryTargets
           onRunTask={runTask}

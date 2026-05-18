@@ -26,9 +26,10 @@ import { PageHeader } from "../../components/layout/PageHeader";
 import {
   ActionFeedback,
   actionErrorMessage,
-  type ActionFeedbackMessage
+  useActionFeedback
 } from "../../components/shared/ActionFeedback";
 import { EmptyState } from "../../components/shared/EmptyState";
+import { QueryErrorSummary } from "../../components/shared/ErrorState";
 import { StatusBadge } from "../../components/shared/StatusBadge";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -43,6 +44,7 @@ import {
   TableHeader,
   TableRow
 } from "../../components/ui/table";
+import { parseJsonObjectField } from "../../lib/forms";
 
 const frameworkStatuses = ["", "primary_demo", "supported", "preview", "deprecated"];
 const instanceStatuses = ["active", "disabled", "degraded"];
@@ -53,7 +55,7 @@ export function IntegrationsPage() {
   const [frameworkFilters, setFrameworkFilters] = useState<IntegrationParams>({});
   const [healthFilters, setHealthFilters] = useState<IntegrationParams>({});
   const [selectedInstanceId, setSelectedInstanceId] = useState<string | null>(null);
-  const [feedback, setFeedback] = useState<ActionFeedbackMessage | null>(null);
+  const { feedback, runWithFeedback, setError } = useActionFeedback();
 
   const frameworksQuery = useIntegrationFrameworks(frameworkFilters);
   const instancesQuery = useFrameworkInstances();
@@ -72,12 +74,10 @@ export function IntegrationsPage() {
   const activeInstanceId = selectedInstanceId ?? instances[0]?.id ?? null;
 
   async function runTask(label: string, task: () => Promise<unknown>) {
-    try {
-      await mutation.mutateAsync(task);
-      setFeedback({ type: "success", message: label });
-    } catch (error) {
-      setFeedback({ type: "error", message: actionErrorMessage(error) });
-    }
+    await runWithFeedback(() => mutation.mutateAsync(task), {
+      errorMessage: `${label} failed`,
+      successMessage: label
+    });
   }
 
   return (
@@ -88,6 +88,16 @@ export function IntegrationsPage() {
       />
       <div className="space-y-6 p-6">
         <ActionFeedback feedback={feedback} />
+        <QueryErrorSummary
+          items={[
+            { error: frameworksQuery.error, isError: frameworksQuery.isError, label: "Framework catalog", onRetry: () => void frameworksQuery.refetch() },
+            { error: instancesQuery.error, isError: instancesQuery.isError, label: "Connector instances", onRetry: () => void instancesQuery.refetch() },
+            { error: linksQuery.error, isError: linksQuery.isError, label: "Linked agents", onRetry: () => void linksQuery.refetch() },
+            { error: credentialsQuery.error, isError: credentialsQuery.isError, label: "Provider credentials", onRetry: () => void credentialsQuery.refetch() },
+            { error: healthQuery.error, isError: healthQuery.isError, label: "Integration health", onRetry: () => void healthQuery.refetch() },
+            { error: agentsQuery.error, isError: agentsQuery.isError, label: "Agents", onRetry: () => void agentsQuery.refetch() }
+          ]}
+        />
         <IntegrationsSummary
           credentials={credentials}
           frameworks={frameworks}
@@ -109,6 +119,7 @@ export function IntegrationsPage() {
             onPatch={(instanceId, payload) =>
               runTask("Connector instance updated", () => patchFrameworkInstance(instanceId, payload))
             }
+            onInvalidInput={(error) => setError(actionErrorMessage(error, "Invalid connector input"))}
             onSelect={setSelectedInstanceId}
             selectedInstanceId={activeInstanceId}
           />
@@ -236,6 +247,7 @@ function ConnectorInstancesPanel({
   frameworks,
   instances,
   onCreate,
+  onInvalidInput,
   onPatch,
   onSelect,
   selectedInstanceId
@@ -243,6 +255,7 @@ function ConnectorInstancesPanel({
   frameworks: FrameworkIntegration[];
   instances: FrameworkInstance[];
   onCreate: (payload: Record<string, unknown>) => void;
+  onInvalidInput: (error: unknown) => void;
   onPatch: (instanceId: string, payload: Record<string, unknown>) => void;
   onSelect: (instanceId: string) => void;
   selectedInstanceId: string | null;
@@ -257,7 +270,12 @@ function ConnectorInstancesPanel({
           className="grid gap-3 md:grid-cols-2"
           onSubmit={(event) => {
             event.preventDefault();
-            onCreate(integrationInstancePayloadFromForm(event.currentTarget));
+            try {
+              onCreate(integrationInstancePayloadFromForm(event.currentTarget));
+            } catch (error) {
+              onInvalidInput(error);
+              return;
+            }
             event.currentTarget.reset();
           }}
         >
@@ -653,7 +671,7 @@ export function integrationInstancePayloadFromValues(values: Record<string, unkn
     integration_id: requiredString(values.integration_id, "integration_id"),
     name: requiredString(values.name, "name"),
     status: optionalString(values.status) || "active",
-    config: parseJsonObject(values.config_json, "config_json")
+    config: parseJsonObjectField(values.config_json, "Config JSON", { emptyFallback: {} })
   };
 }
 
@@ -703,18 +721,6 @@ function requiredString(value: unknown, fieldName: string) {
 
 function optionalString(value: unknown) {
   return String(value ?? "").trim();
-}
-
-function parseJsonObject(value: unknown, fieldName: string) {
-  try {
-    const parsed = JSON.parse(String(value ?? "{}")) as unknown;
-    if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
-      throw new Error("not object");
-    }
-    return parsed as Record<string, unknown>;
-  } catch {
-    throw new Error(`${fieldName} must be a JSON object.`);
-  }
 }
 
 function maskConfig(config: Record<string, unknown>) {

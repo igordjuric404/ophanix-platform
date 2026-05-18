@@ -186,6 +186,8 @@ describe("CompliancePage", () => {
     expect(auditRow).toBeTruthy();
     fireEvent.click(within(auditRow as HTMLElement).getByRole("button", { name: "Open" }));
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close detail drawer" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
 
     fireEvent.click(screen.getByRole("button", { name: "Recompute Evidence" }));
     expect(await screen.findByText("1 mapped / 1 refreshed")).toBeInTheDocument();

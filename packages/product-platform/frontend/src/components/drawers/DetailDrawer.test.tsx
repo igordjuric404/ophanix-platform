@@ -1,5 +1,5 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DetailDrawerProvider, useDetailDrawer } from "../../app/drawerContext";
 import { renderWithQueryClient } from "../../test/test-utils";
@@ -14,6 +14,10 @@ function DrawerHarness({ eventId = "evt_1" }: { eventId?: string }) {
 }
 
 describe("DetailDrawer", () => {
+  beforeEach(() => {
+    window.history.replaceState(null, "", "/overview");
+  });
+
   it("opens, renders audit metadata and raw evidence, then closes", async () => {
     mockAuditFetch();
 
@@ -27,7 +31,11 @@ describe("DetailDrawer", () => {
 
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
     expect(screen.getByText("audit.event")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Evidence" }));
+    expect(screen.getByRole("link", { name: "Open in Audit Explorer" })).toHaveAttribute(
+      "href",
+      "/compliance?drawer=audit-event&id=evt_1"
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Evidence" }));
     expect(screen.getByText(/"reason": "baseline"/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Close detail drawer" }));
@@ -84,7 +92,7 @@ describe("DetailDrawer", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Open audit event" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Related" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Related" }));
     fireEvent.click(screen.getByText("evt_2"));
 
     expect(await screen.findByText("tool.call")).toBeInTheDocument();

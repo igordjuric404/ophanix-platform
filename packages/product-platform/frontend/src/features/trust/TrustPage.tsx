@@ -36,7 +36,9 @@ import {
 } from "../../api/trust";
 import { useDetailDrawer } from "../../app/drawerContext";
 import { PageHeader } from "../../components/layout/PageHeader";
+import { ActionFeedback, useActionFeedback } from "../../components/shared/ActionFeedback";
 import { EmptyState } from "../../components/shared/EmptyState";
+import { QueryErrorSummary } from "../../components/shared/ErrorState";
 import { StatusBadge } from "../../components/shared/StatusBadge";
 import { TrustScore as TrustScoreValue } from "../../components/shared/TrustScore";
 import { Badge } from "../../components/ui/badge";
@@ -71,7 +73,7 @@ export function TrustPage() {
   const [selectedHandshakeId, setSelectedHandshakeId] = useState<string | null>(null);
   const [verification, setVerification] = useState<TrustCardVerification | null>(null);
   const [simulation, setSimulation] = useState<TrustHandshake | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const { feedback, runWithFeedback } = useActionFeedback();
 
   const scoresQuery = useTrustScores();
   const eventsQuery = useTrustEvents(eventFilters);
@@ -95,19 +97,28 @@ export function TrustPage() {
     handshakes.find((handshake) => handshake.id === selectedHandshakeId) ?? handshakes[0] ?? null;
 
   async function runTask(label: string, task: () => Promise<unknown>) {
-    await mutation.mutateAsync(task);
-    setMessage(label);
+    await runWithFeedback(() => mutation.mutateAsync(task), {
+      errorMessage: `${label} failed`,
+      successMessage: label
+    });
   }
 
   return (
     <>
       <PageHeader title="Trust" description="Trust scores, cards, thresholds, and handshakes." />
       <div className="space-y-6 p-6">
-        {message ? (
-          <div className="feedback-success" role="status">
-            {message}
-          </div>
-        ) : null}
+        <ActionFeedback feedback={feedback} />
+        <QueryErrorSummary
+          items={[
+            { error: scoresQuery.error, isError: scoresQuery.isError, label: "Trust scores", onRetry: () => void scoresQuery.refetch() },
+            { error: eventsQuery.error, isError: eventsQuery.isError, label: "Trust events", onRetry: () => void eventsQuery.refetch() },
+            { error: rulesQuery.error, isError: rulesQuery.isError, label: "Trust rules", onRetry: () => void rulesQuery.refetch() },
+            { error: cardsQuery.error, isError: cardsQuery.isError, label: "Trust cards", onRetry: () => void cardsQuery.refetch() },
+            { error: thresholdsQuery.error, isError: thresholdsQuery.isError, label: "Trust thresholds", onRetry: () => void thresholdsQuery.refetch() },
+            { error: handshakesQuery.error, isError: handshakesQuery.isError, label: "Trust handshakes", onRetry: () => void handshakesQuery.refetch() },
+            { error: cardDetailQuery.error, isError: cardDetailQuery.isError, label: "Trust card detail", onRetry: () => void cardDetailQuery.refetch() }
+          ]}
+        />
         <TrustSummary scores={scores} />
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_24rem]">
           <TrustLeaderboard
@@ -149,11 +160,20 @@ export function TrustPage() {
             setVerification(null);
           }}
           onVerify={async (cardId) => {
-            const result = (await mutation.mutateAsync(() =>
-              verifyTrustCard(cardId)
-            )) as TrustCardVerification;
+            const result = await runWithFeedback<TrustCardVerification>(
+              () =>
+                mutation.mutateAsync(() =>
+                  verifyTrustCard(cardId)
+                ) as Promise<TrustCardVerification>,
+              {
+                errorMessage: "Trust card verification failed",
+                successMessage: (value) => (value.verified ? "Trust card verified" : "Trust card invalid")
+              }
+            );
+            if (!result) {
+              return;
+            }
             setVerification(result);
-            setMessage(result.verified ? "Trust card verified" : "Trust card invalid");
           }}
         />
         <TrustThresholdsPanel
@@ -169,12 +189,21 @@ export function TrustPage() {
           onFilter={setHandshakeFilters}
           onSelect={setSelectedHandshakeId}
           onSimulate={async (payload) => {
-            const result = (await mutation.mutateAsync(() =>
-              simulateTrustHandshake(payload)
-            )) as TrustHandshake;
+            const result = await runWithFeedback<TrustHandshake>(
+              () =>
+                mutation.mutateAsync(() =>
+                  simulateTrustHandshake(payload)
+                ) as Promise<TrustHandshake>,
+              {
+                errorMessage: "Handshake simulation failed",
+                successMessage: "Handshake simulated"
+              }
+            );
+            if (!result) {
+              return;
+            }
             setSimulation(result);
             setSelectedHandshakeId(result.id);
-            setMessage("Handshake simulated");
           }}
           selectedHandshake={selectedHandshake}
           simulation={simulation}

@@ -142,8 +142,10 @@ describe("TrustPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "evt_2" }));
     expect(await screen.findByText("Audit Event")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Evidence" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Evidence" }));
     expect(await screen.findByText("Valid hash chain, 0 event(s) checked.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close detail drawer" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
 
     fireEvent.change(screen.getByLabelText("Card Agent"), { target: { value: "agent_1" } });
     fireEvent.click(screen.getByRole("button", { name: "Issue" }));

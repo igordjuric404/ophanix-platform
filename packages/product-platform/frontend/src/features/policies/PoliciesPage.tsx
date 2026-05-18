@@ -11,7 +11,6 @@ import {
 } from "lucide-react";
 import {
   useCallback,
-  useEffect,
   useMemo,
   useState,
   type FormEvent,
@@ -59,6 +58,7 @@ import {
   type PolicyEvaluationSummary,
   type PolicyException,
   type PolicyExport,
+  type PolicyImportResult,
   type PolicyLintResult,
   type PolicyParams,
   type PolicySummary,
@@ -68,11 +68,14 @@ import { scopedQueryKey, useTenantQueryScope } from "../../api/queryScope";
 import { useEnvironments } from "../../api/system";
 import type { Environment } from "../../api/types";
 import { PageHeader } from "../../components/layout/PageHeader";
+import { ActionFeedback, useActionFeedback } from "../../components/shared/ActionFeedback";
 import { EmptyState } from "../../components/shared/EmptyState";
+import { QueryErrorSummary } from "../../components/shared/ErrorState";
 import { StatusBadge } from "../../components/shared/StatusBadge";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../../components/ui/dialog";
 import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
 import {
@@ -84,6 +87,7 @@ import {
   TableRow
 } from "../../components/ui/table";
 import { useEventStream } from "../../lib/eventSource";
+import { parseJsonObjectField } from "../../lib/forms";
 import { readSelectedEnvironmentId } from "../../lib/storage";
 import { cn } from "../../lib/utils";
 
@@ -111,7 +115,7 @@ export function PoliciesPage() {
   const [selectedEvaluationId, setSelectedEvaluationId] = useState<string | null>(null);
   const [simulationResult, setSimulationResult] = useState<PolicyEvaluation | null>(null);
   const [simulationError, setSimulationError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const { feedback, runWithFeedback } = useActionFeedback();
   const scope = useTenantQueryScope();
 
   const policiesQuery = usePolicies(filters);
@@ -182,8 +186,10 @@ export function PoliciesPage() {
   }
 
   async function runTask(label: string, task: () => Promise<unknown>) {
-    await mutation.mutateAsync(task);
-    setMessage(label);
+    await runWithFeedback(() => mutation.mutateAsync(task), {
+      errorMessage: `${label} failed`,
+      successMessage: label
+    });
   }
 
   return (
@@ -193,29 +199,52 @@ export function PoliciesPage() {
         description="Policy library, editor, bindings, simulator, and evaluation feed."
       />
       <div className="space-y-6 p-6">
-        {message ? (
-          <div className="feedback-success" role="status">
-            {message}
-          </div>
-        ) : null}
+        <ActionFeedback feedback={feedback} />
+        <QueryErrorSummary
+          items={[
+            { error: policiesQuery.error, isError: policiesQuery.isError, label: "Policy library", onRetry: () => void policiesQuery.refetch() },
+            { error: detailQuery.error, isError: detailQuery.isError, label: "Policy detail", onRetry: () => void detailQuery.refetch() },
+            { error: affectedQuery.error, isError: affectedQuery.isError, label: "Affected resources", onRetry: () => void affectedQuery.refetch() },
+            { error: bindingsQuery.error, isError: bindingsQuery.isError, label: "Policy bindings", onRetry: () => void bindingsQuery.refetch() },
+            { error: exceptionsQuery.error, isError: exceptionsQuery.isError, label: "Policy exceptions", onRetry: () => void exceptionsQuery.refetch() },
+            { error: agentsQuery.error, isError: agentsQuery.isError, label: "Agents", onRetry: () => void agentsQuery.refetch() },
+            { error: environmentsQuery.error, isError: environmentsQuery.isError, label: "Environments", onRetry: () => void environmentsQuery.refetch() },
+            { error: evaluationsQuery.error, isError: evaluationsQuery.isError, label: "Policy evaluations", onRetry: () => void evaluationsQuery.refetch() },
+            { error: summaryQuery.error, isError: summaryQuery.isError, label: "Evaluation summary", onRetry: () => void summaryQuery.refetch() },
+            { error: selectedEvaluationQuery.error, isError: selectedEvaluationQuery.isError, label: "Evaluation detail", onRetry: () => void selectedEvaluationQuery.refetch() }
+          ]}
+        />
         <PolicyLibrary
           isLoading={policiesQuery.isLoading}
           onExport={async (policyId) => {
-            const result = (await mutation.mutateAsync(() => exportPolicy(policyId))) as PolicyExport;
+            const result = await runWithFeedback<PolicyExport>(
+              () => mutation.mutateAsync(() => exportPolicy(policyId)) as Promise<PolicyExport>,
+              {
+                errorMessage: "Policy export failed",
+                successMessage: (value) => `Exported ${value.filename ?? policyId}`
+              }
+            );
+            if (!result) {
+              return;
+            }
             setExported(result);
-            setMessage(`Exported ${result.filename ?? policyId}`);
           }}
           onFilter={(params) => setFilters(params)}
           onImport={async (payload) => {
-            const imported = await mutation.mutateAsync(() => importPolicy(payload));
-            const policyId =
-              imported && typeof imported === "object" && "policy" in imported
-                ? String((imported as { policy: PolicySummary }).policy.id)
-                : null;
+            const imported = await runWithFeedback<PolicyImportResult>(
+              () => mutation.mutateAsync(() => importPolicy(payload)) as Promise<PolicyImportResult>,
+              {
+                errorMessage: "Policy import failed",
+                successMessage: (value) => `Imported ${value.policy.id}`
+              }
+            );
+            if (!imported) {
+              return;
+            }
+            const policyId = imported.policy.id;
             if (policyId) {
               selectPolicy(policyId);
             }
-            setMessage(policyId ? `Imported ${policyId}` : "Policy imported");
           }}
           onSelect={selectPolicy}
           policies={policies}
@@ -254,7 +283,15 @@ export function PoliciesPage() {
             bodyFormat={editorFormat}
             lintResult={editorLint}
             onLint={async (payload) => {
-              const result = (await mutation.mutateAsync(() => lintPolicy(payload))) as PolicyLintResult;
+              const result = await runWithFeedback<PolicyLintResult>(
+                () => mutation.mutateAsync(() => lintPolicy(payload)) as Promise<PolicyLintResult>,
+                {
+                  errorMessage: "Policy lint failed"
+                }
+              );
+              if (!result) {
+                return;
+              }
               setEditorLint(result);
               setEditorBody(String(payload.body_text ?? ""));
               setEditorFormat(String(payload.body_format ?? "yaml"));
@@ -264,11 +301,22 @@ export function PoliciesPage() {
               if (!selectedPolicy?.id) {
                 return;
               }
-              const version = (await mutation.mutateAsync(() =>
-                savePolicyDraftVersion(selectedPolicy.id, payload)
-              )) as PolicyVersion;
-              await mutation.mutateAsync(() => lintPolicyVersion(selectedPolicy.id, version.id));
-              setMessage(`Saved v${version.version_number}`);
+              const version = await runWithFeedback<PolicyVersion>(
+                async () => {
+                  const saved = (await mutation.mutateAsync(() =>
+                    savePolicyDraftVersion(selectedPolicy.id, payload)
+                  )) as PolicyVersion;
+                  await mutation.mutateAsync(() => lintPolicyVersion(selectedPolicy.id, saved.id));
+                  return saved;
+                },
+                {
+                  errorMessage: "Policy version save failed",
+                  successMessage: (value) => `Saved v${value.version_number}`
+                }
+              );
+              if (!version) {
+                return;
+              }
             }}
             policy={selectedPolicy}
           />
@@ -1312,45 +1360,23 @@ function PolicyEvaluationDetailDrawer({
   evaluation: PolicyEvaluation | null;
   onClose: () => void;
 }) {
-  useEffect(() => {
-    if (!evaluation) {
-      return undefined;
-    }
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onClose();
-      }
-    }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [evaluation, onClose]);
-
-  if (!evaluation) {
-    return null;
-  }
-
   return (
-    <div
-      className="fixed inset-0 z-50 flex justify-end bg-background/60 backdrop-blur-sm"
-      data-policy-evaluation-detail={evaluation.id}
-      onClick={onClose}
-    >
-      <section
+    <Dialog open={Boolean(evaluation)} onOpenChange={(open) => !open && onClose()}>
+      {evaluation ? (
+      <DialogContent
         aria-label={`Policy evaluation ${evaluation.id}`}
-        aria-modal="true"
-        className="h-full w-full max-w-xl overflow-y-auto border-l bg-background p-6 shadow-xl"
-        onClick={(event) => event.stopPropagation()}
-        role="dialog"
+        className="left-auto right-0 top-0 h-dvh w-full max-w-xl translate-x-0 translate-y-0 overflow-y-auto rounded-none border-y-0 border-l border-r-0 bg-background p-6 shadow-xl"
+        data-policy-evaluation-detail={evaluation.id}
+        showCloseButton={false}
       >
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h3 className="text-lg font-semibold">
+            <DialogTitle className="text-lg font-semibold">
               {evaluation.decision} - {evaluation.action}
-            </h3>
-            <p className="mt-1 text-sm text-muted-foreground">
+            </DialogTitle>
+            <DialogDescription className="mt-1 text-sm text-muted-foreground">
               {evaluation.correlation_id ?? "No correlation id"}
-            </p>
+            </DialogDescription>
           </div>
           <div className="flex items-center gap-2">
             <Badge tone="muted">{evaluation.backend ?? "native"}</Badge>
@@ -1378,8 +1404,9 @@ function PolicyEvaluationDetailDrawer({
             {JSON.stringify(evaluation.context ?? {}, null, 2)}
           </pre>
         </div>
-      </section>
-    </div>
+      </DialogContent>
+      ) : null}
+    </Dialog>
   );
 }
 
@@ -1517,12 +1544,7 @@ function cleanParamsFromForm(form: HTMLFormElement, keys: string[]) {
 }
 
 function parseContextJson(value: string) {
-  const text = value.trim() || "{}";
-  const parsed = JSON.parse(text) as unknown;
-  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
-    throw new Error("Context JSON must be an object.");
-  }
-  return parsed as Record<string, unknown>;
+  return parseJsonObjectField(value, "Context JSON", { emptyFallback: {} });
 }
 
 function datetimeLocalToIso(value: string) {

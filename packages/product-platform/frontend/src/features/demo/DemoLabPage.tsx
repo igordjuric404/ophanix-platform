@@ -25,10 +25,10 @@ import {
 import { PageHeader } from "../../components/layout/PageHeader";
 import {
   ActionFeedback,
-  actionErrorMessage,
-  type ActionFeedbackMessage
+  useActionFeedback
 } from "../../components/shared/ActionFeedback";
 import { EmptyState } from "../../components/shared/EmptyState";
+import { QueryErrorSummary } from "../../components/shared/ErrorState";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
@@ -49,7 +49,7 @@ export function DemoLabPage() {
   const [selectedScenarioId, setSelectedScenarioId] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedResetId, setSelectedResetId] = useState<string | null>(null);
-  const [feedback, setFeedback] = useState<ActionFeedbackMessage | null>(null);
+  const { feedback, runWithFeedback } = useActionFeedback();
 
   const scenariosQuery = useDemoScenarios();
   const resetRunsQuery = useDemoResetRuns({ limit: 10 });
@@ -71,12 +71,15 @@ export function DemoLabPage() {
   const baselineStatus = baselineQuery.data ?? null;
 
   async function runResultTask<T>(label: string, task: () => Promise<T>, onResult: (value: T) => void) {
-    try {
-      const result = (await mutation.mutateAsync(task)) as T;
+    const result = await runWithFeedback<T>(
+      () => mutation.mutateAsync(task) as Promise<T>,
+      {
+        errorMessage: `${label} failed`,
+        successMessage: label
+      }
+    );
+    if (result) {
       onResult(result);
-      setFeedback({ type: "success", message: label });
-    } catch (error) {
-      setFeedback({ type: "error", message: actionErrorMessage(error) });
     }
   }
 
@@ -88,6 +91,16 @@ export function DemoLabPage() {
       />
       <div className="space-y-6 p-6" data-demo-lab-workspace>
         <ActionFeedback feedback={feedback} />
+        <QueryErrorSummary
+          items={[
+            { error: scenariosQuery.error, isError: scenariosQuery.isError, label: "Demo scenarios", onRetry: () => void scenariosQuery.refetch() },
+            { error: scenarioQuery.error, isError: scenarioQuery.isError, label: "Demo scenario detail", onRetry: () => void scenarioQuery.refetch() },
+            { error: resetRunsQuery.error, isError: resetRunsQuery.isError, label: "Demo reset runs", onRetry: () => void resetRunsQuery.refetch() },
+            { error: resetDetailQuery.error, isError: resetDetailQuery.isError, label: "Demo reset detail", onRetry: () => void resetDetailQuery.refetch() },
+            { error: runQuery.error, isError: runQuery.isError, label: "Demo run", onRetry: () => void runQuery.refetch() },
+            { error: baselineQuery.error, isError: baselineQuery.isError, label: "Demo baseline", onRetry: () => void baselineQuery.refetch() }
+          ]}
+        />
         <DemoSummary
           baselineStatus={baselineStatus}
           resetRun={activeReset}

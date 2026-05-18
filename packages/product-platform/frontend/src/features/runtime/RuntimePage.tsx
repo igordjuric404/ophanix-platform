@@ -64,9 +64,9 @@ import {
 } from "../../components/ui/table";
 import {
   ActionFeedback,
-  actionErrorMessage,
-  type ActionFeedbackMessage
+  useActionFeedback
 } from "../../components/shared/ActionFeedback";
+import { QueryErrorSummary } from "../../components/shared/ErrorState";
 import { cn } from "../../lib/utils";
 
 const rings = ["0", "1", "2", "3"];
@@ -83,7 +83,7 @@ export function RuntimePage() {
   const [selectedSagaId, setSelectedSagaId] = useState<string | null>(null);
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
   const [sandboxDecision, setSandboxDecision] = useState<RuntimeSandboxDecision | null>(null);
-  const [feedback, setFeedback] = useState<ActionFeedbackMessage | null>(null);
+  const { feedback, runWithFeedback } = useActionFeedback();
 
   const sessionsQuery = useRuntimeSessions(sessionFilters);
   const decisionsQuery = useRuntimeRingDecisions(decisionFilters);
@@ -110,12 +110,10 @@ export function RuntimePage() {
   const selectedProfile = profiles.find((profile) => profile.id === activeProfileId) ?? null;
 
   async function runTask(label: string, task: () => Promise<unknown>) {
-    try {
-      await mutation.mutateAsync(task);
-      setFeedback({ type: "success", message: label });
-    } catch (error) {
-      setFeedback({ type: "error", message: actionErrorMessage(error) });
-    }
+    await runWithFeedback(() => mutation.mutateAsync(task), {
+      errorMessage: `${label} failed`,
+      successMessage: label
+    });
   }
 
   return (
@@ -126,6 +124,18 @@ export function RuntimePage() {
       />
       <div className="space-y-6 p-6">
         <ActionFeedback feedback={feedback} />
+        <QueryErrorSummary
+          items={[
+            { error: sessionsQuery.error, isError: sessionsQuery.isError, label: "Runtime sessions", onRetry: () => void sessionsQuery.refetch() },
+            { error: decisionsQuery.error, isError: decisionsQuery.isError, label: "Ring decisions", onRetry: () => void decisionsQuery.refetch() },
+            { error: rulesQuery.error, isError: rulesQuery.isError, label: "Ring rules", onRetry: () => void rulesQuery.refetch() },
+            { error: sagasQuery.error, isError: sagasQuery.isError, label: "Runtime sagas", onRetry: () => void sagasQuery.refetch() },
+            { error: sandboxProfilesQuery.error, isError: sandboxProfilesQuery.isError, label: "Sandbox profiles", onRetry: () => void sandboxProfilesQuery.refetch() },
+            { error: killSwitchEventsQuery.error, isError: killSwitchEventsQuery.isError, label: "Kill switch events", onRetry: () => void killSwitchEventsQuery.refetch() },
+            { error: sessionDetailQuery.error, isError: sessionDetailQuery.isError, label: "Session detail", onRetry: () => void sessionDetailQuery.refetch() },
+            { error: sagaDetailQuery.error, isError: sagaDetailQuery.isError, label: "Saga detail", onRetry: () => void sagaDetailQuery.refetch() }
+          ]}
+        />
         <RuntimeSummary
           decisions={decisions}
           events={killSwitchEvents}
@@ -191,11 +201,20 @@ export function RuntimePage() {
               setSandboxDecision(null);
             }}
             onTest={async (profileId, payload) => {
-              const result = (await mutation.mutateAsync(() =>
-                testRuntimeSandboxProfile(profileId, payload)
-              )) as RuntimeSandboxDecision;
+              const result = await runWithFeedback<RuntimeSandboxDecision>(
+                () =>
+                  mutation.mutateAsync(() =>
+                    testRuntimeSandboxProfile(profileId, payload)
+                  ) as Promise<RuntimeSandboxDecision>,
+                {
+                  errorMessage: "Sandbox profile test failed",
+                  successMessage: "Sandbox profile tested"
+                }
+              );
+              if (!result) {
+                return;
+              }
               setSandboxDecision(result);
-              setFeedback({ type: "success", message: "Sandbox profile tested" });
             }}
             profiles={profiles}
             selectedProfile={selectedProfile}

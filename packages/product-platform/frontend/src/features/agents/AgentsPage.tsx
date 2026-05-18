@@ -1,5 +1,5 @@
 import { KeyRound, Play, RotateCcw, Search, ShieldCheck, UserCheck } from "lucide-react";
-import { useState, type FormEvent, type InputHTMLAttributes } from "react";
+import { useState, type FormEvent, type InputHTMLAttributes, type KeyboardEvent } from "react";
 
 import {
   activateAgent,
@@ -26,7 +26,9 @@ import {
 } from "../../api/agents";
 import { useDetailDrawer } from "../../app/drawerContext";
 import { PageHeader } from "../../components/layout/PageHeader";
+import { ActionFeedback, useActionFeedback } from "../../components/shared/ActionFeedback";
 import { EmptyState } from "../../components/shared/EmptyState";
+import { QueryErrorSummary } from "../../components/shared/ErrorState";
 import { StatusBadge } from "../../components/shared/StatusBadge";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -59,7 +61,7 @@ export function AgentsPage() {
   const [filters, setFilters] = useState<AgentListParams>({ sort: "-last_heartbeat" });
   const [selectedAgentId, setSelectedAgentId] = useState(() => readAgentIdFromUrl());
   const [activeTab, setActiveTab] = useState("Overview");
-  const [message, setMessage] = useState<string | null>(null);
+  const { feedback, runWithFeedback } = useActionFeedback();
 
   const agentsQuery = useAgents(filters);
   const agents = agentsQuery.data ?? [];
@@ -81,29 +83,38 @@ export function AgentsPage() {
   async function handleRegistrationSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    const draft = (await mutation.mutateAsync(() =>
-      createAgentRegistrationDraft({
-        name: formString(form, "name"),
-        description: formString(form, "description"),
-        framework: formString(form, "framework"),
-        runtime_type: formString(form, "runtime_type"),
-        endpoint_url: formString(form, "endpoint_url"),
-        owner_user_id: formString(form, "owner_user_id"),
-        sponsor_user_id: formString(form, "sponsor_user_id"),
-        capabilities: [
-          {
-            capability_name: formString(form, "capability_name"),
-            resource_type: formString(form, "resource_type")
-          }
-        ].filter((capability) => capability.capability_name),
-        policy_selections: formString(form, "policy_pack")
-          ? [{ policy_pack: formString(form, "policy_pack") }]
-          : []
-      })
-    )) as AgentDetail | AgentSummary;
+    const draft = await runWithFeedback<AgentDetail | AgentSummary>(
+      () =>
+        mutation.mutateAsync(() =>
+          createAgentRegistrationDraft({
+            name: formString(form, "name"),
+            description: formString(form, "description"),
+            framework: formString(form, "framework"),
+            runtime_type: formString(form, "runtime_type"),
+            endpoint_url: formString(form, "endpoint_url"),
+            owner_user_id: formString(form, "owner_user_id"),
+            sponsor_user_id: formString(form, "sponsor_user_id"),
+            capabilities: [
+              {
+                capability_name: formString(form, "capability_name"),
+                resource_type: formString(form, "resource_type")
+              }
+            ].filter((capability) => capability.capability_name),
+            policy_selections: formString(form, "policy_pack")
+              ? [{ policy_pack: formString(form, "policy_pack") }]
+              : []
+          })
+        ) as Promise<AgentDetail | AgentSummary>,
+      {
+        errorMessage: "Registration draft failed",
+        successMessage: (result) => `Registration draft ${"id" in result ? String(result.id) : "draft"} created`
+      }
+    );
+    if (!draft) {
+      return;
+    }
     const id = "id" in draft ? String(draft.id) : "draft";
     setSelectedAgentId(id);
-    setMessage(`Registration draft ${id} created`);
   }
 
   function applyFilters(event: FormEvent<HTMLFormElement>) {
@@ -118,8 +129,10 @@ export function AgentsPage() {
   }
 
   async function runTask(label: string, task: () => Promise<unknown>) {
-    await mutation.mutateAsync(task);
-    setMessage(label);
+    await runWithFeedback(() => mutation.mutateAsync(task), {
+      errorMessage: `${label} failed`,
+      successMessage: label
+    });
   }
 
   return (
@@ -129,11 +142,17 @@ export function AgentsPage() {
         description="Register, inspect, operate, and credential governed agents."
       />
       <div className="space-y-6 p-6">
-        {message ? (
-          <div className="feedback-success" role="status">
-            {message}
-          </div>
-        ) : null}
+        <ActionFeedback feedback={feedback} />
+        <QueryErrorSummary
+          items={[
+            { error: agentsQuery.error, isError: agentsQuery.isError, label: "Agent inventory", onRetry: () => void agentsQuery.refetch() },
+            { error: detailQuery.error, isError: detailQuery.isError, label: "Agent detail", onRetry: () => void detailQuery.refetch() },
+            { error: timelineQuery.error, isError: timelineQuery.isError, label: "Agent timeline", onRetry: () => void timelineQuery.refetch() },
+            { error: auditQuery.error, isError: auditQuery.isError, label: "Agent audit", onRetry: () => void auditQuery.refetch() },
+            { error: credentialsQuery.error, isError: credentialsQuery.isError, label: "Agent credentials", onRetry: () => void credentialsQuery.refetch() },
+            { error: expiringQuery.error, isError: expiringQuery.isError, label: "Expiring credentials", onRetry: () => void expiringQuery.refetch() }
+          ]}
+        />
         <AgentRegistrationWizard onSubmit={handleRegistrationSubmit} isPending={mutation.isPending} />
         <AgentInventory
           agents={agents}
@@ -426,6 +445,37 @@ function AgentOperations({
   }
 
   const summary = detail?.summary ?? agents.find((agent) => agent.id === activeAgentId) ?? null;
+  const activePanelId = `agent-detail-panel-${tabDomId(activeTab)}`;
+
+  function moveTabFocus(tab: string) {
+    setActiveTab(tab);
+    window.requestAnimationFrame(() => {
+      document.getElementById(`agent-detail-tab-${tabDomId(tab)}`)?.focus();
+    });
+  }
+
+  function handleTabKey(event: KeyboardEvent<HTMLButtonElement>, tab: string) {
+    const currentIndex = detailTabs.indexOf(tab);
+    if (currentIndex < 0) {
+      return;
+    }
+    if (event.key === "ArrowRight") {
+      event.preventDefault();
+      moveTabFocus(detailTabs[(currentIndex + 1) % detailTabs.length]);
+    }
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      moveTabFocus(detailTabs[(currentIndex - 1 + detailTabs.length) % detailTabs.length]);
+    }
+    if (event.key === "Home") {
+      event.preventDefault();
+      moveTabFocus(detailTabs[0]);
+    }
+    if (event.key === "End") {
+      event.preventDefault();
+      moveTabFocus(detailTabs[detailTabs.length - 1]);
+    }
+  }
 
   return (
     <section className="rounded-lg border bg-card p-5">
@@ -458,20 +508,30 @@ function AgentOperations({
       <div className="mt-4 flex flex-wrap gap-2" role="tablist">
         {detailTabs.map((tab) => (
           <button
+            aria-controls={`agent-detail-panel-${tabDomId(tab)}`}
+            aria-selected={activeTab === tab}
             className={cn(
               "rounded-md px-3 py-2 text-sm font-medium",
               activeTab === tab ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"
             )}
+            id={`agent-detail-tab-${tabDomId(tab)}`}
             key={tab}
+            onKeyDown={(event) => handleTabKey(event, tab)}
             onClick={() => setActiveTab(tab)}
             role="tab"
+            tabIndex={activeTab === tab ? 0 : -1}
             type="button"
           >
             {tab}
           </button>
         ))}
       </div>
-      <div className="mt-5">
+      <div
+        aria-labelledby={`agent-detail-tab-${tabDomId(activeTab)}`}
+        className="mt-5"
+        id={activePanelId}
+        role="tabpanel"
+      >
         {isLoading ? (
           <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
             Loading agent detail
@@ -492,6 +552,10 @@ function AgentOperations({
       </div>
     </section>
   );
+}
+
+function tabDomId(tab: string) {
+  return tab.toLowerCase().replace(/\s+/g, "-");
 }
 
 function AgentDetailTab({

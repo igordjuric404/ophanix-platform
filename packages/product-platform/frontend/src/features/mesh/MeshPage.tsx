@@ -29,7 +29,9 @@ import {
   type ProtocolBridgeHealthCheck
 } from "../../api/mesh";
 import { PageHeader } from "../../components/layout/PageHeader";
+import { ActionFeedback, useActionFeedback } from "../../components/shared/ActionFeedback";
 import { EmptyState } from "../../components/shared/EmptyState";
+import { QueryErrorSummary } from "../../components/shared/ErrorState";
 import { StatusBadge } from "../../components/shared/StatusBadge";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -59,7 +61,7 @@ export function MeshPage() {
   const [selectedHandoffId, setSelectedHandoffId] = useState<string | null>(null);
   const [selectedBridgeId, setSelectedBridgeId] = useState<string | null>(null);
   const [healthResult, setHealthResult] = useState<ProtocolBridgeHealthCheck | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const { feedback, runWithFeedback } = useActionFeedback();
 
   const topologyQuery = useMeshTopology(topologyFilters);
   const messagesQuery = useMeshMessages(messageFilters);
@@ -80,8 +82,10 @@ export function MeshPage() {
   const selectedHandoff = handoffs.find((item) => item.id === selectedHandoffId) ?? handoffs[0] ?? null;
 
   async function runTask(label: string, task: () => Promise<unknown>) {
-    await mutation.mutateAsync(task);
-    setMessage(label);
+    await runWithFeedback(() => mutation.mutateAsync(task), {
+      errorMessage: `${label} failed`,
+      successMessage: label
+    });
   }
 
   return (
@@ -91,11 +95,17 @@ export function MeshPage() {
         description="Agent mesh topology, message flow, handoffs, and protocol bridge controls."
       />
       <div className="space-y-6 p-6">
-        {message ? (
-          <div className="feedback-success" role="status">
-            {message}
-          </div>
-        ) : null}
+        <ActionFeedback feedback={feedback} />
+        <QueryErrorSummary
+          items={[
+            { error: topologyQuery.error, isError: topologyQuery.isError, label: "Topology", onRetry: () => void topologyQuery.refetch() },
+            { error: messagesQuery.error, isError: messagesQuery.isError, label: "Messages", onRetry: () => void messagesQuery.refetch() },
+            { error: handoffsQuery.error, isError: handoffsQuery.isError, label: "Handoffs", onRetry: () => void handoffsQuery.refetch() },
+            { error: bridgesQuery.error, isError: bridgesQuery.isError, label: "Protocol bridges", onRetry: () => void bridgesQuery.refetch() },
+            { error: agentsQuery.error, isError: agentsQuery.isError, label: "Agents", onRetry: () => void agentsQuery.refetch() },
+            { error: bridgeDetailQuery.error, isError: bridgeDetailQuery.isError, label: "Bridge detail", onRetry: () => void bridgeDetailQuery.refetch() }
+          ]}
+        />
         <MeshSummary bridges={bridges} handoffs={handoffs} messages={messages} topology={topology} />
         <MeshTopologyPanel
           filters={topologyFilters}
@@ -124,11 +134,20 @@ export function MeshPage() {
             runTask("Protocol bridge route added", () => createProtocolBridgeRoute(bridgeId, payload))
           }
           onRunHealth={async (bridgeId) => {
-            const result = (await mutation.mutateAsync(() =>
-              runProtocolBridgeHealthCheck(bridgeId)
-            )) as ProtocolBridgeHealthCheck;
+            const result = await runWithFeedback<ProtocolBridgeHealthCheck>(
+              () =>
+                mutation.mutateAsync(() =>
+                  runProtocolBridgeHealthCheck(bridgeId)
+                ) as Promise<ProtocolBridgeHealthCheck>,
+              {
+                errorMessage: "Protocol bridge health check failed",
+                successMessage: "Protocol bridge health check completed"
+              }
+            );
+            if (!result) {
+              return;
+            }
             setHealthResult(result);
-            setMessage("Protocol bridge health check completed");
           }}
           onSelect={(bridgeId) => {
             setSelectedBridgeId(bridgeId);

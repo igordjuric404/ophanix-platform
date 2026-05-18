@@ -2,7 +2,11 @@ import { fireEvent, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { renderWithQueryClient } from "../../test/test-utils";
-import { MarketplacePage, marketplacePolicyPayloadFromValues } from "./MarketplacePage";
+import {
+  MarketplacePage,
+  marketplaceImportPayloadFromValues,
+  marketplacePolicyPayloadFromValues
+} from "./MarketplacePage";
 
 const plugin = {
   id: "plug_1",
@@ -185,6 +189,12 @@ describe("MarketplacePage", () => {
       allowed_capabilities: ["claims.lookup"],
       allowed_organizations: null
     });
+
+    expect(() =>
+      marketplaceImportPayloadFromValues({
+        manifest_json: "[]"
+      })
+    ).toThrow("Manifest JSON must be a JSON object.");
   });
 });
 

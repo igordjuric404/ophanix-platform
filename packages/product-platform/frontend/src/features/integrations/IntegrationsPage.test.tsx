@@ -176,6 +176,14 @@ describe("IntegrationsPage", () => {
       config: { project: "demo" }
     });
 
+    expect(() =>
+      integrationInstancePayloadFromValues({
+        integration_id: "openai_agents",
+        name: "Demo",
+        config_json: "{"
+      })
+    ).toThrow("Config JSON must be valid JSON.");
+
     expect(
       providerCredentialPayloadFromValues({
         name: " Demo key ",

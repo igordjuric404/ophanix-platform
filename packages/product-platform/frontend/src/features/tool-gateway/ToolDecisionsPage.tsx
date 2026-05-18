@@ -12,6 +12,7 @@ import { EmptyState } from "../../components/shared/EmptyState";
 import { StatusBadge } from "../../components/shared/StatusBadge";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../../components/ui/dialog";
 import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
 import {
@@ -414,19 +415,24 @@ function ToolRuntimeDetailDrawer({
   onClose: () => void;
 }) {
   return (
-    <div className="fixed inset-0 z-40 bg-background/70">
-      <aside
-        aria-label="Tool runtime action detail"
-        aria-modal="true"
-        className="ml-auto flex h-full w-full max-w-3xl flex-col border-l bg-background shadow-xl"
-        role="dialog"
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onClose();
+        }
+      }}
+    >
+      <DialogContent
+        className="left-auto right-0 top-0 ml-auto flex h-dvh w-full max-w-3xl translate-x-0 translate-y-0 flex-col rounded-none border-y-0 border-l border-r-0 bg-background p-0 shadow-xl"
+        showCloseButton={false}
       >
         <div className="flex items-start justify-between gap-4 border-b px-5 py-4">
           <div>
-            <h2 className="text-lg font-semibold">Runtime Action Detail</h2>
-            <p className="text-sm text-muted-foreground">
+            <DialogTitle className="text-lg font-semibold">Runtime Action Detail</DialogTitle>
+            <DialogDescription className="text-sm text-muted-foreground">
               {detail?.request_id ?? "Loading action"}
-            </p>
+            </DialogDescription>
           </div>
           <Button aria-label="Close" onClick={onClose} type="button" variant="ghost">
             <X className="h-4 w-4" />
@@ -461,8 +467,8 @@ function ToolRuntimeDetailDrawer({
             </>
           ) : null}
         </div>
-      </aside>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

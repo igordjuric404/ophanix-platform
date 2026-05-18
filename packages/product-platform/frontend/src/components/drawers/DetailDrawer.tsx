@@ -5,6 +5,7 @@ import type { DetailDrawerController, DetailDrawerState } from "../../app/drawer
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../ui/dialog";
 
 const tabs: Array<{ id: DetailDrawerState["activeTab"]; label: string }> = [
   { id: "overview", label: "Overview" },
@@ -14,18 +15,20 @@ const tabs: Array<{ id: DetailDrawerState["activeTab"]; label: string }> = [
 
 export function DetailDrawer({ controller }: { controller: DetailDrawerController }) {
   const { drawer } = controller;
-  if (!drawer.open) {
-    return null;
-  }
 
   return (
-    <div className="fixed inset-0 z-50 bg-brand-deep/50 backdrop-blur-sm" data-drawer-open>
-      <aside
-        aria-describedby="detail-drawer-description"
-        aria-labelledby="detail-drawer-title"
-        aria-modal="true"
-        className="fixed right-0 top-0 flex h-full w-[min(100vw,46rem)] flex-col border-l border-border/80 bg-background shadow-[var(--shadow-popover)]"
-        role="dialog"
+    <Dialog
+      open={drawer.open}
+      onOpenChange={(open) => {
+        if (!open) {
+          controller.closeDrawer();
+        }
+      }}
+    >
+      <DialogContent
+        className="left-auto right-0 top-0 flex h-dvh w-[min(100vw,46rem)] translate-x-0 translate-y-0 flex-col rounded-none border-y-0 border-l border-r-0 border-border/80 bg-background p-0 shadow-[var(--shadow-popover)]"
+        data-drawer-open={drawer.open ? true : undefined}
+        showCloseButton={false}
       >
         <header className="border-b border-border/80 bg-card p-5">
           <div className="flex items-start justify-between gap-4">
@@ -33,12 +36,12 @@ export function DetailDrawer({ controller }: { controller: DetailDrawerControlle
               <p className="text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">
                 {drawer.kind ?? "detail"}
               </p>
-              <h2 className="mt-1 font-display text-xl font-semibold" id="detail-drawer-title">
+              <DialogTitle className="mt-1 font-display text-xl font-semibold">
                 {drawer.title}
-              </h2>
-              <p className="mt-1 text-sm leading-5 text-muted-foreground" id="detail-drawer-description">
+              </DialogTitle>
+              <DialogDescription className="mt-1 text-sm leading-5 text-muted-foreground">
                 {drawer.subtitle}
-              </p>
+              </DialogDescription>
             </div>
             <div className="flex items-center gap-2">
               {drawer.backStack.length > 0 ? (
@@ -67,21 +70,28 @@ export function DetailDrawer({ controller }: { controller: DetailDrawerControlle
             <Badge tone={drawer.status.toLowerCase().includes("deny") ? "danger" : "muted"}>
               {drawer.status}
             </Badge>
-            <a className="text-sm font-medium text-primary underline-offset-2 hover:underline" href={`/observability?event_id=${drawer.resourceId ?? ""}`}>
+            <a
+              className="text-sm font-medium text-primary underline-offset-2 hover:underline"
+              href={`/compliance?drawer=audit-event&id=${encodeURIComponent(drawer.resourceId ?? "")}`}
+            >
               Open in Audit Explorer
             </a>
           </div>
-          <nav aria-label="Detail tabs" className="mt-4 flex gap-1 rounded-md border border-border/80 bg-muted/60 p-1">
+          <nav aria-label="Detail tabs" className="mt-4 flex gap-1 rounded-md border border-border/80 bg-muted/60 p-1" role="tablist">
             {tabs.map((tab) => (
               <button
+                aria-controls={`detail-drawer-panel-${tab.id}`}
+                aria-selected={drawer.activeTab === tab.id}
                 className={cn(
                   "flex-1 rounded-sm px-3 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring/20",
                   drawer.activeTab === tab.id
                     ? "bg-background text-foreground shadow-sm"
                     : "text-muted-foreground hover:bg-background/60 hover:text-foreground"
                 )}
+                id={`detail-drawer-tab-${tab.id}`}
                 key={tab.id}
                 onClick={() => controller.setActiveTab(tab.id)}
+                role="tab"
                 type="button"
               >
                 {tab.label}
@@ -89,9 +99,16 @@ export function DetailDrawer({ controller }: { controller: DetailDrawerControlle
             ))}
           </nav>
         </header>
-        <div className="flex-1 overflow-y-auto p-5">{renderDrawerBody(controller)}</div>
-      </aside>
-    </div>
+        <div
+          aria-labelledby={`detail-drawer-tab-${drawer.activeTab}`}
+          className="flex-1 overflow-y-auto p-5"
+          id={`detail-drawer-panel-${drawer.activeTab}`}
+          role="tabpanel"
+        >
+          {renderDrawerBody(controller)}
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

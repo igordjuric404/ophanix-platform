@@ -2,7 +2,7 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { renderWithQueryClient } from "../../test/test-utils";
-import { McpPage } from "./McpPage";
+import { McpPage, mcpProxyCallPayloadFromForm } from "./McpPage";
 
 const mcpServer = {
   id: "mcpsrv_1",
@@ -263,6 +263,18 @@ describe("McpPage", () => {
     await waitFor(() =>
       expect(calls.some((call) => call.path === "/api/v1/mcp/rate-limits" && call.method === "POST")).toBe(true)
     );
+  });
+
+  it("rejects invalid proxy params JSON before submitting", () => {
+    const form = document.createElement("form");
+    form.innerHTML = `
+      <input name="source_agent_id" value="agent_1" />
+      <input name="server_id" value="mcpsrv_1" />
+      <input name="tool_id" value="mcptool_1" />
+      <textarea name="params">[]</textarea>
+    `;
+
+    expect(() => mcpProxyCallPayloadFromForm(form)).toThrow("Params JSON must be a JSON object.");
   });
 });
 

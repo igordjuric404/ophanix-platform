@@ -57,8 +57,10 @@ import {
 import {
   ActionFeedback,
   actionErrorMessage,
-  type ActionFeedbackMessage
+  useActionFeedback
 } from "../../components/shared/ActionFeedback";
+import { QueryErrorSummary } from "../../components/shared/ErrorState";
+import { parseJsonObjectField } from "../../lib/forms";
 
 const targetTypes = ["agent", "mcp-server", "runtime", "environment"];
 const incidentSeverities = ["info", "warning", "critical"];
@@ -71,7 +73,7 @@ export function ObservabilityPage() {
   const [chaosFilters, setChaosFilters] = useState<ObservabilityParams>({});
   const [rolloutFilters, setRolloutFilters] = useState<ObservabilityParams>({});
   const [chaosRuns, setChaosRuns] = useState<ChaosRun[]>([]);
-  const [feedback, setFeedback] = useState<ActionFeedbackMessage | null>(null);
+  const { feedback, runWithFeedback, setError } = useActionFeedback();
 
   const slosQuery = useObservabilitySlos();
   const costsQuery = useObservabilityCosts();
@@ -87,21 +89,22 @@ export function ObservabilityPage() {
   const rollouts = rolloutsQuery.data ?? [];
 
   async function runTask(label: string, task: () => Promise<unknown>) {
-    try {
-      await mutation.mutateAsync(task);
-      setFeedback({ type: "success", message: label });
-    } catch (error) {
-      setFeedback({ type: "error", message: actionErrorMessage(error) });
-    }
+    await runWithFeedback(() => mutation.mutateAsync(task), {
+      errorMessage: `${label} failed`,
+      successMessage: label
+    });
   }
 
   async function runResultTask<T>(label: string, task: () => Promise<T>, onResult: (value: T) => void) {
-    try {
-      const result = (await mutation.mutateAsync(task)) as T;
+    const result = await runWithFeedback<T>(
+      () => mutation.mutateAsync(task) as Promise<T>,
+      {
+        errorMessage: `${label} failed`,
+        successMessage: label
+      }
+    );
+    if (result) {
       onResult(result);
-      setFeedback({ type: "success", message: label });
-    } catch (error) {
-      setFeedback({ type: "error", message: actionErrorMessage(error) });
     }
   }
 
@@ -113,6 +116,15 @@ export function ObservabilityPage() {
       />
       <div className="space-y-6 p-6">
         <ActionFeedback feedback={feedback} />
+        <QueryErrorSummary
+          items={[
+            { error: slosQuery.error, isError: slosQuery.isError, label: "SLOs", onRetry: () => void slosQuery.refetch() },
+            { error: costsQuery.error, isError: costsQuery.isError, label: "Costs", onRetry: () => void costsQuery.refetch() },
+            { error: incidentsQuery.error, isError: incidentsQuery.isError, label: "Incidents", onRetry: () => void incidentsQuery.refetch() },
+            { error: chaosQuery.error, isError: chaosQuery.isError, label: "Chaos experiments", onRetry: () => void chaosQuery.refetch() },
+            { error: rolloutsQuery.error, isError: rolloutsQuery.isError, label: "Rollouts", onRetry: () => void rolloutsQuery.refetch() }
+          ]}
+        />
         <ObservabilitySummary costs={costs} incidents={incidents} rollouts={rollouts} slos={slos} />
         <div className="grid gap-6 2xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
           <SloPanel
@@ -158,6 +170,7 @@ export function ObservabilityPage() {
               )
             }
             onFilter={setChaosFilters}
+            onInvalidInput={(error) => setError(actionErrorMessage(error, "Invalid chaos form input"))}
             onRun={(experimentId, payload) =>
               runResultTask(
                 "Chaos experiment run completed",
@@ -183,6 +196,7 @@ export function ObservabilityPage() {
               runTask("Rollout created", () => createObservabilityRollout(payload))
             }
             onFilter={setRolloutFilters}
+            onInvalidInput={(error) => setError(actionErrorMessage(error, "Invalid rollout form input"))}
             onRollback={(rolloutId, payload) =>
               runTask("Rollout rolled back", () => rollbackObservabilityRollout(rolloutId, payload))
             }
@@ -672,6 +686,7 @@ function ChaosPanel({
   filters,
   onCreate,
   onFilter,
+  onInvalidInput,
   onRun,
   onStop,
   runs
@@ -680,6 +695,7 @@ function ChaosPanel({
   filters: ObservabilityParams;
   onCreate: (payload: Record<string, unknown>) => void;
   onFilter: (filters: ObservabilityParams) => void;
+  onInvalidInput: (error: unknown) => void;
   onRun: (experimentId: string, payload: Record<string, unknown>) => void;
   onStop: (runId: string) => void;
   runs: ChaosRun[];
@@ -694,7 +710,12 @@ function ChaosPanel({
           className="grid gap-3 md:grid-cols-2"
           onSubmit={(event) => {
             event.preventDefault();
-            onCreate(observabilityChaosExperimentPayloadFromForm(event.currentTarget));
+            try {
+              onCreate(observabilityChaosExperimentPayloadFromForm(event.currentTarget));
+            } catch (error) {
+              onInvalidInput(error);
+              return;
+            }
             event.currentTarget.reset();
           }}
         >
@@ -804,6 +825,7 @@ function RolloutPanel({
   onAdvance,
   onCreate,
   onFilter,
+  onInvalidInput,
   onRollback,
   rollouts
 }: {
@@ -811,6 +833,7 @@ function RolloutPanel({
   onAdvance: (rolloutId: string, payload: Record<string, unknown>) => void;
   onCreate: (payload: Record<string, unknown>) => void;
   onFilter: (filters: ObservabilityParams) => void;
+  onInvalidInput: (error: unknown) => void;
   onRollback: (rolloutId: string, payload: Record<string, unknown>) => void;
   rollouts: Rollout[];
 }) {
@@ -824,7 +847,12 @@ function RolloutPanel({
           className="grid gap-3 md:grid-cols-2"
           onSubmit={(event) => {
             event.preventDefault();
-            onCreate(observabilityRolloutPayloadFromForm(event.currentTarget));
+            try {
+              onCreate(observabilityRolloutPayloadFromForm(event.currentTarget));
+            } catch (error) {
+              onInvalidInput(error);
+              return;
+            }
             event.currentTarget.reset();
           }}
         >
@@ -1112,8 +1140,12 @@ export function observabilityChaosExperimentPayloadFromValues(values: Record<str
     fault_type: String(values.fault_type ?? "latency").trim(),
     target_type: String(values.target_type ?? "agent").trim(),
     target_id: String(values.target_id ?? "").trim(),
-    blast_radius: parseJsonObject(values.blast_radius_json, { max_agents: 1, environment: "demo" }),
-    guardrails: parseJsonObject(values.guardrails_json, { max_error_rate: 0.05 })
+    blast_radius: parseJsonObjectField(values.blast_radius_json, "Blast Radius JSON", {
+      emptyFallback: { max_agents: 1, environment: "demo" }
+    }),
+    guardrails: parseJsonObjectField(values.guardrails_json, "Guardrails JSON", {
+      emptyFallback: { max_error_rate: 0.05 }
+    })
   };
 }
 
@@ -1150,7 +1182,7 @@ export function observabilityRolloutPayloadFromValues(values: Record<string, unk
         .split(",")
         .map((stage) => Number.parseInt(stage.trim(), 10))
         .filter((stage) => Number.isFinite(stage)),
-      gates: parseJsonObject(values.gates_json, {})
+      gates: parseJsonObjectField(values.gates_json, "Gates JSON", { emptyFallback: {} })
     }
   };
 }
@@ -1260,17 +1292,6 @@ function optionalNumber(value: unknown) {
 function optionalString(value: unknown) {
   const normalized = String(value ?? "").trim();
   return normalized || null;
-}
-
-function parseJsonObject(value: unknown, fallback: Record<string, unknown>) {
-  try {
-    const parsed = JSON.parse(String(value ?? ""));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : fallback;
-  } catch {
-    return fallback;
-  }
 }
 
 function rolloutStages(config: Record<string, unknown>, strategy: string) {

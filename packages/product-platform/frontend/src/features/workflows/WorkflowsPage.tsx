@@ -22,10 +22,10 @@ import {
 import { PageHeader } from "../../components/layout/PageHeader";
 import {
   ActionFeedback,
-  actionErrorMessage,
-  type ActionFeedbackMessage
+  useActionFeedback
 } from "../../components/shared/ActionFeedback";
 import { EmptyState } from "../../components/shared/EmptyState";
+import { QueryErrorSummary } from "../../components/shared/ErrorState";
 import { StatusBadge } from "../../components/shared/StatusBadge";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -52,7 +52,7 @@ export function WorkflowsPage() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const [downloadResult, setDownloadResult] = useState<ArtifactDownload | null>(null);
-  const [feedback, setFeedback] = useState<ActionFeedbackMessage | null>(null);
+  const { feedback, runWithFeedback } = useActionFeedback();
 
   const workflowsQuery = useWorkflows({ enabled: true });
   const runsQuery = useWorkflowRuns(runFilters);
@@ -73,21 +73,22 @@ export function WorkflowsPage() {
     artifactDetailQuery.data ?? artifacts.find((artifact) => artifact.id === activeArtifactId) ?? null;
 
   async function runTask(label: string, task: () => Promise<unknown>) {
-    try {
-      await mutation.mutateAsync(task);
-      setFeedback({ type: "success", message: label });
-    } catch (error) {
-      setFeedback({ type: "error", message: actionErrorMessage(error) });
-    }
+    await runWithFeedback(() => mutation.mutateAsync(task), {
+      errorMessage: `${label} failed`,
+      successMessage: label
+    });
   }
 
   async function runResultTask<T>(label: string, task: () => Promise<T>, onResult: (value: T) => void) {
-    try {
-      const result = (await mutation.mutateAsync(task)) as T;
+    const result = await runWithFeedback<T>(
+      () => mutation.mutateAsync(task) as Promise<T>,
+      {
+        errorMessage: `${label} failed`,
+        successMessage: label
+      }
+    );
+    if (result) {
       onResult(result);
-      setFeedback({ type: "success", message: label });
-    } catch (error) {
-      setFeedback({ type: "error", message: actionErrorMessage(error) });
     }
   }
 
@@ -99,6 +100,15 @@ export function WorkflowsPage() {
       />
       <div className="space-y-6 p-6" data-workflow-workspace>
         <ActionFeedback feedback={feedback} />
+        <QueryErrorSummary
+          items={[
+            { error: workflowsQuery.error, isError: workflowsQuery.isError, label: "Workflow catalog", onRetry: () => void workflowsQuery.refetch() },
+            { error: runsQuery.error, isError: runsQuery.isError, label: "Workflow runs", onRetry: () => void runsQuery.refetch() },
+            { error: runDetailQuery.error, isError: runDetailQuery.isError, label: "Workflow run detail", onRetry: () => void runDetailQuery.refetch() },
+            { error: artifactsQuery.error, isError: artifactsQuery.isError, label: "Artifacts", onRetry: () => void artifactsQuery.refetch() },
+            { error: artifactDetailQuery.error, isError: artifactDetailQuery.isError, label: "Artifact detail", onRetry: () => void artifactDetailQuery.refetch() }
+          ]}
+        />
         <WorkflowSummary artifacts={artifacts} runs={runs} workflows={workflows} />
         <div className="grid gap-6 2xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
           <WorkflowCatalog

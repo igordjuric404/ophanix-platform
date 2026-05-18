@@ -40,9 +40,10 @@ import { PageHeader } from "../../components/layout/PageHeader";
 import {
   ActionFeedback,
   actionErrorMessage,
-  type ActionFeedbackMessage
+  useActionFeedback
 } from "../../components/shared/ActionFeedback";
 import { EmptyState } from "../../components/shared/EmptyState";
+import { QueryErrorSummary } from "../../components/shared/ErrorState";
 import { StatusBadge } from "../../components/shared/StatusBadge";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -57,6 +58,7 @@ import {
   TableHeader,
   TableRow
 } from "../../components/ui/table";
+import { parseJsonObjectField } from "../../lib/forms";
 import { readSelectedEnvironmentId } from "../../lib/storage";
 
 const pluginTypes = ["", "policy_template", "integration", "agent", "validator"];
@@ -70,7 +72,7 @@ export function MarketplacePage() {
   const [policyResult, setPolicyResult] = useState<PluginPolicyResult | null>(null);
   const [qualityAssessment, setQualityAssessment] = useState<PluginQualityAssessment | null>(null);
   const [trustEvents, setTrustEvents] = useState<PluginTrustEvent[]>([]);
-  const [feedback, setFeedback] = useState<ActionFeedbackMessage | null>(null);
+  const { feedback, runWithFeedback, setError } = useActionFeedback();
 
   const pluginsQuery = useMarketplacePlugins(pluginFilters);
   const installationsQuery = useMarketplaceInstallations();
@@ -89,21 +91,22 @@ export function MarketplacePage() {
   const signingKeys = signingKeysQuery.data ?? [];
 
   async function runTask(label: string, task: () => Promise<unknown>) {
-    try {
-      await mutation.mutateAsync(task);
-      setFeedback({ type: "success", message: label });
-    } catch (error) {
-      setFeedback({ type: "error", message: actionErrorMessage(error) });
-    }
+    await runWithFeedback(() => mutation.mutateAsync(task), {
+      errorMessage: `${label} failed`,
+      successMessage: label
+    });
   }
 
   async function runResultTask<T>(label: string, task: () => Promise<T>, onResult: (value: T) => void) {
-    try {
-      const result = (await mutation.mutateAsync(task)) as T;
+    const result = await runWithFeedback<T>(
+      () => mutation.mutateAsync(task) as Promise<T>,
+      {
+        errorMessage: `${label} failed`,
+        successMessage: label
+      }
+    );
+    if (result) {
       onResult(result);
-      setFeedback({ type: "success", message: label });
-    } catch (error) {
-      setFeedback({ type: "error", message: actionErrorMessage(error) });
     }
   }
 
@@ -115,6 +118,15 @@ export function MarketplacePage() {
       />
       <div className="space-y-6 p-6">
         <ActionFeedback feedback={feedback} />
+        <QueryErrorSummary
+          items={[
+            { error: pluginsQuery.error, isError: pluginsQuery.isError, label: "Marketplace plugins", onRetry: () => void pluginsQuery.refetch() },
+            { error: pluginDetailQuery.error, isError: pluginDetailQuery.isError, label: "Plugin detail", onRetry: () => void pluginDetailQuery.refetch() },
+            { error: installationsQuery.error, isError: installationsQuery.isError, label: "Plugin installations", onRetry: () => void installationsQuery.refetch() },
+            { error: reviewsQuery.error, isError: reviewsQuery.isError, label: "Plugin reviews", onRetry: () => void reviewsQuery.refetch() },
+            { error: signingKeysQuery.error, isError: signingKeysQuery.isError, label: "Signing keys", onRetry: () => void signingKeysQuery.refetch() }
+          ]}
+        />
         <MarketplaceSummary
           installations={installations}
           plugins={plugins}
@@ -126,6 +138,7 @@ export function MarketplacePage() {
             filters={pluginFilters}
             isLoading={pluginsQuery.isLoading}
             onFilter={setPluginFilters}
+            onInvalidInput={(error) => setError(actionErrorMessage(error, "Invalid marketplace input"))}
             onImport={(payload) => runTask("Plugin manifest imported", () => importMarketplacePlugin(payload))}
             onSelect={setSelectedPluginId}
             plugins={plugins}
@@ -239,6 +252,7 @@ function CatalogPanel({
   filters,
   isLoading,
   onFilter,
+  onInvalidInput,
   onImport,
   onSelect,
   plugins,
@@ -247,6 +261,7 @@ function CatalogPanel({
   filters: MarketplaceParams;
   isLoading: boolean;
   onFilter: (filters: MarketplaceParams) => void;
+  onInvalidInput: (error: unknown) => void;
   onImport: (payload: Record<string, unknown>) => void;
   onSelect: (pluginId: string) => void;
   plugins: MarketplacePlugin[];
@@ -278,7 +293,12 @@ function CatalogPanel({
           className="grid gap-3 rounded-md border bg-muted/20 p-3"
           onSubmit={(event) => {
             event.preventDefault();
-            onImport(marketplaceImportPayloadFromForm(event.currentTarget));
+            try {
+              onImport(marketplaceImportPayloadFromForm(event.currentTarget));
+            } catch (error) {
+              onInvalidInput(error);
+              return;
+            }
             event.currentTarget.reset();
           }}
         >
@@ -1067,11 +1087,7 @@ function numberValue(value: unknown) {
 }
 
 function parseObjectJson(value: string) {
-  const parsed = JSON.parse(value.trim() || "{}") as unknown;
-  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
-    throw new Error("Manifest JSON must be an object.");
-  }
-  return parsed as Record<string, unknown>;
+  return parseJsonObjectField(value, "Manifest JSON", { emptyFallback: {} });
 }
 
 function sampleManifest() {

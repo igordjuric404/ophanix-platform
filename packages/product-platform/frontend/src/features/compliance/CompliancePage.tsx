@@ -36,7 +36,9 @@ import {
 import { scopedQueryKey, useTenantQueryScope } from "../../api/queryScope";
 import { useDetailDrawer } from "../../app/drawerContext";
 import { PageHeader } from "../../components/layout/PageHeader";
+import { ActionFeedback, useActionFeedback } from "../../components/shared/ActionFeedback";
 import { EmptyState } from "../../components/shared/EmptyState";
+import { QueryErrorSummary } from "../../components/shared/ErrorState";
 import { StatusBadge } from "../../components/shared/StatusBadge";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -63,7 +65,7 @@ export function CompliancePage() {
     useState<ComplianceEvidenceRecompute | null>(null);
   const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
   const [attestationId, setAttestationId] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const { feedback, runWithFeedback } = useActionFeedback();
   const scope = useTenantQueryScope();
 
   const auditEventsQuery = useQuery({
@@ -123,8 +125,10 @@ export function CompliancePage() {
   const drawer = useDetailDrawer();
 
   async function runTask(label: string, task: () => Promise<unknown>) {
-    await mutation.mutateAsync(task);
-    setMessage(label);
+    await runWithFeedback(() => mutation.mutateAsync(task), {
+      errorMessage: `${label} failed`,
+      successMessage: label
+    });
   }
 
   return (
@@ -134,20 +138,40 @@ export function CompliancePage() {
         description="Audit explorer, control evidence, violations, and report attestations."
       />
       <div className="space-y-6 p-6" data-compliance-workspace>
-        {message ? (
-          <div className="feedback-success" role="status">
-            {message}
-          </div>
-        ) : null}
+        <ActionFeedback feedback={feedback} />
+        <QueryErrorSummary
+          items={[
+            { error: auditEventsQuery.error, isError: auditEventsQuery.isError, label: "Audit events", onRetry: () => void auditEventsQuery.refetch() },
+            { error: activeEventQuery.error, isError: activeEventQuery.isError, label: "Audit event detail", onRetry: () => void activeEventQuery.refetch() },
+            { error: verificationQuery.error, isError: verificationQuery.isError, label: "Audit verification", onRetry: () => void verificationQuery.refetch() },
+            { error: relatedEventsQuery.error, isError: relatedEventsQuery.isError, label: "Related audit events", onRetry: () => void relatedEventsQuery.refetch() },
+            { error: frameworksQuery.error, isError: frameworksQuery.isError, label: "Compliance frameworks", onRetry: () => void frameworksQuery.refetch() },
+            { error: controlsQuery.error, isError: controlsQuery.isError, label: "Compliance controls", onRetry: () => void controlsQuery.refetch() },
+            { error: evidenceQuery.error, isError: evidenceQuery.isError, label: "Compliance evidence", onRetry: () => void evidenceQuery.refetch() },
+            { error: violationsQuery.error, isError: violationsQuery.isError, label: "Compliance violations", onRetry: () => void violationsQuery.refetch() },
+            { error: reportsQuery.error, isError: reportsQuery.isError, label: "Compliance reports", onRetry: () => void reportsQuery.refetch() },
+            { error: artifactsQuery.error, isError: artifactsQuery.isError, label: "Compliance artifacts", onRetry: () => void artifactsQuery.refetch() },
+            { error: selectedReportQuery.error, isError: selectedReportQuery.isError, label: "Report detail", onRetry: () => void selectedReportQuery.refetch() }
+          ]}
+        />
         <AuditExplorer
           events={auditEvents}
           exportResult={auditExport}
           filters={auditFilters}
           isLoading={auditEventsQuery.isLoading}
           onExport={async (payload) => {
-            const result = (await mutation.mutateAsync(() => exportAuditEvents(payload))) as {
-              artifact_uri?: string;
-            };
+            const result = await runWithFeedback<{ artifact_uri?: string }>(
+              () =>
+                mutation.mutateAsync(() =>
+                  exportAuditEvents(payload)
+                ) as Promise<{ artifact_uri?: string }>,
+              {
+                errorMessage: "Audit export failed"
+              }
+            );
+            if (!result) {
+              return;
+            }
             setAuditExport(result.artifact_uri ?? "audit-export");
           }}
           onFilter={setAuditFilters}
@@ -171,9 +195,18 @@ export function CompliancePage() {
             filters={evidenceFilters}
             onFilter={setEvidenceFilters}
             onRecompute={async () => {
-              const result = (await mutation.mutateAsync(() =>
-                recomputeComplianceEvidence()
-              )) as ComplianceEvidenceRecompute;
+              const result = await runWithFeedback<ComplianceEvidenceRecompute>(
+                () =>
+                  mutation.mutateAsync(() =>
+                    recomputeComplianceEvidence()
+                  ) as Promise<ComplianceEvidenceRecompute>,
+                {
+                  errorMessage: "Evidence recompute failed"
+                }
+              );
+              if (!result) {
+                return;
+              }
               setEvidenceRecompute(result);
             }}
             recomputeResult={evidenceRecompute}
@@ -199,24 +232,51 @@ export function CompliancePage() {
           attestationId={attestationId}
           frameworks={frameworksQuery.data ?? []}
           onAttest={async (reportId, payload) => {
-            const result = (await mutation.mutateAsync(() =>
-              attestComplianceReport(reportId, payload)
-            )) as { id?: string };
+            const result = await runWithFeedback<{ id?: string }>(
+              () =>
+                mutation.mutateAsync(() =>
+                  attestComplianceReport(reportId, payload)
+                ) as Promise<{ id?: string }>,
+              {
+                errorMessage: "Report attestation failed"
+              }
+            );
+            if (!result) {
+              return;
+            }
             setAttestationId(result.id ?? "attested");
           }}
           onCreate={async (payload) => {
-            const report = (await mutation.mutateAsync(() =>
-              createComplianceReport(payload)
-            )) as ComplianceReport;
+            const report = await runWithFeedback<ComplianceReport>(
+              () =>
+                mutation.mutateAsync(() =>
+                  createComplianceReport(payload)
+                ) as Promise<ComplianceReport>,
+              {
+                errorMessage: "Report creation failed",
+                successMessage: (value) => `Created ${value.name}`
+              }
+            );
+            if (!report) {
+              return;
+            }
             setSelectedReportId(report.id);
-            setMessage(`Created ${report.name}`);
           }}
           onGenerate={async (reportId) => {
-            const report = (await mutation.mutateAsync(() =>
-              generateComplianceReport(reportId)
-            )) as ComplianceReport;
+            const report = await runWithFeedback<ComplianceReport>(
+              () =>
+                mutation.mutateAsync(() =>
+                  generateComplianceReport(reportId)
+                ) as Promise<ComplianceReport>,
+              {
+                errorMessage: "Report generation failed",
+                successMessage: (value) => `Generated ${value.name}`
+              }
+            );
+            if (!report) {
+              return;
+            }
             setSelectedReportId(report.id);
-            setMessage(`Generated ${report.name}`);
           }}
           onOpen={setSelectedReportId}
           reports={reportsQuery.data ?? []}

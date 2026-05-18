@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderWithQueryClient } from "../../test/test-utils";
 import {
   ObservabilityPage,
+  observabilityChaosExperimentPayloadFromValues,
   observabilityRolloutPayloadFromValues
 } from "./ObservabilityPage";
 
@@ -292,6 +293,21 @@ describe("ObservabilityPage", () => {
         gates: { require_slo_healthy: true }
       }
     });
+  });
+
+  it("rejects invalid JSON instead of silently falling back", () => {
+    expect(() =>
+      observabilityChaosExperimentPayloadFromValues({
+        blast_radius_json: "{",
+        guardrails_json: "{}"
+      })
+    ).toThrow("Blast Radius JSON must be valid JSON.");
+
+    expect(() =>
+      observabilityRolloutPayloadFromValues({
+        gates_json: "[]"
+      })
+    ).toThrow("Gates JSON must be a JSON object.");
   });
 });
 
