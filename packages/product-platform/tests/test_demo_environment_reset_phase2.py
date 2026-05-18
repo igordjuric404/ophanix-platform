@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from product_platform import create_app
+from product_platform.api.auth import AuthService, DevLoginRequest
 from product_platform.audit.store import AuditEventQuery, AuditEventRepository
 from product_platform.api.settings import Settings
 from product_platform.db.seed import DEMO_ADMIN_USER_ID, seed_demo_data
@@ -52,7 +54,7 @@ class DemoEnvironmentResetPhase2Tests(unittest.TestCase):
             "X-Correlation-ID": correlation_id,
         }
 
-    def test_integration_reset_clears_demo_audit_events_and_preserves_admin(self) -> None:
+    def test_integration_reset_preserves_demo_audit_events_and_admin(self) -> None:
         with self.database.transaction() as connection:
             scenario_repository = DemoScenarioRepository(
                 connection,
@@ -119,10 +121,10 @@ class DemoEnvironmentResetPhase2Tests(unittest.TestCase):
             response.summary["cleared"]["demo_step_runs"],
             len(CUSTOMER_SUPPORT_REFUND_SCENARIO["steps"]),
         )
-        self.assertEqual(response.summary["cleared"]["demo_lab_audit_events"], 1)
         self.assertEqual(counts, {"demo_runs": 0, "demo_step_runs": 0})
         self.assertEqual(admin_count, 1)
-        self.assertEqual(old_demo_events, [])
+        self.assertEqual(response.summary["cleared"]["demo_lab_audit_events"], 0)
+        self.assertEqual(len(old_demo_events), 1)
         self.assertEqual(len(reset_events), 1)
         self.assertTrue(AuditEventRepository(connection).verify_range("org_default").valid)
 
@@ -195,10 +197,54 @@ class DemoEnvironmentResetPhase2Tests(unittest.TestCase):
         self.assertEqual(second.status, DemoResetStatus.SUCCEEDED)
         self.assertEqual(second.summary["cleared"]["demo_runs"], 0)
         self.assertEqual(second.summary["cleared"]["demo_step_runs"], 0)
-        self.assertEqual(second.summary["cleared"]["demo_lab_audit_events"], 1)
+        self.assertEqual(second.summary["cleared"]["demo_lab_audit_events"], 0)
         self.assertEqual(len(runs), 2)
-        self.assertEqual(len(reset_events), 1)
+        self.assertEqual(len(reset_events), 2)
         self.assertEqual(counts, {"demo_runs": 0, "demo_step_runs": 0})
+
+    def test_api_reset_failure_rolls_back_clears_and_records_failed_run(self) -> None:
+        started = self.client.post(
+            "/api/v1/demo/scenarios/customer-support-refund/runs",
+            headers=self._headers("corr-reset-api-failure"),
+        )
+        self.assertEqual(started.status_code, 201, started.text)
+
+        with patch(
+            "product_platform.demo.reset.seed_demo_data",
+            side_effect=RuntimeError("seed failed"),
+        ):
+            reset = self.client.post(
+                "/api/v1/demo/reset",
+                headers=self._headers("corr-reset-api-failure"),
+                json={"confirmation": "RESET"},
+            )
+
+        connection = self.database.connect()
+        counts = query_demo_markers(
+            connection,
+            organization_id="org_default",
+            environment_id="env_default",
+        )
+        failed_runs = DemoResetRepository(
+            connection,
+            "org_default",
+            "env_default",
+        ).list_runs(limit=10)
+        failed_events = AuditEventRepository(connection).query(
+            AuditEventQuery(
+                organization_id="org_default",
+                environment_id="env_default",
+                event_type="demo.reset.failed",
+            )
+        )
+
+        self.assertEqual(reset.status_code, 500, reset.text)
+        self.assertEqual(counts["demo_runs"], 1)
+        self.assertEqual(counts["demo_step_runs"], len(CUSTOMER_SUPPORT_REFUND_SCENARIO["steps"]))
+        self.assertEqual(len(failed_runs), 1)
+        self.assertEqual(failed_runs[0]["status"], DemoResetStatus.FAILED)
+        self.assertEqual(len(failed_events), 1)
+        self.assertTrue(AuditEventRepository(connection).verify_range("org_default").valid)
 
     def test_api_reset_requires_typed_confirmation(self) -> None:
         response = self.client.post(
@@ -240,6 +286,36 @@ class DemoEnvironmentResetPhase2Tests(unittest.TestCase):
         self.assertEqual(fetched.status_code, 200, fetched.text)
         self.assertEqual(listed.json()[0]["id"], reset_payload["id"])
         self.assertEqual(fetched.json()["id"], reset_payload["id"])
+
+    def test_api_reset_is_not_available_outside_local_environments(self) -> None:
+        settings = Settings(
+            app_name="Ophanix Test Platform",
+            environment="staging",
+            build_sha="test-sha",
+            build_time="2026-05-01T00:00:00Z",
+            database_url=self.database.database_url,
+            dev_login_allowed_emails=["reset@example.com"],
+            enable_dev_login=False,
+            session_secret="staging-secret",
+            gateway_token_hash_pepper="test-pepper",
+            tool_gateway_upstream_host_allowlist=["api.example.com"],
+        )
+        token = AuthService(settings).login(
+            DevLoginRequest(email="reset@example.com", roles=["Operator"])
+        ).access_token
+        app = create_app(settings, database=self.database)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/api/v1/demo/reset",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Environment-ID": "env_default",
+            },
+            json={"confirmation": "RESET"},
+        )
+
+        self.assertEqual(response.status_code, 404)
 
 
 if __name__ == "__main__":

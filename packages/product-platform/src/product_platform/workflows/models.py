@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from jsonschema import Draft202012Validator, SchemaError, ValidationError
 from pydantic import BaseModel, Field
 
 
@@ -65,8 +66,20 @@ class WorkflowInputValidationError(ValueError):
 
 
 def validate_workflow_inputs(schema: dict[str, Any], inputs: dict[str, Any]) -> None:
-    """Validate required fields from the stored JSON-schema-like input schema."""
+    """Validate inputs against the stored JSON Schema contract."""
 
+    if not schema:
+        return
+    try:
+        Draft202012Validator.check_schema(schema)
+        validation_errors = sorted(
+            Draft202012Validator(schema).iter_errors(inputs),
+            key=lambda error: [str(part) for part in error.absolute_path],
+        )
+    except SchemaError as exc:
+        raise WorkflowInputValidationError("Stored workflow input schema is invalid.") from exc
+    if validation_errors:
+        raise WorkflowInputValidationError(_workflow_validation_message(validation_errors[0]))
     required = schema.get("required", [])
     if not isinstance(required, list):
         return
@@ -79,3 +92,10 @@ def validate_workflow_inputs(schema: dict[str, Any], inputs: dict[str, Any]) -> 
         raise WorkflowInputValidationError(
             f"Workflow input is missing required field(s): {', '.join(sorted(missing))}."
         )
+
+
+def _workflow_validation_message(error: ValidationError) -> str:
+    path = ".".join(str(part) for part in error.absolute_path)
+    if path:
+        return f"Workflow input field '{path}' is invalid: {error.message}."
+    return f"Workflow input is invalid: {error.message}."

@@ -79,6 +79,13 @@ class WorkflowCatalogPhase1Tests(unittest.TestCase):
         validate_workflow_inputs(schema, {"policy_body": "package rules"})
         with self.assertRaisesRegex(WorkflowInputValidationError, "policy_body"):
             validate_workflow_inputs(schema, {"policy_format": "yaml"})
+        with self.assertRaisesRegex(WorkflowInputValidationError, "is not of type 'string'"):
+            validate_workflow_inputs(schema, {"policy_body": {"rego": "package rules"}})
+        with self.assertRaisesRegex(WorkflowInputValidationError, "Additional properties"):
+            validate_workflow_inputs(
+                schema,
+                {"policy_body": "package rules", "unexpected": "value"},
+            )
 
 
 if __name__ == "__main__":

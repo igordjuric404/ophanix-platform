@@ -33,7 +33,7 @@ class AuthPhase4Tests(unittest.TestCase):
                 environment="test",
                 build_sha="test-sha",
                 build_time="2026-04-30T00:00:00Z",
-                dev_login_allowed_emails=["admin@example.com"],
+                dev_login_allowed_emails=["admin@example.com", "security@example.com"],
                 session_secret="test-secret",
             )
         )
@@ -43,6 +43,14 @@ class AuthPhase4Tests(unittest.TestCase):
             json={"email": "admin@example.com", "roles": ["Platform Admin"]},
         )
         self.admin_headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+    def _headers_for(self, email: str, roles: list[str]) -> dict[str, str]:
+        login = self.client.post(
+            "/api/v1/auth/dev-login",
+            json={"email": email, "roles": roles},
+        )
+        self.assertEqual(login.status_code, 200, login.text)
+        return {"Authorization": f"Bearer {login.json()['access_token']}"}
 
     def _create_key(self, scopes: list[str]) -> dict:
         response = self.client.post(
@@ -96,6 +104,33 @@ class AuthPhase4Tests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 403)
+
+    def test_api_key_creation_rejects_unknown_scope(self) -> None:
+        response = self.client.post(
+            "/api/v1/api-keys",
+            json={"name": "Bad key", "scopes": ["policy:*"], "kind": "ci"},
+            headers=self.admin_headers,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Unknown API key scope", response.text)
+
+    def test_api_key_creation_cannot_delegate_ungranted_scope(self) -> None:
+        security_headers = self._headers_for("security@example.com", ["Security Admin"])
+
+        response = self.client.post(
+            "/api/v1/api-keys",
+            json={"name": "Too broad", "scopes": [Permission.JOB_CANCEL], "kind": "ci"},
+            headers=security_headers,
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("Cannot delegate", response.text)
+
+    def test_api_key_creation_normalizes_duplicate_scopes(self) -> None:
+        created = self._create_key(["", Permission.SYSTEM_READ, Permission.SYSTEM_READ])
+
+        self.assertEqual(created["key"]["scopes"], [Permission.SYSTEM_READ])
 
     def test_api_key_records_last_used_time(self) -> None:
         created = self._create_key([Permission.TENANT_READ])

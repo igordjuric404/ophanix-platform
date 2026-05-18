@@ -20,7 +20,7 @@ class DemoEnvironmentResetPhase1Tests(unittest.TestCase):
 
         self.assertEqual(
             scope.clear_order,
-            ("demo_step_runs", "demo_runs", "demo_lab_audit_events"),
+            ("demo_step_runs", "demo_runs"),
         )
         self.assertEqual(scope.marker_tables, ("demo_runs", "demo_step_runs"))
 

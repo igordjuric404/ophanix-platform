@@ -56,7 +56,12 @@ from product_platform.api.models import (
     RequestContext,
     VersionInfo,
 )
-from product_platform.api.rbac import Permission, has_permission, require_permission
+from product_platform.api.rbac import (
+    Permission,
+    has_permission,
+    require_permission,
+    validate_delegated_api_key_scopes,
+)
 from product_platform.api.settings import Settings, load_settings
 from product_platform.api.tenancy import (
     Environment,
@@ -183,6 +188,7 @@ from product_platform.demo.reset import (
     DemoEnvironmentResetService,
     DemoResetRepository,
     demo_reset_run_response,
+    record_demo_reset_failure,
 )
 from product_platform.demo.runner import DemoScenarioRunner, demo_run_audit_event
 from product_platform.discovery.models import (
@@ -1398,6 +1404,78 @@ def create_app(
         environments = tenants.list_environments(organization_id)
         return environments[0].id if environments else "env_default"
 
+    def _existing_audit_environment_id(
+        connection: Any,
+        organization_id: str,
+        preferred_environment_id: str | None,
+    ) -> str | None:
+        if preferred_environment_id:
+            row = connection.execute(
+                """
+                SELECT id
+                FROM environments
+                WHERE id = ? AND organization_id = ?
+                """,
+                (preferred_environment_id, organization_id),
+            ).fetchone()
+            if row is not None:
+                return str(row["id"])
+        row = connection.execute(
+            """
+            SELECT id
+            FROM environments
+            WHERE organization_id = ?
+            ORDER BY created_at ASC, id ASC
+            LIMIT 1
+            """,
+            (organization_id,),
+        ).fetchone()
+        return str(row["id"]) if row is not None else None
+
+    def _record_permission_denied_audit_event(
+        request: Request,
+        principal: UserPrincipal,
+        event: dict[str, Any],
+    ) -> None:
+        organization_id = principal.organization_id
+        if not organization_id:
+            return
+        context = _request_context_from_request(request)
+        with _audit_database().transaction() as connection:
+            environment_id = _existing_audit_environment_id(
+                connection,
+                organization_id,
+                getattr(request.state, "selected_environment_id", None)
+                or context.environment_id
+                or _default_environment_id_for_org(organization_id),
+            )
+            if environment_id is None:
+                return
+            AuditEventRepository(connection).insert(
+                AuditEventEnvelope(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    event_type="auth.permission_denied",
+                    source_component="authz",
+                    actor_type=principal.actor_type,
+                    actor_id=principal.id,
+                    resource_type="api_route",
+                    resource_id=str(event.get("path") or request.url.path),
+                    decision="deny",
+                    severity="warning",
+                    correlation_id=context.correlation_id,
+                    trace_id=context.request_id,
+                    payload_json={
+                        "permission": str(event.get("permission") or ""),
+                        "method": str(event.get("method") or request.method),
+                        "path": str(event.get("path") or request.url.path),
+                        "roles": list(getattr(principal, "roles", [])),
+                    },
+                )
+            )
+
+    app.state.permission_denied_audit_recorder = _record_permission_denied_audit_event
+
     def _gateway_token_verification_audit_event(
         *,
         request: Request,
@@ -2179,18 +2257,35 @@ def create_app(
 
         if body.confirmation != "RESET":
             raise HTTPException(status_code=400, detail="Type RESET to confirm demo reset.")
+        if not _is_local_environment(resolved_settings.environment):
+            raise HTTPException(status_code=404, detail="Demo reset is not available.")
+        environment = tenants.get_environment(environment_id)
+        if environment is None or environment.type not in {"development", "demo", "local-demo", "test"}:
+            raise HTTPException(status_code=403, detail="Demo reset is only available for demo environments.")
         organization_id = _require_organization_id(current_user)
         context = _request_context_from_request(request)
-        with _audit_database().transaction() as connection:
-            reset_run = DemoEnvironmentResetService(
-                connection,
-                organization_id,
-                environment_id,
-            ).reset(
-                requested_by=current_user.id,
-                correlation_id=context.correlation_id,
-            )
-            return demo_reset_run_response(reset_run)
+        try:
+            with _audit_database().transaction() as connection:
+                reset_run = DemoEnvironmentResetService(
+                    connection,
+                    organization_id,
+                    environment_id,
+                ).reset(
+                    requested_by=current_user.id,
+                    correlation_id=context.correlation_id,
+                )
+                return demo_reset_run_response(reset_run)
+        except Exception as exc:
+            with _audit_database().transaction() as connection:
+                record_demo_reset_failure(
+                    connection,
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    requested_by=current_user.id,
+                    error_message=exc.__class__.__name__,
+                    correlation_id=context.correlation_id,
+                )
+            raise HTTPException(status_code=500, detail="Demo reset failed.") from exc
 
     @app.get(
         "/api/v1/demo/reset-runs",
@@ -4200,12 +4295,18 @@ def create_app(
 
         if current_user.organization_id is None:
             raise HTTPException(status_code=400, detail="Organization context is required.")
+        try:
+            delegated_scopes = validate_delegated_api_key_scopes(current_user, body.scopes)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if use_persistent_api_keys:
             with _audit_database().transaction() as connection:
                 record, secret = _api_key_store(connection).create_key(
                     organization_id=current_user.organization_id,
                     name=body.name,
-                    scopes=body.scopes,
+                    scopes=delegated_scopes,
                     kind=body.kind,
                     expires_at=body.expires_at,
                 )
@@ -4213,7 +4314,7 @@ def create_app(
             record, secret = api_keys.create_key(
                 organization_id=current_user.organization_id,
                 name=body.name,
-                scopes=body.scopes,
+                scopes=delegated_scopes,
                 kind=body.kind,
                 expires_at=body.expires_at,
             )

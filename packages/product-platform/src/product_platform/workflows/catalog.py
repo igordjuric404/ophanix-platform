@@ -18,6 +18,7 @@ WORKFLOW_CATALOG: list[dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "required": ["scope"],
+            "additionalProperties": False,
             "properties": {
                 "scope": {"type": "string", "title": "Scope"},
                 "evidence_ref": {"type": "string", "title": "Evidence Ref"},
@@ -32,6 +33,7 @@ WORKFLOW_CATALOG: list[dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "required": ["target"],
+            "additionalProperties": False,
             "properties": {
                 "target": {"type": "string", "title": "Target"},
             },
@@ -45,6 +47,7 @@ WORKFLOW_CATALOG: list[dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "required": ["policy_body"],
+            "additionalProperties": False,
             "properties": {
                 "policy_body": {"type": "string", "title": "Policy Body"},
                 "policy_format": {"type": "string", "title": "Policy Format", "default": "yaml"},
@@ -59,6 +62,7 @@ WORKFLOW_CATALOG: list[dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "required": ["target_path"],
+            "additionalProperties": False,
             "properties": {
                 "target_path": {"type": "string", "title": "Target Path"},
             },
@@ -72,6 +76,7 @@ WORKFLOW_CATALOG: list[dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "required": ["target_path"],
+            "additionalProperties": False,
             "properties": {
                 "target_path": {"type": "string", "title": "Target Path"},
                 "format": {"type": "string", "title": "Format", "default": "cyclonedx"},
@@ -86,6 +91,7 @@ WORKFLOW_CATALOG: list[dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "required": ["manifest_path"],
+            "additionalProperties": False,
             "properties": {
                 "manifest_path": {"type": "string", "title": "Manifest Path"},
             },
@@ -99,6 +105,7 @@ WORKFLOW_CATALOG: list[dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "required": ["plugin_id"],
+            "additionalProperties": False,
             "properties": {
                 "plugin_id": {"type": "string", "title": "Plugin ID"},
                 "version": {"type": "string", "title": "Version"},

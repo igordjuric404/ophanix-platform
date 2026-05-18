@@ -5,6 +5,7 @@ import unittest
 from fastapi.testclient import TestClient
 
 from product_platform import create_app
+from product_platform.audit.store import AuditEventQuery, AuditEventRepository
 from product_platform.api.rbac import Permission, has_permission, permissions_for_roles
 from product_platform.api.settings import Settings
 
@@ -72,6 +73,15 @@ class AuthPhase2Tests(unittest.TestCase):
         self.assertEqual(len(denied_events), 1)
         self.assertEqual(denied_events[0]["permission"], Permission.POLICY_WRITE)
         self.assertEqual(denied_events[0]["event_type"], "auth.permission_denied")
+        audit_events = AuditEventRepository(self.app.state.database.connect()).query(
+            AuditEventQuery(
+                organization_id="org_default",
+                event_type="auth.permission_denied",
+            )
+        )
+        self.assertEqual(len(audit_events), 1)
+        self.assertEqual(audit_events[0].decision, "deny")
+        self.assertEqual(audit_events[0].payload_json["permission"], Permission.POLICY_WRITE)
 
     def test_policy_admin_can_create_policy_placeholder(self) -> None:
         token = self._token_for("policy@example.com", ["Policy Admin"])

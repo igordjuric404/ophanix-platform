@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Any
 
 from fastapi import HTTPException, Request
+
+logger = logging.getLogger(__name__)
 
 
 class Permission:
@@ -62,6 +65,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
 }
 
 VALID_ROLES = set(ROLE_PERMISSIONS)
+VALID_PERMISSIONS = frozenset().union(*ROLE_PERMISSIONS.values())
 
 
 def permissions_for_roles(roles: list[str]) -> set[str]:
@@ -81,6 +85,28 @@ def has_permission(principal: Any, permission: str) -> bool:
     return permission in permissions_for_roles(roles) or permission in scopes
 
 
+def validate_delegated_api_key_scopes(principal: Any, scopes: list[str]) -> list[str]:
+    """Return validated API-key scopes that the principal is allowed to delegate."""
+
+    normalized: list[str] = []
+    for scope in scopes:
+        value = scope.strip()
+        if not value:
+            continue
+        if value not in normalized:
+            normalized.append(value)
+    unknown_scopes = sorted(set(normalized) - VALID_PERMISSIONS)
+    if unknown_scopes:
+        raise ValueError(f"Unknown API key scope(s): {', '.join(unknown_scopes)}")
+    denied_scopes = sorted(scope for scope in normalized if not has_permission(principal, scope))
+    if denied_scopes:
+        raise PermissionError(
+            "Cannot delegate API key scope(s) not granted to the current principal: "
+            + ", ".join(denied_scopes)
+        )
+    return normalized
+
+
 def require_permission(permission: str) -> Callable[[Request], Any]:
     """FastAPI dependency that enforces a permission."""
 
@@ -93,21 +119,26 @@ def require_permission(permission: str) -> Callable[[Request], Any]:
             if denied_events is None:
                 denied_events = []
                 request.app.state.denied_audit_events = denied_events
-            denied_events.append(
-                {
-                    "event_type": "auth.permission_denied",
-                    "permission": permission,
-                    "path": request.url.path,
-                    "method": request.method,
-                    "user_id": getattr(principal, "id", None),
-                    "roles": list(getattr(principal, "roles", [])),
-                    "request_id": getattr(
-                        getattr(request.state, "request_context", None),
-                        "request_id",
-                        request.headers.get("X-Request-ID"),
-                    ),
-                }
-            )
+            event = {
+                "event_type": "auth.permission_denied",
+                "permission": permission,
+                "path": request.url.path,
+                "method": request.method,
+                "user_id": getattr(principal, "id", None),
+                "roles": list(getattr(principal, "roles", [])),
+                "request_id": getattr(
+                    getattr(request.state, "request_context", None),
+                    "request_id",
+                    request.headers.get("X-Request-ID"),
+                ),
+            }
+            denied_events.append(event)
+            recorder = getattr(request.app.state, "permission_denied_audit_recorder", None)
+            if callable(recorder):
+                try:
+                    recorder(request, principal, event)
+                except Exception:
+                    logger.exception("Failed to persist permission-denied audit event.")
             raise HTTPException(status_code=403, detail=f"Missing permission: {permission}")
         return principal
 
