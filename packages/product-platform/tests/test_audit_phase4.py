@@ -38,17 +38,21 @@ class AuditPhase4Tests(unittest.TestCase):
 
     def test_stream_receives_inserted_event(self) -> None:
         event = _event("evt_stream_a", "stream.match")
-        self.client.post("/api/v1/audit/events", json=event.model_dump(), headers=self.headers)
+        created = self.client.post(
+            "/api/v1/audit/events",
+            json=event.model_dump(),
+            headers=self.headers,
+        )
 
         response = self.client.get("/api/v1/audit/events/stream", headers=self.headers)
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/event-stream", response.headers["content-type"])
-        self.assertIn("id: evt_stream_a", response.text)
+        self.assertIn(f"id: {created.json()['id']}", response.text)
         self.assertIn('"event_type": "stream.match"', response.text)
 
     def test_stream_filter_only_receives_matching_event_type(self) -> None:
-        self.client.post(
+        match = self.client.post(
             "/api/v1/audit/events",
             json=_event("evt_stream_match", "stream.match").model_dump(),
             headers=self.headers,
@@ -64,28 +68,28 @@ class AuditPhase4Tests(unittest.TestCase):
             headers=self.headers,
         )
 
-        self.assertIn("id: evt_stream_match", response.text)
-        self.assertNotIn("id: evt_stream_other", response.text)
+        self.assertIn(f"id: {match.json()['id']}", response.text)
+        self.assertNotIn("stream.other", response.text)
 
     def test_reconnect_resumes_from_last_event_id(self) -> None:
-        self.client.post(
+        first = self.client.post(
             "/api/v1/audit/events",
             json=_event("evt_stream_first", "stream.resume", created_at="2026-04-30T00:00:01+00:00").model_dump(),
             headers=self.headers,
         )
-        self.client.post(
+        second = self.client.post(
             "/api/v1/audit/events",
             json=_event("evt_stream_second", "stream.resume", created_at="2026-04-30T00:00:02+00:00").model_dump(),
             headers=self.headers,
         )
 
         response = self.client.get(
-            "/api/v1/audit/events/stream?last_event_id=evt_stream_first",
+            f"/api/v1/audit/events/stream?last_event_id={first.json()['id']}",
             headers=self.headers,
         )
 
-        self.assertNotIn("id: evt_stream_first", response.text)
-        self.assertIn("id: evt_stream_second", response.text)
+        self.assertNotIn(f"id: {first.json()['id']}", response.text)
+        self.assertIn(f"id: {second.json()['id']}", response.text)
 
 
 def _event(
@@ -108,4 +112,3 @@ def _event(
 
 if __name__ == "__main__":
     unittest.main()
-

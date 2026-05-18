@@ -4,22 +4,25 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
-from product_platform.db.postgres import Connection, Row
 from typing import Any
 
 from product_platform.db.ids import generate_id
+from product_platform.db.postgres import Connection, Row
 from product_platform.db.time import utc_now_iso
 from product_platform.worker.store import JobStateRepository
+
+
+SUPPORTED_CRON_SUFFIX = "* * * *"
 
 
 def calculate_next_run(expression: str, from_time: datetime) -> datetime:
     """Calculate the next run for supported interval/cron expressions."""
 
+    expression = validate_schedule_expression(expression)
     if expression.startswith("interval:"):
         return from_time + _parse_interval(expression.removeprefix("interval:"))
-    parts = expression.split()
-    if len(parts) == 5 and parts[0].startswith("*/"):
-        minutes = int(parts[0].removeprefix("*/"))
+    minutes = _parse_supported_cron_minutes(expression)
+    if minutes is not None:
         candidate = from_time.replace(second=0, microsecond=0) + timedelta(minutes=1)
         while candidate.minute % minutes != 0:
             candidate += timedelta(minutes=1)
@@ -47,6 +50,7 @@ class JobScheduleRepository:
         next_run_at: str | None = None,
         schedule_id: str | None = None,
     ) -> Row:
+        expression = validate_schedule_expression(expression)
         now = utc_now_iso()
         resolved_id = schedule_id or generate_id("sched")
         self.connection.execute(
@@ -81,23 +85,44 @@ class JobScheduleRepository:
             raise KeyError(f"Schedule not found: {schedule_id}")
         return row
 
-    def get_schedule_for_org(self, schedule_id: str, organization_id: str) -> Row | None:
+    def get_schedule_for_org(
+        self,
+        schedule_id: str,
+        organization_id: str,
+        *,
+        environment_id: str | None = None,
+    ) -> Row | None:
+        clauses = ["id = ?", "organization_id = ?"]
+        values: list[object] = [schedule_id, organization_id]
+        if environment_id is not None:
+            clauses.append("environment_id = ?")
+            values.append(environment_id)
         return self.connection.execute(
-            """
+            f"""
             SELECT * FROM job_schedules
-            WHERE id = ? AND organization_id = ?
+            WHERE {' AND '.join(clauses)}
             """,
-            (schedule_id, organization_id),
+            values,
         ).fetchone()
 
-    def list_schedules(self, organization_id: str) -> list[Row]:
+    def list_schedules(
+        self,
+        organization_id: str,
+        *,
+        environment_id: str | None = None,
+    ) -> list[Row]:
+        clauses = ["organization_id = ?"]
+        values: list[object] = [organization_id]
+        if environment_id is not None:
+            clauses.append("environment_id = ?")
+            values.append(environment_id)
         return self.connection.execute(
-            """
+            f"""
             SELECT * FROM job_schedules
-            WHERE organization_id = ?
+            WHERE {' AND '.join(clauses)}
             ORDER BY created_at DESC, id DESC
             """,
-            (organization_id,),
+            values,
         ).fetchall()
 
     def set_enabled(self, schedule_id: str, enabled: bool) -> Row:
@@ -112,27 +137,37 @@ class JobScheduleRepository:
         schedule_id: str,
         organization_id: str,
         *,
+        environment_id: str | None = None,
         enabled: bool | None = None,
         next_run_at: str | None = None,
     ) -> Row | None:
-        existing = self.get_schedule_for_org(schedule_id, organization_id)
+        existing = self.get_schedule_for_org(
+            schedule_id,
+            organization_id,
+            environment_id=environment_id,
+        )
         if existing is None:
             return None
+        clauses = ["id = ?", "organization_id = ?"]
+        values: list[object] = [
+            None if enabled is None else 1 if enabled else 0,
+            next_run_at,
+            utc_now_iso(),
+            schedule_id,
+            organization_id,
+        ]
+        if environment_id is not None:
+            clauses.append("environment_id = ?")
+            values.append(environment_id)
         self.connection.execute(
-            """
+            f"""
             UPDATE job_schedules
             SET enabled = COALESCE(?, enabled),
                 next_run_at = COALESCE(?, next_run_at),
                 updated_at = ?
-            WHERE id = ? AND organization_id = ?
+            WHERE {' AND '.join(clauses)}
             """,
-            (
-                None if enabled is None else 1 if enabled else 0,
-                next_run_at,
-                utc_now_iso(),
-                schedule_id,
-                organization_id,
-            ),
+            values,
         )
         return self.get_schedule(schedule_id)
 
@@ -198,9 +233,48 @@ class JobScheduleRepository:
         )
 
 
+def validate_schedule_expression(expression: str) -> str:
+    """Return a normalized supported schedule expression or raise ValueError."""
+
+    normalized = expression.strip()
+    if not normalized:
+        raise ValueError("Schedule expression must not be blank.")
+    if normalized == "@hourly":
+        return normalized
+    if normalized.startswith("interval:"):
+        _parse_interval(normalized.removeprefix("interval:"))
+        return normalized
+    if _parse_supported_cron_minutes(normalized) is not None:
+        return normalized
+    raise ValueError(f"Unsupported schedule expression: {expression}")
+
+
+def _parse_supported_cron_minutes(expression: str) -> int | None:
+    parts = expression.split()
+    if len(parts) != 5 or " ".join(parts[1:]) != SUPPORTED_CRON_SUFFIX:
+        return None
+    minute = parts[0]
+    if not minute.startswith("*/"):
+        return None
+    try:
+        minutes = int(minute.removeprefix("*/"))
+    except ValueError as exc:
+        raise ValueError(f"Unsupported schedule expression: {expression}") from exc
+    if minutes < 1 or minutes > 60:
+        raise ValueError("Cron minute interval must be between 1 and 60.")
+    return minutes
+
+
 def _parse_interval(interval: str) -> timedelta:
-    amount = int(interval[:-1])
+    if len(interval) < 2:
+        raise ValueError("Interval schedule must include a positive amount and unit.")
     unit = interval[-1]
+    try:
+        amount = int(interval[:-1])
+    except ValueError as exc:
+        raise ValueError("Interval amount must be an integer.") from exc
+    if amount <= 0:
+        raise ValueError("Interval amount must be greater than zero.")
     if unit == "s":
         return timedelta(seconds=amount)
     if unit == "m":

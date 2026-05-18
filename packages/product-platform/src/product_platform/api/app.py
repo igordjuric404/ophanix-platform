@@ -641,7 +641,7 @@ from product_platform.worker.api_models import (
     job_schedule_response,
 )
 from product_platform.worker.scheduler import JobScheduleRepository
-from product_platform.worker.store import JobStateRepository
+from product_platform.worker.store import JobStateConflictError, JobStateRepository
 from product_platform.workflows.models import (
     WorkflowDefinitionResponse,
     WorkflowInputValidationError,
@@ -1901,8 +1901,12 @@ def create_app(
                 repository = WorkflowRepository(connection, organization_id)
                 run = repository.cancel_run(run_id, environment_id=environment_id)
                 try:
-                    JobStateRepository(connection).cancel(run_id)
-                except KeyError:
+                    JobStateRepository(connection).cancel(
+                        run_id,
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                    )
+                except (KeyError, JobStateConflictError):
                     pass
                 _insert_job_audit_event(
                     AuditEventRepository(connection),
@@ -4364,14 +4368,41 @@ def create_app(
     async def create_audit_event(
         event: AuditEventEnvelope,
         current_user: UserPrincipal = Depends(require_permission(Permission.AUDIT_WRITE)),
+        environment_id: str = Depends(require_environment_context),
     ) -> AuditEventEnvelope:
         """Persist a canonical audit event."""
 
-        if event.organization_id != current_user.organization_id:
+        organization_id = _require_organization_id(current_user)
+        if event.organization_id != organization_id or event.environment_id != environment_id:
             raise HTTPException(status_code=403, detail="Organization access is denied.")
+        payload_json = dict(event.payload_json)
+        payload_json.setdefault("_submitted_event_id", event.id)
+        payload_json.setdefault("_submitted_source_component", event.source_component)
+        payload_json.setdefault("_submitted_actor_type", event.actor_type)
+        if event.actor_id is not None:
+            payload_json.setdefault("_submitted_actor_id", event.actor_id)
+        canonical_event = AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type=event.event_type,
+            source_component="external-api",
+            actor_type="user",
+            actor_id=current_user.id,
+            agent_id=event.agent_id,
+            resource_type=event.resource_type,
+            resource_id=event.resource_id,
+            decision=event.decision,
+            severity=event.severity,
+            correlation_id=event.correlation_id,
+            trace_id=event.trace_id,
+            policy_id=event.policy_id,
+            policy_version_id=event.policy_version_id,
+            trust_delta=event.trust_delta,
+            payload_json=payload_json,
+        )
         database_for_audit = _audit_database()
         with database_for_audit.transaction() as connection:
-            return AuditEventRepository(connection).insert(event)
+            return AuditEventRepository(connection).insert(canonical_event)
 
     @app.get("/api/v1/audit/events", response_model=list[AuditEventEnvelope], tags=["audit"])
     async def list_audit_events(
@@ -5187,7 +5218,7 @@ def create_app(
     )
     async def create_compliance_framework(
         body: ComplianceFrameworkCreateRequest,
-        current_user: UserPrincipal = Depends(require_permission(Permission.AUDIT_WRITE)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_WRITE)),
         environment_id: str = Depends(require_environment_context),
     ) -> ComplianceFrameworkResponse:
         """Create a custom compliance framework for the current organization."""
@@ -5228,7 +5259,7 @@ def create_app(
     )
     async def create_compliance_control_mapping(
         body: ControlMappingCreateRequest,
-        current_user: UserPrincipal = Depends(require_permission(Permission.AUDIT_WRITE)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_WRITE)),
         environment_id: str = Depends(require_environment_context),
     ) -> ControlMappingResponse:
         """Create an audit-event-to-control mapping."""
@@ -5271,7 +5302,7 @@ def create_app(
         tags=["compliance"],
     )
     async def recompute_compliance_evidence(
-        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_WRITE)),
         environment_id: str = Depends(require_environment_context),
     ) -> EvidenceRecomputeResponse:
         """Refresh mapped compliance evidence from current audit history."""
@@ -5321,7 +5352,7 @@ def create_app(
     async def patch_compliance_violation(
         violation_id: str,
         body: ComplianceViolationPatchRequest,
-        current_user: UserPrincipal = Depends(require_permission(Permission.AUDIT_WRITE)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_WRITE)),
         environment_id: str = Depends(require_environment_context),
     ) -> ComplianceViolationResponse:
         """Acknowledge or resolve a compliance violation."""
@@ -5366,7 +5397,7 @@ def create_app(
     )
     async def create_compliance_report(
         body: ComplianceReportCreateRequest,
-        current_user: UserPrincipal = Depends(require_permission(Permission.AUDIT_WRITE)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_WRITE)),
         environment_id: str = Depends(require_environment_context),
     ) -> ComplianceReportResponse:
         """Create a draft compliance report."""
@@ -5426,7 +5457,7 @@ def create_app(
     )
     async def generate_compliance_report(
         report_id: str,
-        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_WRITE)),
         environment_id: str = Depends(require_environment_context),
     ) -> ComplianceReportResponse:
         """Generate report content from current evidence and violations."""
@@ -5505,7 +5536,7 @@ def create_app(
     async def attest_compliance_report(
         report_id: str,
         body: ComplianceReportAttestationRequest,
-        current_user: UserPrincipal = Depends(require_permission(Permission.AUDIT_WRITE)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_WRITE)),
         environment_id: str = Depends(require_environment_context),
     ) -> ComplianceReportAttestationResponse:
         """Attest a generated compliance report."""
@@ -8572,9 +8603,10 @@ def create_app(
             )
             if body.run_immediately:
                 if body.job_type == "demo.noop":
-                    jobs.mark_running(created["id"])
+                    running = jobs.mark_running(created["id"])
                     completed = jobs.mark_succeeded(
                         created["id"],
+                        expected_attempt=int(running["attempts"]),
                         logs=["queued", "started demo.noop", "completed demo.noop"],
                         metrics={"duration_ms": 0},
                         result={"ok": True, "job_type": body.job_type},
@@ -8594,7 +8626,7 @@ def create_app(
                             status_code=400,
                             detail="payload.target_id is required for discovery.scan.",
                         )
-                    jobs.mark_running(created["id"])
+                    running = jobs.mark_running(created["id"])
                     discovery_repository = DiscoveryRepository(
                         connection,
                         organization_id,
@@ -8641,6 +8673,7 @@ def create_app(
                     if completed_run["status"] == "failed":
                         completed = jobs.mark_failed(
                             created["id"],
+                            expected_attempt=int(running["attempts"]),
                             error_message=completed_run["error_message"]
                             or "Discovery scan failed.",
                             logs=["queued", "started discovery.scan", "failed discovery.scan"],
@@ -8648,6 +8681,7 @@ def create_app(
                     else:
                         completed = jobs.mark_succeeded(
                             created["id"],
+                            expected_attempt=int(running["attempts"]),
                             logs=["queued", "started discovery.scan", "completed discovery.scan"],
                             metrics={"raw_finding_count": job_result["raw_finding_count"]},
                             result=job_result,
@@ -9381,6 +9415,7 @@ def create_app(
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
         current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
     ) -> list[JobResponse]:
         """List background jobs for the current organization."""
 
@@ -9388,19 +9423,25 @@ def create_app(
         jobs = JobStateRepository(_audit_database().connect())
         return [
             job_response(row, jobs.runs_for_job(row["id"]))
-            for row in jobs.list_jobs(organization_id, limit=limit, offset=offset)
+            for row in jobs.list_jobs(
+                organization_id,
+                environment_id=environment_id,
+                limit=limit,
+                offset=offset,
+            )
         ]
 
     @app.get("/api/v1/jobs/{job_id}", response_model=JobResponse, tags=["jobs"])
     async def get_job(
         job_id: str,
         current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
     ) -> JobResponse:
         """Get one background job and its run attempts."""
 
         organization_id = _require_organization_id(current_user)
         jobs = JobStateRepository(_audit_database().connect())
-        row = jobs.get_job_for_org(job_id, organization_id)
+        row = jobs.get_job_for_org(job_id, organization_id, environment_id=environment_id)
         if row is None:
             raise HTTPException(status_code=404, detail="Job not found.")
         return job_response(row, jobs.runs_for_job(job_id))
@@ -9409,6 +9450,7 @@ def create_app(
     async def cancel_job(
         job_id: str,
         current_user: UserPrincipal = Depends(require_permission(Permission.JOB_CANCEL)),
+        environment_id: str = Depends(require_environment_context),
     ) -> JobResponse:
         """Cancel a queued background job."""
 
@@ -9416,10 +9458,17 @@ def create_app(
         database_for_jobs = _audit_database()
         with database_for_jobs.transaction() as connection:
             jobs = JobStateRepository(connection)
-            row = jobs.get_job_for_org(job_id, organization_id)
+            row = jobs.get_job_for_org(job_id, organization_id, environment_id=environment_id)
             if row is None:
                 raise HTTPException(status_code=404, detail="Job not found.")
-            canceled = jobs.cancel(job_id)
+            try:
+                canceled = jobs.cancel(
+                    job_id,
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                )
+            except JobStateConflictError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
             if canceled["status"] == "canceled" and row["status"] != "canceled":
                 _insert_job_audit_event(
                     AuditEventRepository(connection),
@@ -9460,12 +9509,14 @@ def create_app(
     @app.get("/api/v1/job-schedules", response_model=list[JobScheduleResponse], tags=["jobs"])
     async def list_job_schedules(
         current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
     ) -> list[JobScheduleResponse]:
         """List recurring background job schedules for the current organization."""
 
         organization_id = _require_organization_id(current_user)
         schedules = JobScheduleRepository(_audit_database().connect()).list_schedules(
-            organization_id
+            organization_id,
+            environment_id=environment_id,
         )
         return [job_schedule_response(schedule) for schedule in schedules]
 
@@ -9478,6 +9529,7 @@ def create_app(
         schedule_id: str,
         body: JobSchedulePatchRequest,
         current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
     ) -> JobScheduleResponse:
         """Patch schedule enablement and next-run controls."""
 
@@ -9487,6 +9539,7 @@ def create_app(
             schedule = schedules.update_schedule(
                 schedule_id,
                 organization_id,
+                environment_id=environment_id,
                 enabled=body.enabled,
                 next_run_at=body.next_run_at,
             )
@@ -11284,7 +11337,7 @@ def create_app(
     )
     async def create_observability_slo(
         body: SloObjectiveCreateRequest,
-        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_WRITE)),
         environment_id: str = Depends(require_environment_context),
     ) -> SloObjectiveResponse:
         organization_id = _require_organization_id(current_user)
@@ -11301,7 +11354,7 @@ def create_app(
     async def list_observability_slos(
         target_type: str | None = Query(default=None),
         status: str | None = Query(default=None),
-        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_READ)),
         environment_id: str = Depends(require_environment_context),
     ) -> list[SloObjectiveResponse]:
         organization_id = _require_organization_id(current_user)
@@ -11321,7 +11374,7 @@ def create_app(
     async def create_observability_slo_measurement(
         slo_id: str,
         body: SloMeasurementCreateRequest,
-        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_WRITE)),
         environment_id: str = Depends(require_environment_context),
     ) -> SloMeasurementResponse:
         organization_id = _require_organization_id(current_user)
@@ -11341,7 +11394,7 @@ def create_app(
     )
     async def create_observability_chaos_experiment(
         body: ChaosExperimentCreateRequest,
-        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_WRITE)),
         environment_id: str = Depends(require_environment_context),
     ) -> ChaosExperimentResponse:
         organization_id = _require_organization_id(current_user)
@@ -11365,7 +11418,7 @@ def create_app(
     async def list_observability_chaos_experiments(
         status: str | None = Query(default=None),
         target_type: str | None = Query(default=None),
-        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_READ)),
         environment_id: str = Depends(require_environment_context),
     ) -> list[ChaosExperimentResponse]:
         organization_id = _require_organization_id(current_user)
@@ -11386,7 +11439,7 @@ def create_app(
         experiment_id: str,
         body: ChaosRunCreateRequest,
         request: Request,
-        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_WRITE)),
         environment_id: str = Depends(require_environment_context),
     ) -> ChaosRunResponse:
         organization_id = _require_organization_id(current_user)
@@ -11444,7 +11497,7 @@ def create_app(
     async def stop_observability_chaos_run(
         run_id: str,
         request: Request,
-        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_WRITE)),
         environment_id: str = Depends(require_environment_context),
     ) -> ChaosRunResponse:
         organization_id = _require_organization_id(current_user)
@@ -11481,7 +11534,7 @@ def create_app(
     )
     async def create_observability_rollout(
         body: RolloutCreateRequest,
-        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_WRITE)),
         environment_id: str = Depends(require_environment_context),
     ) -> RolloutResponse:
         organization_id = _require_organization_id(current_user)
@@ -11498,7 +11551,7 @@ def create_app(
     async def list_observability_rollouts(
         status: str | None = Query(default=None),
         target_type: str | None = Query(default=None),
-        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_READ)),
         environment_id: str = Depends(require_environment_context),
     ) -> list[RolloutResponse]:
         organization_id = _require_organization_id(current_user)
@@ -11518,7 +11571,7 @@ def create_app(
         rollout_id: str,
         body: RolloutAdvanceRequest,
         request: Request,
-        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_WRITE)),
         environment_id: str = Depends(require_environment_context),
     ) -> RolloutResponse:
         organization_id = _require_organization_id(current_user)
@@ -11556,7 +11609,7 @@ def create_app(
         rollout_id: str,
         body: RolloutRollbackRequest,
         request: Request,
-        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_WRITE)),
         environment_id: str = Depends(require_environment_context),
     ) -> RolloutResponse:
         organization_id = _require_organization_id(current_user)
@@ -11593,7 +11646,7 @@ def create_app(
     )
     async def create_observability_cost_budget(
         body: CostBudgetCreateRequest,
-        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_WRITE)),
         environment_id: str = Depends(require_environment_context),
     ) -> CostBudgetResponse:
         organization_id = _require_organization_id(current_user)
@@ -11610,7 +11663,7 @@ def create_app(
     async def list_observability_cost_budgets(
         target_type: str | None = Query(default=None),
         status: str | None = Query(default=None),
-        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_READ)),
         environment_id: str = Depends(require_environment_context),
     ) -> list[CostBudgetResponse]:
         organization_id = _require_organization_id(current_user)
@@ -11629,7 +11682,7 @@ def create_app(
     )
     async def create_observability_cost_event(
         body: CostEventCreateRequest,
-        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_WRITE)),
         environment_id: str = Depends(require_environment_context),
     ) -> CostEventResponse:
         organization_id = _require_organization_id(current_user)
@@ -11644,7 +11697,7 @@ def create_app(
         tags=["observability"],
     )
     async def get_observability_costs(
-        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_READ)),
         environment_id: str = Depends(require_environment_context),
     ) -> CostDashboardResponse:
         organization_id = _require_organization_id(current_user)
@@ -11660,7 +11713,7 @@ def create_app(
     )
     async def create_observability_incident(
         body: IncidentCreateRequest,
-        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_WRITE)),
         environment_id: str = Depends(require_environment_context),
     ) -> IncidentResponse:
         organization_id = _require_organization_id(current_user)
@@ -11677,7 +11730,7 @@ def create_app(
     )
     async def create_observability_incident_from_event(
         body: IncidentFromEventRequest,
-        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_WRITE)),
         environment_id: str = Depends(require_environment_context),
     ) -> IncidentResponse:
         organization_id = _require_organization_id(current_user)
@@ -11697,7 +11750,7 @@ def create_app(
     async def list_observability_incidents(
         status: str | None = Query(default=None),
         severity: str | None = Query(default=None),
-        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_READ)),
         environment_id: str = Depends(require_environment_context),
     ) -> list[IncidentResponse]:
         organization_id = _require_organization_id(current_user)
@@ -11715,7 +11768,7 @@ def create_app(
     )
     async def acknowledge_observability_incident(
         incident_id: str,
-        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_WRITE)),
         environment_id: str = Depends(require_environment_context),
     ) -> IncidentResponse:
         organization_id = _require_organization_id(current_user)
@@ -11737,7 +11790,7 @@ def create_app(
     async def resolve_observability_incident(
         incident_id: str,
         body: IncidentResolveRequest,
-        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_WRITE)),
         environment_id: str = Depends(require_environment_context),
     ) -> IncidentResponse:
         organization_id = _require_organization_id(current_user)
@@ -11754,9 +11807,11 @@ def create_app(
     @app.get("/api/v1/system/dependencies", response_model=list[DependencyStatus], tags=["system"])
     async def system_dependencies(
         required_only: bool = Query(default=False),
+        current_user: UserPrincipal = Depends(require_permission(Permission.SYSTEM_READ)),
     ) -> list[DependencyStatus]:
         """Return downstream dependency states."""
 
+        _require_organization_id(current_user)
         dependencies = registry.check_all()
         if required_only:
             return [dependency for dependency in dependencies if dependency.required]

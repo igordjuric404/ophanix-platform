@@ -5,7 +5,7 @@ import unittest
 
 from product_platform.db.seed import seed_demo_data
 from product_platform.db.testing import create_migrated_test_database
-from product_platform.worker.store import JobStateRepository, JobStatus
+from product_platform.worker.store import JobStateConflictError, JobStateRepository, JobStatus
 
 
 class WorkerPhase2Tests(unittest.TestCase):
@@ -25,6 +25,7 @@ class WorkerPhase2Tests(unittest.TestCase):
                 running = repository.mark_running(job["id"])
                 succeeded = repository.mark_succeeded(
                     job["id"],
+                    expected_attempt=running["attempts"],
                     logs=["started", "finished"],
                     metrics={"duration_ms": 1},
                     result={"ok": True},
@@ -54,9 +55,10 @@ class WorkerPhase2Tests(unittest.TestCase):
                     payload={},
                     job_id="job_failed",
                 )
-                repository.mark_running(job["id"])
+                running = repository.mark_running(job["id"])
                 failed = repository.mark_failed(
                     job["id"],
+                    expected_attempt=running["attempts"],
                     error_message="boom",
                     logs=["started"],
                 )
@@ -117,13 +119,59 @@ class WorkerPhase2Tests(unittest.TestCase):
                     max_attempts=2,
                     job_id="job_retry",
                 )
-                repository.mark_running(job["id"])
-                repository.mark_failed(job["id"], error_message="try again", logs=[])
-                repository.requeue_for_retry(job["id"])
+                running = repository.mark_running(job["id"])
+                failed = repository.mark_failed(
+                    job["id"],
+                    expected_attempt=running["attempts"],
+                    error_message="try again",
+                    logs=[],
+                )
+                repository.requeue_for_retry(job["id"], expected_attempt=failed["attempts"])
                 retried = repository.mark_running(job["id"])
 
             self.assertEqual(retried["attempts"], 2)
             self.assertEqual(retried["status"], JobStatus.RUNNING)
+        finally:
+            database.close()
+
+    def test_terminal_transition_rejects_stale_attempt(self) -> None:
+        database = create_migrated_test_database()
+        try:
+            with database.transaction() as connection:
+                seed_demo_data(connection)
+                repository = JobStateRepository(connection)
+                job = repository.create_job(
+                    organization_id="org_default",
+                    environment_id="env_default",
+                    job_type="demo.retry",
+                    payload={},
+                    max_attempts=2,
+                    job_id="job_stale_attempt",
+                )
+                running = repository.mark_running(job["id"])
+                failed = repository.mark_failed(
+                    job["id"],
+                    expected_attempt=running["attempts"],
+                    error_message="try again",
+                    logs=[],
+                )
+                repository.requeue_for_retry(job["id"], expected_attempt=failed["attempts"])
+                retry = repository.mark_running(job["id"])
+
+                with self.assertRaises(JobStateConflictError):
+                    repository.mark_succeeded(
+                        job["id"],
+                        expected_attempt=running["attempts"],
+                        logs=[],
+                        metrics={},
+                        result={},
+                    )
+
+                current = repository.get_job(job["id"])
+
+            self.assertEqual(retry["status"], JobStatus.RUNNING)
+            self.assertEqual(current["attempts"], 2)
+            self.assertEqual(current["status"], JobStatus.RUNNING)
         finally:
             database.close()
 

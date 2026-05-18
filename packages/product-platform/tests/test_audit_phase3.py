@@ -88,7 +88,7 @@ class AuditPhase3ApiTests(unittest.TestCase):
             headers=self.headers,
         )
         verify_event = self.client.post(
-            f"/api/v1/audit/events/{event.id}/verify",
+            f"/api/v1/audit/events/{created.json()['id']}/verify",
             headers=self.headers,
         )
         verify_range = self.client.post("/api/v1/audit/verify-range", headers=self.headers)

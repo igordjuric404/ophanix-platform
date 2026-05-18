@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_tool_gateway_rate_limit_windows_started;

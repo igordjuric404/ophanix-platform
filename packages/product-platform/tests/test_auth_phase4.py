@@ -105,6 +105,16 @@ class AuthPhase4Tests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403)
 
+    def test_job_scoped_key_cannot_read_system_dependencies(self) -> None:
+        created = self._create_key([Permission.JOB_RUN])
+
+        response = self.client.get(
+            "/api/v1/system/dependencies",
+            headers={"Authorization": f"Bearer {created['secret']}"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+
     def test_api_key_creation_rejects_unknown_scope(self) -> None:
         response = self.client.post(
             "/api/v1/api-keys",

@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from product_platform import create_app
 from product_platform.api.settings import Settings
+from product_platform.db.time import utc_now_iso
 
 
 class WorkerPhase4ApiTests(unittest.TestCase):
@@ -52,6 +53,26 @@ class WorkerPhase4ApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 201)
         return response.json()
+
+    def _register_test_environment(self, environment_id: str = "env_other") -> None:
+        now = utc_now_iso()
+        self.app.state.tenant_store.create_environment(
+            organization_id="org_default",
+            name="Other",
+            slug="other",
+            environment_type="development",
+        )
+        if self.app.state.database is None:
+            self.client.get("/api/v1/jobs", headers=self.operator_headers)
+        with self.app.state.database.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO environments (id, organization_id, name, slug, type, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT DO NOTHING
+                """,
+                (environment_id, "org_default", "Other", "other", "development", now, now),
+            )
 
     def test_operator_can_create_allowed_job(self) -> None:
         job = self._create_job()
@@ -138,6 +159,58 @@ class WorkerPhase4ApiTests(unittest.TestCase):
         self.assertFalse(patched.json()["enabled"])
         self.assertEqual(patched.json()["next_run_at"], "2026-04-30T11:00:00+00:00")
         self.assertIn(schedule_id, {item["id"] for item in listed.json()})
+
+    def test_jobs_and_schedules_are_filtered_by_selected_environment(self) -> None:
+        self._register_test_environment()
+        default_job = self._create_job()
+        other_headers = dict(self.operator_headers)
+        other_headers["X-Environment-ID"] = "env_other"
+        other_job = self.client.post(
+            "/api/v1/jobs",
+            json={"job_type": "demo.noop", "payload": {"environment": "other"}},
+            headers=other_headers,
+        ).json()
+        other_schedule = self.client.post(
+            "/api/v1/job-schedules",
+            json={
+                "job_type": "demo.noop",
+                "cron_expression": "interval:5m",
+                "payload": {"environment": "other"},
+                "next_run_at": "2026-04-30T10:00:00+00:00",
+            },
+            headers=other_headers,
+        ).json()
+
+        default_jobs = self.client.get("/api/v1/jobs", headers=self.operator_headers)
+        other_jobs = self.client.get("/api/v1/jobs", headers=other_headers)
+        default_schedules = self.client.get("/api/v1/job-schedules", headers=self.operator_headers)
+        blocked_patch = self.client.patch(
+            f"/api/v1/job-schedules/{other_schedule['id']}",
+            json={"enabled": False},
+            headers=self.operator_headers,
+        )
+
+        self.assertEqual(default_jobs.status_code, 200)
+        self.assertIn(default_job["id"], {item["id"] for item in default_jobs.json()})
+        self.assertNotIn(other_job["id"], {item["id"] for item in default_jobs.json()})
+        self.assertEqual(other_jobs.status_code, 200)
+        self.assertEqual({item["id"] for item in other_jobs.json()}, {other_job["id"]})
+        self.assertEqual(default_schedules.status_code, 200)
+        self.assertNotIn(other_schedule["id"], {item["id"] for item in default_schedules.json()})
+        self.assertEqual(blocked_patch.status_code, 404)
+
+    def test_invalid_schedule_expression_is_rejected_at_api_boundary(self) -> None:
+        response = self.client.post(
+            "/api/v1/job-schedules",
+            json={
+                "job_type": "demo.noop",
+                "cron_expression": "*/0 * * * *",
+                "payload": {},
+            },
+            headers=self.operator_headers,
+        )
+
+        self.assertEqual(response.status_code, 422)
 
 
 if __name__ == "__main__":

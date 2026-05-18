@@ -78,6 +78,7 @@ class WorkflowRunWorker:
             if workflow_run is None:
                 failed = jobs.mark_failed(
                     job["id"],
+                    expected_attempt=int(job["attempts"]),
                     error_message="Workflow run not found.",
                     logs=["workflow run not found"],
                 )
@@ -90,6 +91,7 @@ class WorkflowRunWorker:
             if workflow_run["status"] != JobStatus.QUEUED:
                 failed = jobs.mark_failed(
                     job["id"],
+                    expected_attempt=int(job["attempts"]),
                     error_message="Workflow run is not queued.",
                     logs=[f"workflow run status was {workflow_run['status']}"],
                 )
@@ -151,6 +153,7 @@ class WorkflowRunWorker:
             if completed["status"] == "succeeded":
                 job = jobs.mark_succeeded(
                     job["id"],
+                    expected_attempt=int(job["attempts"]),
                     logs=job_logs,
                     metrics={"workflow_log_count": len(result.logs)},
                     result=job_result,
@@ -158,6 +161,7 @@ class WorkflowRunWorker:
             else:
                 job = jobs.mark_failed(
                     job["id"],
+                    expected_attempt=int(job["attempts"]),
                     error_message=str(result.summary.get("error") or "Workflow run failed."),
                     logs=job_logs,
                 )

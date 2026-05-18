@@ -11,8 +11,12 @@ from product_platform.worker.runtime import (
     JobResult,
     Worker,
 )
-from product_platform.worker.scheduler import JobScheduleRepository, calculate_next_run
-from product_platform.worker.store import JobStateRepository, JobStatus
+from product_platform.worker.scheduler import (
+    JobScheduleRepository,
+    calculate_next_run,
+    validate_schedule_expression,
+)
+from product_platform.worker.store import JobStateConflictError, JobStateRepository, JobStatus
 
 __all__ = [
     "InMemoryJobQueue",
@@ -23,7 +27,9 @@ __all__ = [
     "JobResult",
     "Worker",
     "JobStateRepository",
+    "JobStateConflictError",
     "JobStatus",
     "JobScheduleRepository",
     "calculate_next_run",
+    "validate_schedule_expression",
 ]

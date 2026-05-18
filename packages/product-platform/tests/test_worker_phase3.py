@@ -6,7 +6,11 @@ from datetime import datetime, timezone
 
 from product_platform.db.seed import seed_demo_data
 from product_platform.db.testing import create_migrated_test_database
-from product_platform.worker.scheduler import JobScheduleRepository, calculate_next_run
+from product_platform.worker.scheduler import (
+    JobScheduleRepository,
+    calculate_next_run,
+    validate_schedule_expression,
+)
 
 
 class WorkerPhase3Tests(unittest.TestCase):
@@ -18,6 +22,14 @@ class WorkerPhase3Tests(unittest.TestCase):
 
         self.assertEqual(interval_next, datetime(2026, 4, 30, 10, 12, 30, tzinfo=timezone.utc))
         self.assertEqual(cron_next, datetime(2026, 4, 30, 10, 15, 0, tzinfo=timezone.utc))
+
+    def test_schedule_expression_validation_rejects_unsafe_values(self) -> None:
+        with self.assertRaises(ValueError):
+            validate_schedule_expression("*/0 * * * *")
+        with self.assertRaises(ValueError):
+            validate_schedule_expression("interval:0m")
+        with self.assertRaises(ValueError):
+            validate_schedule_expression("not a schedule")
 
     def test_disabled_schedule_does_not_enqueue(self) -> None:
         database = create_migrated_test_database()
@@ -81,4 +93,3 @@ class WorkerPhase3Tests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

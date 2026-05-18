@@ -28,6 +28,9 @@ class Permission:
     API_KEYS_MANAGE = "api-keys:manage"
     SECURITY_MANAGE = "security:manage"
     COMPLIANCE_READ = "compliance:read"
+    COMPLIANCE_WRITE = "compliance:write"
+    OBSERVABILITY_READ = "observability:read"
+    OBSERVABILITY_WRITE = "observability:write"
 
 
 VIEWER_PERMISSIONS = {
@@ -37,6 +40,7 @@ VIEWER_PERMISSIONS = {
     Permission.AGENT_READ,
     Permission.AUDIT_READ,
     Permission.COMPLIANCE_READ,
+    Permission.OBSERVABILITY_READ,
 }
 
 ROLE_PERMISSIONS: dict[str, set[str]] = {
@@ -45,7 +49,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
     | {Permission.AGENT_WRITE, Permission.JOB_RUN, Permission.JOB_CANCEL},
     "Policy Admin": VIEWER_PERMISSIONS | {Permission.POLICY_WRITE, Permission.AUDIT_WRITE},
     "Security Admin": VIEWER_PERMISSIONS | {Permission.SECURITY_MANAGE, Permission.API_KEYS_MANAGE},
-    "Compliance Admin": VIEWER_PERMISSIONS | {Permission.AUDIT_WRITE},
+    "Compliance Admin": VIEWER_PERMISSIONS | {Permission.COMPLIANCE_WRITE},
     "Platform Admin": {
         Permission.SYSTEM_READ,
         Permission.TENANT_READ,
@@ -61,6 +65,9 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         Permission.API_KEYS_MANAGE,
         Permission.SECURITY_MANAGE,
         Permission.COMPLIANCE_READ,
+        Permission.COMPLIANCE_WRITE,
+        Permission.OBSERVABILITY_READ,
+        Permission.OBSERVABILITY_WRITE,
     },
 }
 

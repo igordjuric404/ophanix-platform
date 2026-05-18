@@ -16,6 +16,10 @@ class RoleMatrixTests(unittest.TestCase):
         self.assertNotIn(Permission.POLICY_WRITE, permissions_for_roles(["Viewer"]))
         self.assertIn(Permission.POLICY_WRITE, permissions_for_roles(["Policy Admin"]))
         self.assertIn(Permission.API_KEYS_MANAGE, permissions_for_roles(["Platform Admin"]))
+        self.assertIn(Permission.COMPLIANCE_WRITE, permissions_for_roles(["Compliance Admin"]))
+        self.assertNotIn(Permission.AUDIT_WRITE, permissions_for_roles(["Compliance Admin"]))
+        self.assertIn(Permission.OBSERVABILITY_READ, permissions_for_roles(["Viewer"]))
+        self.assertNotIn(Permission.OBSERVABILITY_WRITE, permissions_for_roles(["Operator"]))
 
 
 class _Principal:

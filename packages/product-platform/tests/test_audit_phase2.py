@@ -145,6 +145,39 @@ class AuditPhase2ApiTests(unittest.TestCase):
         self.assertEqual(len(payload), 1)
         self.assertEqual(payload[0]["correlation_id"], "corr-match")
 
+    def test_api_canonicalizes_client_submitted_event_identity(self) -> None:
+        event = AuditEventEnvelope(
+            id="evt_client_chosen",
+            organization_id="org_default",
+            environment_id="env_default",
+            event_type="external.notice",
+            source_component="pretend-internal-service",
+            actor_type="system",
+            actor_id="spoofed-actor",
+            created_at="2020-01-01T00:00:00+00:00",
+            payload_json={"message": "hello"},
+        )
+
+        created = self.client.post(
+            "/api/v1/audit/events",
+            json=event.model_dump(),
+            headers=self.headers,
+        )
+
+        self.assertEqual(created.status_code, 201, created.text)
+        payload = created.json()
+        self.assertNotEqual(payload["id"], "evt_client_chosen")
+        self.assertNotEqual(payload["created_at"], "2020-01-01T00:00:00+00:00")
+        self.assertEqual(payload["source_component"], "external-api")
+        self.assertEqual(payload["actor_type"], "user")
+        self.assertNotEqual(payload["actor_id"], "spoofed-actor")
+        self.assertTrue(payload["actor_id"])
+        self.assertEqual(payload["payload_json"]["_submitted_event_id"], "evt_client_chosen")
+        self.assertEqual(
+            payload["payload_json"]["_submitted_source_component"],
+            "pretend-internal-service",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -149,26 +149,36 @@ class DatabaseToolGatewayCircuitBreaker:
 
         now = float(self._clock())
         with self.database.transaction() as connection:
-            row = _circuit_breaker_row(connection, target_id)
-            if row is None:
-                failure_count = 1
-            else:
-                if float(row["opened_until_epoch"]) > now:
-                    return
-                failure_count = int(row["failure_count"]) + 1
-            opened_until = now + self.cooldown_seconds if failure_count >= self.failure_threshold else 0.0
             connection.execute(
                 """
                 INSERT INTO tool_gateway_circuit_breaker_state (
                     target_id, failure_count, opened_until_epoch, updated_at
                 )
-                VALUES (?, ?, ?, ?)
+                VALUES (?, 1, ?, ?)
                 ON CONFLICT (target_id) DO UPDATE SET
-                    failure_count = EXCLUDED.failure_count,
-                    opened_until_epoch = EXCLUDED.opened_until_epoch,
+                    failure_count = CASE
+                        WHEN tool_gateway_circuit_breaker_state.opened_until_epoch > ?
+                            THEN tool_gateway_circuit_breaker_state.failure_count
+                        ELSE tool_gateway_circuit_breaker_state.failure_count + 1
+                    END,
+                    opened_until_epoch = CASE
+                        WHEN tool_gateway_circuit_breaker_state.opened_until_epoch > ?
+                            THEN tool_gateway_circuit_breaker_state.opened_until_epoch
+                        WHEN tool_gateway_circuit_breaker_state.failure_count + 1 >= ?
+                            THEN ?
+                        ELSE 0
+                    END,
                     updated_at = EXCLUDED.updated_at
                 """,
-                (target_id, failure_count, opened_until, utc_now_iso()),
+                (
+                    target_id,
+                    now + self.cooldown_seconds if self.failure_threshold <= 1 else 0.0,
+                    utc_now_iso(),
+                    now,
+                    now,
+                    self.failure_threshold,
+                    now + self.cooldown_seconds,
+                ),
             )
 
 

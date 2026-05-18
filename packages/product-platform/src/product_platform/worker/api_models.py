@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
-from product_platform.db.postgres import Row
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from product_platform.db.postgres import Row
+from product_platform.worker.scheduler import validate_schedule_expression
 
 
 class JobCreateRequest(BaseModel):
@@ -58,6 +60,14 @@ class JobScheduleCreateRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
     next_run_at: str | None = None
+
+    @field_validator("cron_expression")
+    @classmethod
+    def _validate_cron_expression(cls, value: str) -> str:
+        try:
+            return validate_schedule_expression(value)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
 
 
 class JobSchedulePatchRequest(BaseModel):

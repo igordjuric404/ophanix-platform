@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
-from product_platform.db.postgres import Connection, Row
 from typing import Any
 
 from product_platform.db.ids import generate_id
+from product_platform.db.postgres import Connection, Row
 from product_platform.db.time import utc_now_iso
 
 
@@ -16,6 +16,10 @@ class JobStatus:
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELED = "canceled"
+
+
+class JobStateConflictError(RuntimeError):
+    """Raised when a job transition no longer matches the expected state."""
 
 
 class JobStateRepository:
@@ -70,30 +74,48 @@ class JobStateRepository:
             raise KeyError(f"Job not found: {job_id}")
         return row
 
-    def get_job_for_org(self, job_id: str, organization_id: str) -> Row | None:
+    def get_job_for_org(
+        self,
+        job_id: str,
+        organization_id: str,
+        *,
+        environment_id: str | None = None,
+    ) -> Row | None:
+        clauses = ["id = ?", "organization_id = ?"]
+        values: list[object] = [job_id, organization_id]
+        if environment_id is not None:
+            clauses.append("environment_id = ?")
+            values.append(environment_id)
         return self.connection.execute(
-            """
+            f"""
             SELECT * FROM background_jobs
-            WHERE id = ? AND organization_id = ?
+            WHERE {' AND '.join(clauses)}
             """,
-            (job_id, organization_id),
+            values,
         ).fetchone()
 
     def list_jobs(
         self,
         organization_id: str,
         *,
+        environment_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[Row]:
+        clauses = ["organization_id = ?"]
+        values: list[object] = [organization_id]
+        if environment_id is not None:
+            clauses.append("environment_id = ?")
+            values.append(environment_id)
+        values.extend([limit, offset])
         return self.connection.execute(
-            """
+            f"""
             SELECT * FROM background_jobs
-            WHERE organization_id = ?
+            WHERE {' AND '.join(clauses)}
             ORDER BY created_at DESC, id DESC
             LIMIT ? OFFSET ?
             """,
-            (organization_id, limit, offset),
+            values,
         ).fetchall()
 
     def next_queued_job(self, *, job_type: str | None = None) -> Row | None:
@@ -163,32 +185,46 @@ class JobStateRepository:
         self,
         job_id: str,
         *,
+        expected_attempt: int,
         logs: list[str],
         metrics: dict[str, Any],
         result: dict[str, Any],
     ) -> Row:
         now = utc_now_iso()
-        self.connection.execute(
+        row = self.connection.execute(
             """
             UPDATE background_jobs
             SET status = ?, finished_at = ?, error_message = NULL, updated_at = ?
-            WHERE id = ?
+            WHERE id = ? AND status = ? AND attempts = ?
+            RETURNING *
             """,
-            (JobStatus.SUCCEEDED, now, now, job_id),
-        )
+            (JobStatus.SUCCEEDED, now, now, job_id, JobStatus.RUNNING, expected_attempt),
+        ).fetchone()
+        if row is None:
+            raise JobStateConflictError("Job is no longer running for the expected attempt.")
         self._create_run(job_id, JobStatus.SUCCEEDED, logs=logs, metrics=metrics, result=result)
-        return self.get_job(job_id)
+        return row
 
-    def mark_failed(self, job_id: str, *, error_message: str, logs: list[str]) -> Row:
+    def mark_failed(
+        self,
+        job_id: str,
+        *,
+        expected_attempt: int,
+        error_message: str,
+        logs: list[str],
+    ) -> Row:
         now = utc_now_iso()
-        self.connection.execute(
+        row = self.connection.execute(
             """
             UPDATE background_jobs
             SET status = ?, finished_at = ?, error_message = ?, updated_at = ?
-            WHERE id = ?
+            WHERE id = ? AND status = ? AND attempts = ?
+            RETURNING *
             """,
-            (JobStatus.FAILED, now, error_message, now, job_id),
-        )
+            (JobStatus.FAILED, now, error_message, now, job_id, JobStatus.RUNNING, expected_attempt),
+        ).fetchone()
+        if row is None:
+            raise JobStateConflictError("Job is no longer running for the expected attempt.")
         self._create_run(
             job_id,
             JobStatus.FAILED,
@@ -196,31 +232,51 @@ class JobStateRepository:
             metrics={},
             result={"error": error_message},
         )
-        return self.get_job(job_id)
+        return row
 
-    def requeue_for_retry(self, job_id: str) -> Row:
+    def requeue_for_retry(self, job_id: str, *, expected_attempt: int) -> Row:
         now = utc_now_iso()
-        self.connection.execute(
+        row = self.connection.execute(
             """
             UPDATE background_jobs
             SET status = ?, started_at = NULL, finished_at = NULL, error_message = NULL, updated_at = ?
-            WHERE id = ? AND attempts < max_attempts
+            WHERE id = ? AND status = ? AND attempts = ? AND attempts < max_attempts
+            RETURNING *
             """,
-            (JobStatus.QUEUED, now, job_id),
-        )
-        return self.get_job(job_id)
+            (JobStatus.QUEUED, now, job_id, JobStatus.FAILED, expected_attempt),
+        ).fetchone()
+        if row is None:
+            raise JobStateConflictError("Job is not failed for the expected retry attempt.")
+        return row
 
-    def cancel(self, job_id: str) -> Row:
+    def cancel(
+        self,
+        job_id: str,
+        *,
+        organization_id: str | None = None,
+        environment_id: str | None = None,
+    ) -> Row:
         now = utc_now_iso()
-        self.connection.execute(
-            """
+        clauses = ["id = ?", "status = ?"]
+        values: list[object] = [job_id, JobStatus.QUEUED]
+        if organization_id is not None:
+            clauses.append("organization_id = ?")
+            values.append(organization_id)
+        if environment_id is not None:
+            clauses.append("environment_id = ?")
+            values.append(environment_id)
+        row = self.connection.execute(
+            f"""
             UPDATE background_jobs
             SET status = ?, finished_at = ?, updated_at = ?
-            WHERE id = ? AND status = ?
+            WHERE {' AND '.join(clauses)}
+            RETURNING *
             """,
-            (JobStatus.CANCELED, now, now, job_id, JobStatus.QUEUED),
-        )
-        return self.get_job(job_id)
+            (JobStatus.CANCELED, now, now, *values),
+        ).fetchone()
+        if row is None:
+            raise JobStateConflictError("Queued job could not be canceled.")
+        return row
 
     def runs_for_job(self, job_id: str) -> list[Row]:
         return self.connection.execute(
