@@ -1,4 +1,4 @@
-import { apiClient, queryString } from "./client";
+import { apiClient, queryString, type TenantContext } from "./client";
 
 export interface AuditEvent {
   id: string;
@@ -24,17 +24,24 @@ export interface AuditVerification {
   reason?: string | null;
 }
 
-export function getAuditEvent(eventId: string) {
-  return apiClient.request<AuditEvent>(`/audit/events/${encodeURIComponent(eventId)}`);
+export function getAuditEvent(eventId: string, tenantContext?: TenantContext) {
+  return apiClient.request<AuditEvent>(`/audit/events/${encodeURIComponent(eventId)}`, {
+    tenantContext
+  });
 }
 
-export function verifyAuditEvent(eventId: string) {
+export function verifyAuditEvent(eventId: string, tenantContext?: TenantContext) {
   return apiClient.request<AuditVerification>(
     `/audit/events/${encodeURIComponent(eventId)}/verify`,
-    { method: "POST" }
+    { method: "POST", tenantContext }
   );
 }
 
-export function listAuditEvents(params: Record<string, unknown> = {}) {
-  return apiClient.request<AuditEvent[]>(`/audit/events${queryString(params)}`);
+export function listAuditEvents(
+  params: Record<string, unknown> = {},
+  tenantContext?: TenantContext
+) {
+  return apiClient.request<AuditEvent[]>(`/audit/events${queryString(params)}`, {
+    tenantContext
+  });
 }

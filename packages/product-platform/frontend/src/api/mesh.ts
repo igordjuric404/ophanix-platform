@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { apiClient, queryString } from "./client";
+import { apiClient, queryString, type TenantContext } from "./client";
+import { scopedQueryKey, useTenantQueryScope } from "./queryScope";
 
 export type MeshParams = Record<string, string | number | boolean | null | undefined>;
 
@@ -110,33 +111,42 @@ export function createMeshMessage(body: Record<string, unknown>) {
   return apiClient.request<MeshMessage>("/mesh/messages", { method: "POST", body });
 }
 
-export function listMeshMessages(params: MeshParams = {}) {
-  return apiClient.request<MeshMessage[]>(`/mesh/messages${queryString(params)}`);
+export function listMeshMessages(params: MeshParams = {}, tenantContext?: TenantContext) {
+  return apiClient.request<MeshMessage[]>(`/mesh/messages${queryString(params)}`, {
+    tenantContext
+  });
 }
 
 export function createMeshHandoff(body: Record<string, unknown>) {
   return apiClient.request<MeshHandoff>("/mesh/handoffs", { method: "POST", body });
 }
 
-export function listMeshHandoffs(params: MeshParams = {}) {
-  return apiClient.request<MeshHandoff[]>(`/mesh/handoffs${queryString(params)}`);
+export function listMeshHandoffs(params: MeshParams = {}, tenantContext?: TenantContext) {
+  return apiClient.request<MeshHandoff[]>(`/mesh/handoffs${queryString(params)}`, {
+    tenantContext
+  });
 }
 
-export function getMeshTopology(params: MeshParams = {}) {
-  return apiClient.request<MeshTopology>(`/mesh/topology${queryString(params)}`);
+export function getMeshTopology(params: MeshParams = {}, tenantContext?: TenantContext) {
+  return apiClient.request<MeshTopology>(`/mesh/topology${queryString(params)}`, {
+    tenantContext
+  });
 }
 
 export function createProtocolBridge(body: Record<string, unknown>) {
   return apiClient.request<ProtocolBridge>("/mesh/protocol-bridges", { method: "POST", body });
 }
 
-export function listProtocolBridges(params: MeshParams = {}) {
-  return apiClient.request<ProtocolBridge[]>(`/mesh/protocol-bridges${queryString(params)}`);
+export function listProtocolBridges(params: MeshParams = {}, tenantContext?: TenantContext) {
+  return apiClient.request<ProtocolBridge[]>(`/mesh/protocol-bridges${queryString(params)}`, {
+    tenantContext
+  });
 }
 
-export function getProtocolBridge(bridgeId: string) {
+export function getProtocolBridge(bridgeId: string, tenantContext?: TenantContext) {
   return apiClient.request<ProtocolBridge>(
-    `/mesh/protocol-bridges/${encodeURIComponent(bridgeId)}`
+    `/mesh/protocol-bridges/${encodeURIComponent(bridgeId)}`,
+    { tenantContext }
   );
 }
 
@@ -162,48 +172,54 @@ export function runProtocolBridgeHealthCheck(bridgeId: string) {
 }
 
 export function useMeshMessages(params: MeshParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["mesh", "messages", params],
-    queryFn: () => listMeshMessages(params)
+    queryKey: scopedQueryKey(["mesh", "messages", params], scope),
+    queryFn: () => listMeshMessages(params, scope.context)
   });
 }
 
 export function useMeshHandoffs(params: MeshParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["mesh", "handoffs", params],
-    queryFn: () => listMeshHandoffs(params)
+    queryKey: scopedQueryKey(["mesh", "handoffs", params], scope),
+    queryFn: () => listMeshHandoffs(params, scope.context)
   });
 }
 
 export function useMeshTopology(params: MeshParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["mesh", "topology", params],
-    queryFn: () => getMeshTopology(params)
+    queryKey: scopedQueryKey(["mesh", "topology", params], scope),
+    queryFn: () => getMeshTopology(params, scope.context)
   });
 }
 
 export function useProtocolBridges(params: MeshParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["mesh", "protocol-bridges", params],
-    queryFn: () => listProtocolBridges(params)
+    queryKey: scopedQueryKey(["mesh", "protocol-bridges", params], scope),
+    queryFn: () => listProtocolBridges(params, scope.context)
   });
 }
 
 export function useProtocolBridgeDetail(bridgeId: string | null) {
+  const scope = useTenantQueryScope();
   return useQuery({
     enabled: Boolean(bridgeId),
-    queryKey: ["mesh", "protocol-bridges", bridgeId],
-    queryFn: () => getProtocolBridge(bridgeId as string)
+    queryKey: scopedQueryKey(["mesh", "protocol-bridges", bridgeId], scope),
+    queryFn: () => getProtocolBridge(bridgeId as string, scope.context)
   });
 }
 
 export function useMeshMutation() {
   const queryClient = useQueryClient();
+  const scope = useTenantQueryScope();
   return useMutation({
     mutationFn: async (task: () => Promise<unknown>) => task(),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["mesh"] });
-      void queryClient.invalidateQueries({ queryKey: ["agents"] });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["mesh"], scope) });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["agents"], scope) });
     }
   });
 }

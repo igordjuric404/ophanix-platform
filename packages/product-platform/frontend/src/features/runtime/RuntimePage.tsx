@@ -62,6 +62,11 @@ import {
   TableHeader,
   TableRow
 } from "../../components/ui/table";
+import {
+  ActionFeedback,
+  actionErrorMessage,
+  type ActionFeedbackMessage
+} from "../../components/shared/ActionFeedback";
 import { cn } from "../../lib/utils";
 
 const rings = ["0", "1", "2", "3"];
@@ -78,7 +83,7 @@ export function RuntimePage() {
   const [selectedSagaId, setSelectedSagaId] = useState<string | null>(null);
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
   const [sandboxDecision, setSandboxDecision] = useState<RuntimeSandboxDecision | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<ActionFeedbackMessage | null>(null);
 
   const sessionsQuery = useRuntimeSessions(sessionFilters);
   const decisionsQuery = useRuntimeRingDecisions(decisionFilters);
@@ -107,9 +112,9 @@ export function RuntimePage() {
   async function runTask(label: string, task: () => Promise<unknown>) {
     try {
       await mutation.mutateAsync(task);
-      setMessage(label);
+      setFeedback({ type: "success", message: label });
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Action failed");
+      setFeedback({ type: "error", message: actionErrorMessage(error) });
     }
   }
 
@@ -120,11 +125,7 @@ export function RuntimePage() {
         description="Runtime sessions, execution rings, saga orchestration, sandbox profiles, and kill switch controls."
       />
       <div className="space-y-6 p-6">
-        {message ? (
-          <div className="feedback-success">
-            {message}
-          </div>
-        ) : null}
+        <ActionFeedback feedback={feedback} />
         <RuntimeSummary
           decisions={decisions}
           events={killSwitchEvents}
@@ -194,7 +195,7 @@ export function RuntimePage() {
                 testRuntimeSandboxProfile(profileId, payload)
               )) as RuntimeSandboxDecision;
               setSandboxDecision(result);
-              setMessage("Sandbox profile tested");
+              setFeedback({ type: "success", message: "Sandbox profile tested" });
             }}
             profiles={profiles}
             selectedProfile={selectedProfile}

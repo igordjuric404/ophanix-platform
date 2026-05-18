@@ -130,7 +130,7 @@ export function AgentsPage() {
       />
       <div className="space-y-6 p-6">
         {message ? (
-          <div className="feedback-success">
+          <div className="feedback-success" role="status">
             {message}
           </div>
         ) : null}

@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { apiClient, queryString } from "./client";
+import { apiClient, queryString, type TenantContext } from "./client";
+import { scopedQueryKey, useTenantQueryScope } from "./queryScope";
 
 export type MarketplaceParams = Record<string, string | number | boolean | null | undefined>;
 
@@ -106,13 +107,19 @@ export function importMarketplacePlugin(body: Record<string, unknown>) {
   });
 }
 
-export function listMarketplacePlugins(params: MarketplaceParams = {}) {
-  return apiClient.request<MarketplacePlugin[]>(`/marketplace/plugins${queryString(params)}`);
+export function listMarketplacePlugins(
+  params: MarketplaceParams = {},
+  tenantContext?: TenantContext
+) {
+  return apiClient.request<MarketplacePlugin[]>(`/marketplace/plugins${queryString(params)}`, {
+    tenantContext
+  });
 }
 
-export function getMarketplacePlugin(pluginId: string) {
+export function getMarketplacePlugin(pluginId: string, tenantContext?: TenantContext) {
   return apiClient.request<MarketplacePlugin>(
-    `/marketplace/plugins/${encodeURIComponent(pluginId)}`
+    `/marketplace/plugins/${encodeURIComponent(pluginId)}`,
+    { tenantContext }
   );
 }
 
@@ -130,8 +137,13 @@ export function submitMarketplacePluginReview(versionId: string, body: Record<st
   );
 }
 
-export function listMarketplaceReviews(params: MarketplaceParams = {}) {
-  return apiClient.request<PluginReview[]>(`/marketplace/reviews${queryString(params)}`);
+export function listMarketplaceReviews(
+  params: MarketplaceParams = {},
+  tenantContext?: TenantContext
+) {
+  return apiClient.request<PluginReview[]>(`/marketplace/reviews${queryString(params)}`, {
+    tenantContext
+  });
 }
 
 export function approveMarketplaceReview(reviewId: string, body: Record<string, unknown>) {
@@ -155,8 +167,10 @@ export function createMarketplaceSigningKey(body: Record<string, unknown>) {
   });
 }
 
-export function listMarketplaceSigningKeys() {
-  return apiClient.request<PluginSigningKey[]>("/marketplace/signing-keys");
+export function listMarketplaceSigningKeys(tenantContext?: TenantContext) {
+  return apiClient.request<PluginSigningKey[]>("/marketplace/signing-keys", {
+    tenantContext
+  });
 }
 
 export function revokeMarketplaceSigningKey(keyId: string) {
@@ -187,9 +201,13 @@ export function createMarketplaceInstallation(body: Record<string, unknown>) {
   });
 }
 
-export function listMarketplaceInstallations(params: MarketplaceParams = {}) {
+export function listMarketplaceInstallations(
+  params: MarketplaceParams = {},
+  tenantContext?: TenantContext
+) {
   return apiClient.request<PluginInstallation[]>(
-    `/marketplace/installations${queryString(params)}`
+    `/marketplace/installations${queryString(params)}`,
+    { tenantContext }
   );
 }
 
@@ -201,49 +219,55 @@ export function uninstallMarketplaceInstallation(installationId: string) {
 }
 
 export function useMarketplacePlugins(params: MarketplaceParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["marketplace", "plugins", params],
-    queryFn: () => listMarketplacePlugins(params)
+    queryKey: scopedQueryKey(["marketplace", "plugins", params], scope),
+    queryFn: () => listMarketplacePlugins(params, scope.context)
   });
 }
 
 export function useMarketplacePlugin(pluginId: string | null) {
+  const scope = useTenantQueryScope();
   return useQuery({
     enabled: Boolean(pluginId),
-    queryKey: ["marketplace", "plugins", pluginId],
-    queryFn: () => getMarketplacePlugin(pluginId as string)
+    queryKey: scopedQueryKey(["marketplace", "plugins", pluginId], scope),
+    queryFn: () => getMarketplacePlugin(pluginId as string, scope.context)
   });
 }
 
 export function useMarketplaceInstallations(params: MarketplaceParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["marketplace", "installations", params],
-    queryFn: () => listMarketplaceInstallations(params)
+    queryKey: scopedQueryKey(["marketplace", "installations", params], scope),
+    queryFn: () => listMarketplaceInstallations(params, scope.context)
   });
 }
 
 export function useMarketplaceReviews(params: MarketplaceParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["marketplace", "reviews", params],
-    queryFn: () => listMarketplaceReviews(params)
+    queryKey: scopedQueryKey(["marketplace", "reviews", params], scope),
+    queryFn: () => listMarketplaceReviews(params, scope.context)
   });
 }
 
 export function useMarketplaceSigningKeys() {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["marketplace", "signing-keys"],
-    queryFn: listMarketplaceSigningKeys
+    queryKey: scopedQueryKey(["marketplace", "signing-keys"], scope),
+    queryFn: () => listMarketplaceSigningKeys(scope.context)
   });
 }
 
 export function useMarketplaceMutation() {
   const queryClient = useQueryClient();
+  const scope = useTenantQueryScope();
   return useMutation({
     mutationFn: async (task: () => Promise<unknown>) => task(),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["marketplace"] });
-      void queryClient.invalidateQueries({ queryKey: ["artifacts"] });
-      void queryClient.invalidateQueries({ queryKey: ["audit"] });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["marketplace"], scope) });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["artifacts"], scope) });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["audit"], scope) });
     }
   });
 }

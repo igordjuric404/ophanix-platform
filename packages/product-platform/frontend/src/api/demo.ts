@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { apiClient, queryString } from "./client";
+import { apiClient, queryString, type TenantContext } from "./client";
+import { scopedQueryKey, useTenantQueryScope } from "./queryScope";
 
 export type DemoParams = Record<string, string | number | boolean | null | undefined>;
 
@@ -132,13 +133,16 @@ export interface DemoBaselineStatus {
   missing_items: string[];
 }
 
-export function listDemoScenarios(params: DemoParams = {}) {
-  return apiClient.request<DemoScenarioSummary[]>(`/demo/scenarios${queryString(params)}`);
+export function listDemoScenarios(params: DemoParams = {}, tenantContext?: TenantContext) {
+  return apiClient.request<DemoScenarioSummary[]>(`/demo/scenarios${queryString(params)}`, {
+    tenantContext
+  });
 }
 
-export function getDemoScenario(scenarioId: string) {
+export function getDemoScenario(scenarioId: string, tenantContext?: TenantContext) {
   return apiClient.request<DemoScenarioDetail>(
-    `/demo/scenarios/${encodeURIComponent(scenarioId)}`
+    `/demo/scenarios/${encodeURIComponent(scenarioId)}`,
+    { tenantContext }
   );
 }
 
@@ -148,8 +152,10 @@ export function startDemoRun(scenarioId: string) {
   });
 }
 
-export function getDemoRun(runId: string) {
-  return apiClient.request<DemoRun>(`/demo/runs/${encodeURIComponent(runId)}`);
+export function getDemoRun(runId: string, tenantContext?: TenantContext) {
+  return apiClient.request<DemoRun>(`/demo/runs/${encodeURIComponent(runId)}`, {
+    tenantContext
+  });
 }
 
 export function continueDemoRun(runId: string) {
@@ -168,70 +174,81 @@ export function resetDemoEnvironment(body: Record<string, unknown>) {
   return apiClient.request<DemoResetRun>("/demo/reset", { method: "POST", body });
 }
 
-export function listDemoResetRuns(params: DemoParams = {}) {
-  return apiClient.request<DemoResetRun[]>(`/demo/reset-runs${queryString(params)}`);
+export function listDemoResetRuns(params: DemoParams = {}, tenantContext?: TenantContext) {
+  return apiClient.request<DemoResetRun[]>(`/demo/reset-runs${queryString(params)}`, {
+    tenantContext
+  });
 }
 
-export function getDemoResetRun(resetId: string) {
-  return apiClient.request<DemoResetRun>(`/demo/reset-runs/${encodeURIComponent(resetId)}`);
+export function getDemoResetRun(resetId: string, tenantContext?: TenantContext) {
+  return apiClient.request<DemoResetRun>(`/demo/reset-runs/${encodeURIComponent(resetId)}`, {
+    tenantContext
+  });
 }
 
-export function getDemoBaselineStatus() {
-  return apiClient.request<DemoBaselineStatus>("/demo/baseline-status");
+export function getDemoBaselineStatus(tenantContext?: TenantContext) {
+  return apiClient.request<DemoBaselineStatus>("/demo/baseline-status", { tenantContext });
 }
 
 export function useDemoScenarios(params: DemoParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["demo", "scenarios", params],
-    queryFn: () => listDemoScenarios(params)
+    queryKey: scopedQueryKey(["demo", "scenarios", params], scope),
+    queryFn: () => listDemoScenarios(params, scope.context)
   });
 }
 
 export function useDemoScenario(scenarioId: string | null) {
+  const scope = useTenantQueryScope();
   return useQuery({
     enabled: Boolean(scenarioId),
-    queryKey: ["demo", "scenarios", scenarioId],
-    queryFn: () => getDemoScenario(scenarioId as string)
+    queryKey: scopedQueryKey(["demo", "scenarios", scenarioId], scope),
+    queryFn: () => getDemoScenario(scenarioId as string, scope.context)
   });
 }
 
 export function useDemoRun(runId: string | null) {
+  const scope = useTenantQueryScope();
   return useQuery({
     enabled: Boolean(runId),
-    queryKey: ["demo", "runs", runId],
-    queryFn: () => getDemoRun(runId as string)
+    queryKey: scopedQueryKey(["demo", "runs", runId], scope),
+    queryFn: () => getDemoRun(runId as string, scope.context)
   });
 }
 
 export function useDemoResetRuns(params: DemoParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["demo", "reset-runs", params],
-    queryFn: () => listDemoResetRuns(params)
+    queryKey: scopedQueryKey(["demo", "reset-runs", params], scope),
+    queryFn: () => listDemoResetRuns(params, scope.context)
   });
 }
 
 export function useDemoResetRun(resetId: string | null) {
+  const scope = useTenantQueryScope();
   return useQuery({
     enabled: Boolean(resetId),
-    queryKey: ["demo", "reset-runs", resetId],
-    queryFn: () => getDemoResetRun(resetId as string)
+    queryKey: scopedQueryKey(["demo", "reset-runs", resetId], scope),
+    queryFn: () => getDemoResetRun(resetId as string, scope.context)
   });
 }
 
 export function useDemoBaselineStatus() {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["demo", "baseline-status"],
-    queryFn: getDemoBaselineStatus
+    queryKey: scopedQueryKey(["demo", "baseline-status"], scope),
+    queryFn: () => getDemoBaselineStatus(scope.context)
   });
 }
 
 export function useDemoMutation() {
   const queryClient = useQueryClient();
+  const scope = useTenantQueryScope();
   return useMutation({
     mutationFn: async (task: () => Promise<unknown>) => task(),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["demo"] });
-      void queryClient.invalidateQueries({ queryKey: ["audit"] });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["demo"], scope) });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["audit"], scope) });
       void queryClient.invalidateQueries({ queryKey: ["system"] });
     }
   });

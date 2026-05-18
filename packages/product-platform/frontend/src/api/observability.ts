@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { apiClient, queryString } from "./client";
+import { apiClient, queryString, type TenantContext } from "./client";
+import { scopedQueryKey, useTenantQueryScope } from "./queryScope";
 
 export type ObservabilityParams = Record<string, string | number | boolean | null | undefined>;
 
@@ -148,8 +149,13 @@ export function createObservabilitySlo(body: Record<string, unknown>) {
   return apiClient.request<SloObjective>("/observability/slo", { method: "POST", body });
 }
 
-export function listObservabilitySlos(params: ObservabilityParams = {}) {
-  return apiClient.request<SloObjective[]>(`/observability/slo${queryString(params)}`);
+export function listObservabilitySlos(
+  params: ObservabilityParams = {},
+  tenantContext?: TenantContext
+) {
+  return apiClient.request<SloObjective[]>(`/observability/slo${queryString(params)}`, {
+    tenantContext
+  });
 }
 
 export function createObservabilitySloMeasurement(sloId: string, body: Record<string, unknown>) {
@@ -173,8 +179,8 @@ export function createObservabilityCostEvent(body: Record<string, unknown>) {
   return apiClient.request<CostEvent>("/observability/cost-events", { method: "POST", body });
 }
 
-export function getObservabilityCosts() {
-  return apiClient.request<CostDashboard>("/observability/costs");
+export function getObservabilityCosts(tenantContext?: TenantContext) {
+  return apiClient.request<CostDashboard>("/observability/costs", { tenantContext });
 }
 
 export function createObservabilityIncident(body: Record<string, unknown>) {
@@ -188,8 +194,13 @@ export function createObservabilityIncidentFromEvent(body: Record<string, unknow
   });
 }
 
-export function listObservabilityIncidents(params: ObservabilityParams = {}) {
-  return apiClient.request<Incident[]>(`/observability/incidents${queryString(params)}`);
+export function listObservabilityIncidents(
+  params: ObservabilityParams = {},
+  tenantContext?: TenantContext
+) {
+  return apiClient.request<Incident[]>(`/observability/incidents${queryString(params)}`, {
+    tenantContext
+  });
 }
 
 export function acknowledgeObservabilityIncident(incidentId: string) {
@@ -213,9 +224,13 @@ export function createObservabilityChaosExperiment(body: Record<string, unknown>
   });
 }
 
-export function listObservabilityChaosExperiments(params: ObservabilityParams = {}) {
+export function listObservabilityChaosExperiments(
+  params: ObservabilityParams = {},
+  tenantContext?: TenantContext
+) {
   return apiClient.request<ChaosExperiment[]>(
-    `/observability/chaos/experiments${queryString(params)}`
+    `/observability/chaos/experiments${queryString(params)}`,
+    { tenantContext }
   );
 }
 
@@ -240,8 +255,13 @@ export function createObservabilityRollout(body: Record<string, unknown>) {
   return apiClient.request<Rollout>("/observability/rollouts", { method: "POST", body });
 }
 
-export function listObservabilityRollouts(params: ObservabilityParams = {}) {
-  return apiClient.request<Rollout[]>(`/observability/rollouts${queryString(params)}`);
+export function listObservabilityRollouts(
+  params: ObservabilityParams = {},
+  tenantContext?: TenantContext
+) {
+  return apiClient.request<Rollout[]>(`/observability/rollouts${queryString(params)}`, {
+    tenantContext
+  });
 }
 
 export function advanceObservabilityRollout(rolloutId: string, body: Record<string, unknown>) {
@@ -259,47 +279,53 @@ export function rollbackObservabilityRollout(rolloutId: string, body: Record<str
 }
 
 export function useObservabilitySlos(params: ObservabilityParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["observability", "slos", params],
-    queryFn: () => listObservabilitySlos(params)
+    queryKey: scopedQueryKey(["observability", "slos", params], scope),
+    queryFn: () => listObservabilitySlos(params, scope.context)
   });
 }
 
 export function useObservabilityCosts() {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["observability", "costs"],
-    queryFn: getObservabilityCosts
+    queryKey: scopedQueryKey(["observability", "costs"], scope),
+    queryFn: () => getObservabilityCosts(scope.context)
   });
 }
 
 export function useObservabilityIncidents(params: ObservabilityParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["observability", "incidents", params],
-    queryFn: () => listObservabilityIncidents(params)
+    queryKey: scopedQueryKey(["observability", "incidents", params], scope),
+    queryFn: () => listObservabilityIncidents(params, scope.context)
   });
 }
 
 export function useObservabilityChaosExperiments(params: ObservabilityParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["observability", "chaos-experiments", params],
-    queryFn: () => listObservabilityChaosExperiments(params)
+    queryKey: scopedQueryKey(["observability", "chaos-experiments", params], scope),
+    queryFn: () => listObservabilityChaosExperiments(params, scope.context)
   });
 }
 
 export function useObservabilityRollouts(params: ObservabilityParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["observability", "rollouts", params],
-    queryFn: () => listObservabilityRollouts(params)
+    queryKey: scopedQueryKey(["observability", "rollouts", params], scope),
+    queryFn: () => listObservabilityRollouts(params, scope.context)
   });
 }
 
 export function useObservabilityMutation() {
   const queryClient = useQueryClient();
+  const scope = useTenantQueryScope();
   return useMutation({
     mutationFn: async (task: () => Promise<unknown>) => task(),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["observability"] });
-      void queryClient.invalidateQueries({ queryKey: ["audit"] });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["observability"], scope) });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["audit"], scope) });
     }
   });
 }

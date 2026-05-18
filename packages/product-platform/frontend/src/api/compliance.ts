@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import type { AuditEvent, AuditVerification } from "./audit";
-import { apiClient, queryString } from "./client";
+import { apiClient, queryString, type TenantContext } from "./client";
+import { scopedQueryKey, useTenantQueryScope } from "./queryScope";
 
 export interface AuditExport {
   id?: string;
@@ -135,8 +136,8 @@ export function verifyAuditRange() {
   return apiClient.request<AuditVerification>("/audit/verify-range", { method: "POST" });
 }
 
-export function listComplianceFrameworks() {
-  return apiClient.request<ComplianceFramework[]>("/compliance/frameworks");
+export function listComplianceFrameworks(tenantContext?: TenantContext) {
+  return apiClient.request<ComplianceFramework[]>("/compliance/frameworks", { tenantContext });
 }
 
 export function createComplianceFramework(body: Record<string, unknown>) {
@@ -146,8 +147,10 @@ export function createComplianceFramework(body: Record<string, unknown>) {
   });
 }
 
-export function listComplianceControls(params: ComplianceParams = {}) {
-  return apiClient.request<ComplianceControl[]>(`/compliance/controls${queryString(params)}`);
+export function listComplianceControls(params: ComplianceParams = {}, tenantContext?: TenantContext) {
+  return apiClient.request<ComplianceControl[]>(`/compliance/controls${queryString(params)}`, {
+    tenantContext
+  });
 }
 
 export function createComplianceControlMapping(body: Record<string, unknown>) {
@@ -157,8 +160,10 @@ export function createComplianceControlMapping(body: Record<string, unknown>) {
   });
 }
 
-export function listComplianceEvidence(params: ComplianceParams = {}) {
-  return apiClient.request<ComplianceEvidence[]>(`/compliance/evidence${queryString(params)}`);
+export function listComplianceEvidence(params: ComplianceParams = {}, tenantContext?: TenantContext) {
+  return apiClient.request<ComplianceEvidence[]>(`/compliance/evidence${queryString(params)}`, {
+    tenantContext
+  });
 }
 
 export function recomputeComplianceEvidence() {
@@ -167,9 +172,13 @@ export function recomputeComplianceEvidence() {
   });
 }
 
-export function listComplianceViolations(params: ComplianceParams = {}) {
+export function listComplianceViolations(
+  params: ComplianceParams = {},
+  tenantContext?: TenantContext
+) {
   return apiClient.request<ComplianceViolation[]>(
-    `/compliance/violations${queryString(params)}`
+    `/compliance/violations${queryString(params)}`,
+    { tenantContext }
   );
 }
 
@@ -184,13 +193,16 @@ export function createComplianceReport(body: Record<string, unknown>) {
   return apiClient.request<ComplianceReport>("/compliance/reports", { method: "POST", body });
 }
 
-export function listComplianceReports(params: ComplianceParams = {}) {
-  return apiClient.request<ComplianceReport[]>(`/compliance/reports${queryString(params)}`);
+export function listComplianceReports(params: ComplianceParams = {}, tenantContext?: TenantContext) {
+  return apiClient.request<ComplianceReport[]>(`/compliance/reports${queryString(params)}`, {
+    tenantContext
+  });
 }
 
-export function getComplianceReport(reportId: string) {
+export function getComplianceReport(reportId: string, tenantContext?: TenantContext) {
   return apiClient.request<ComplianceReport>(
-    `/compliance/reports/${encodeURIComponent(reportId)}`
+    `/compliance/reports/${encodeURIComponent(reportId)}`,
+    { tenantContext }
   );
 }
 
@@ -214,70 +226,78 @@ export function attestComplianceReport(reportId: string, body: Record<string, un
   );
 }
 
-export function listArtifacts(params: ComplianceParams = {}) {
-  return apiClient.request<Artifact[]>(`/artifacts${queryString(params)}`);
+export function listArtifacts(params: ComplianceParams = {}, tenantContext?: TenantContext) {
+  return apiClient.request<Artifact[]>(`/artifacts${queryString(params)}`, { tenantContext });
 }
 
 export function useComplianceAuditEvents(
   listAuditEvents: (params?: ComplianceParams) => Promise<AuditEvent[]>,
   params: ComplianceParams = {}
 ) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["audit", "events", params],
+    queryKey: scopedQueryKey(["audit", "events", params], scope),
     queryFn: () => listAuditEvents(params)
   });
 }
 
 export function useComplianceFrameworks() {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["compliance", "frameworks"],
-    queryFn: listComplianceFrameworks
+    queryKey: scopedQueryKey(["compliance", "frameworks"], scope),
+    queryFn: () => listComplianceFrameworks(scope.context)
   });
 }
 
 export function useComplianceControls(params: ComplianceParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["compliance", "controls", params],
-    queryFn: () => listComplianceControls(params)
+    queryKey: scopedQueryKey(["compliance", "controls", params], scope),
+    queryFn: () => listComplianceControls(params, scope.context)
   });
 }
 
 export function useComplianceEvidence(params: ComplianceParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["compliance", "evidence", params],
-    queryFn: () => listComplianceEvidence(params)
+    queryKey: scopedQueryKey(["compliance", "evidence", params], scope),
+    queryFn: () => listComplianceEvidence(params, scope.context)
   });
 }
 
 export function useComplianceViolations(params: ComplianceParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["compliance", "violations", params],
-    queryFn: () => listComplianceViolations(params)
+    queryKey: scopedQueryKey(["compliance", "violations", params], scope),
+    queryFn: () => listComplianceViolations(params, scope.context)
   });
 }
 
 export function useComplianceReports(params: ComplianceParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["compliance", "reports", params],
-    queryFn: () => listComplianceReports(params)
+    queryKey: scopedQueryKey(["compliance", "reports", params], scope),
+    queryFn: () => listComplianceReports(params, scope.context)
   });
 }
 
 export function useComplianceArtifacts(params: ComplianceParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["artifacts", params],
-    queryFn: () => listArtifacts(params)
+    queryKey: scopedQueryKey(["artifacts", params], scope),
+    queryFn: () => listArtifacts(params, scope.context)
   });
 }
 
 export function useComplianceMutation() {
   const queryClient = useQueryClient();
+  const scope = useTenantQueryScope();
   return useMutation({
     mutationFn: async (task: () => Promise<unknown>) => task(),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["compliance"] });
-      void queryClient.invalidateQueries({ queryKey: ["audit"] });
-      void queryClient.invalidateQueries({ queryKey: ["artifacts"] });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["compliance"], scope) });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["audit"], scope) });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["artifacts"], scope) });
     }
   });
 }

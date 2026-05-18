@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { apiClient, queryString } from "./client";
+import { apiClient, queryString, type TenantContext } from "./client";
+import { scopedQueryKey, useTenantQueryScope } from "./queryScope";
 
 export type McpParams = Record<string, string | number | boolean | null | undefined>;
 
@@ -139,8 +140,10 @@ export function createMcpServer(body: Record<string, unknown>) {
   return apiClient.request<McpServer>("/mcp/servers", { method: "POST", body });
 }
 
-export function listMcpServers(params: McpParams = {}) {
-  return apiClient.request<McpServer[]>(`/mcp/servers${queryString(params)}`);
+export function listMcpServers(params: McpParams = {}, tenantContext?: TenantContext) {
+  return apiClient.request<McpServer[]>(`/mcp/servers${queryString(params)}`, {
+    tenantContext
+  });
 }
 
 export function getMcpServer(serverId: string) {
@@ -161,12 +164,14 @@ export function discoverMcpServerTools(serverId: string) {
   );
 }
 
-export function listMcpTools(params: McpParams = {}) {
-  return apiClient.request<McpTool[]>(`/mcp/tools${queryString(params)}`);
+export function listMcpTools(params: McpParams = {}, tenantContext?: TenantContext) {
+  return apiClient.request<McpTool[]>(`/mcp/tools${queryString(params)}`, { tenantContext });
 }
 
-export function getMcpTool(toolId: string) {
-  return apiClient.request<McpTool>(`/mcp/tools/${encodeURIComponent(toolId)}`);
+export function getMcpTool(toolId: string, tenantContext?: TenantContext) {
+  return apiClient.request<McpTool>(`/mcp/tools/${encodeURIComponent(toolId)}`, {
+    tenantContext
+  });
 }
 
 export function runMcpSecurityScan(serverId: string) {
@@ -175,16 +180,20 @@ export function runMcpSecurityScan(serverId: string) {
   });
 }
 
-export function listMcpScans(params: McpParams = {}) {
-  return apiClient.request<McpScanRun[]>(`/mcp/scans${queryString(params)}`);
+export function listMcpScans(params: McpParams = {}, tenantContext?: TenantContext) {
+  return apiClient.request<McpScanRun[]>(`/mcp/scans${queryString(params)}`, { tenantContext });
 }
 
-export function getMcpScan(scanId: string) {
-  return apiClient.request<McpScanRun>(`/mcp/scans/${encodeURIComponent(scanId)}`);
+export function getMcpScan(scanId: string, tenantContext?: TenantContext) {
+  return apiClient.request<McpScanRun>(`/mcp/scans/${encodeURIComponent(scanId)}`, {
+    tenantContext
+  });
 }
 
-export function listMcpFindings(params: McpParams = {}) {
-  return apiClient.request<McpFinding[]>(`/mcp/findings${queryString(params)}`);
+export function listMcpFindings(params: McpParams = {}, tenantContext?: TenantContext) {
+  return apiClient.request<McpFinding[]>(`/mcp/findings${queryString(params)}`, {
+    tenantContext
+  });
 }
 
 export function acceptMcpFindingRisk(findingId: string, body: Record<string, unknown>) {
@@ -212,12 +221,16 @@ export function createMcpProxyCall(body: Record<string, unknown>) {
   return apiClient.request<McpToolCall>("/mcp/proxy/call", { method: "POST", body });
 }
 
-export function listMcpTraffic(params: McpParams = {}) {
-  return apiClient.request<McpToolCall[]>(`/mcp/traffic${queryString(params)}`);
+export function listMcpTraffic(params: McpParams = {}, tenantContext?: TenantContext) {
+  return apiClient.request<McpToolCall[]>(`/mcp/traffic${queryString(params)}`, {
+    tenantContext
+  });
 }
 
-export function listMcpApprovals(params: McpParams = {}) {
-  return apiClient.request<McpApproval[]>(`/mcp/approvals${queryString(params)}`);
+export function listMcpApprovals(params: McpParams = {}, tenantContext?: TenantContext) {
+  return apiClient.request<McpApproval[]>(`/mcp/approvals${queryString(params)}`, {
+    tenantContext
+  });
 }
 
 export function approveMcpApproval(approvalId: string, body: Record<string, unknown>) {
@@ -234,8 +247,10 @@ export function denyMcpApproval(approvalId: string, body: Record<string, unknown
   });
 }
 
-export function listMcpRateLimits(params: McpParams = {}) {
-  return apiClient.request<McpRateLimit[]>(`/mcp/rate-limits${queryString(params)}`);
+export function listMcpRateLimits(params: McpParams = {}, tenantContext?: TenantContext) {
+  return apiClient.request<McpRateLimit[]>(`/mcp/rate-limits${queryString(params)}`, {
+    tenantContext
+  });
 }
 
 export function createMcpRateLimit(body: Record<string, unknown>) {
@@ -243,78 +258,88 @@ export function createMcpRateLimit(body: Record<string, unknown>) {
 }
 
 export function useMcpServers(params: McpParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["mcp", "servers", params],
-    queryFn: () => listMcpServers(params)
+    queryKey: scopedQueryKey(["mcp", "servers", params], scope),
+    queryFn: () => listMcpServers(params, scope.context)
   });
 }
 
 export function useMcpTools(params: McpParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["mcp", "tools", params],
-    queryFn: () => listMcpTools(params)
+    queryKey: scopedQueryKey(["mcp", "tools", params], scope),
+    queryFn: () => listMcpTools(params, scope.context)
   });
 }
 
 export function useMcpToolDetail(toolId: string | null) {
+  const scope = useTenantQueryScope();
   return useQuery({
     enabled: Boolean(toolId),
-    queryKey: ["mcp", "tools", toolId],
-    queryFn: () => getMcpTool(toolId as string)
+    queryKey: scopedQueryKey(["mcp", "tools", toolId], scope),
+    queryFn: () => getMcpTool(toolId as string, scope.context)
   });
 }
 
 export function useMcpScans(params: McpParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["mcp", "scans", params],
-    queryFn: () => listMcpScans(params)
+    queryKey: scopedQueryKey(["mcp", "scans", params], scope),
+    queryFn: () => listMcpScans(params, scope.context)
   });
 }
 
 export function useMcpScanDetail(scanId: string | null) {
+  const scope = useTenantQueryScope();
   return useQuery({
     enabled: Boolean(scanId),
-    queryKey: ["mcp", "scans", scanId],
-    queryFn: () => getMcpScan(scanId as string)
+    queryKey: scopedQueryKey(["mcp", "scans", scanId], scope),
+    queryFn: () => getMcpScan(scanId as string, scope.context)
   });
 }
 
 export function useMcpFindings(params: McpParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["mcp", "findings", params],
-    queryFn: () => listMcpFindings(params)
+    queryKey: scopedQueryKey(["mcp", "findings", params], scope),
+    queryFn: () => listMcpFindings(params, scope.context)
   });
 }
 
 export function useMcpTraffic(params: McpParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["mcp", "traffic", params],
-    queryFn: () => listMcpTraffic(params)
+    queryKey: scopedQueryKey(["mcp", "traffic", params], scope),
+    queryFn: () => listMcpTraffic(params, scope.context)
   });
 }
 
 export function useMcpApprovals(params: McpParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["mcp", "approvals", params],
-    queryFn: () => listMcpApprovals(params)
+    queryKey: scopedQueryKey(["mcp", "approvals", params], scope),
+    queryFn: () => listMcpApprovals(params, scope.context)
   });
 }
 
 export function useMcpRateLimits(params: McpParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["mcp", "rate-limits", params],
-    queryFn: () => listMcpRateLimits(params)
+    queryKey: scopedQueryKey(["mcp", "rate-limits", params], scope),
+    queryFn: () => listMcpRateLimits(params, scope.context)
   });
 }
 
 export function useMcpMutation() {
   const queryClient = useQueryClient();
+  const scope = useTenantQueryScope();
   return useMutation({
     mutationFn: async (task: () => Promise<unknown>) => task(),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["mcp"] });
-      void queryClient.invalidateQueries({ queryKey: ["policies"] });
-      void queryClient.invalidateQueries({ queryKey: ["trust"] });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["mcp"], scope) });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["policies"], scope) });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["trust"], scope) });
     }
   });
 }

@@ -23,6 +23,11 @@ import {
   type ProviderCredential
 } from "../../api/integrations";
 import { PageHeader } from "../../components/layout/PageHeader";
+import {
+  ActionFeedback,
+  actionErrorMessage,
+  type ActionFeedbackMessage
+} from "../../components/shared/ActionFeedback";
 import { EmptyState } from "../../components/shared/EmptyState";
 import { StatusBadge } from "../../components/shared/StatusBadge";
 import { Badge } from "../../components/ui/badge";
@@ -48,7 +53,7 @@ export function IntegrationsPage() {
   const [frameworkFilters, setFrameworkFilters] = useState<IntegrationParams>({});
   const [healthFilters, setHealthFilters] = useState<IntegrationParams>({});
   const [selectedInstanceId, setSelectedInstanceId] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<ActionFeedbackMessage | null>(null);
 
   const frameworksQuery = useIntegrationFrameworks(frameworkFilters);
   const instancesQuery = useFrameworkInstances();
@@ -69,9 +74,9 @@ export function IntegrationsPage() {
   async function runTask(label: string, task: () => Promise<unknown>) {
     try {
       await mutation.mutateAsync(task);
-      setMessage(label);
+      setFeedback({ type: "success", message: label });
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Action failed");
+      setFeedback({ type: "error", message: actionErrorMessage(error) });
     }
   }
 
@@ -82,11 +87,7 @@ export function IntegrationsPage() {
         description="Framework connectors, provider credentials, linked agents, and health checks."
       />
       <div className="space-y-6 p-6">
-        {message ? (
-          <div className="feedback-success">
-            {message}
-          </div>
-        ) : null}
+        <ActionFeedback feedback={feedback} />
         <IntegrationsSummary
           credentials={credentials}
           frameworks={frameworks}

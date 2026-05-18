@@ -54,6 +54,11 @@ import {
   TableHeader,
   TableRow
 } from "../../components/ui/table";
+import {
+  ActionFeedback,
+  actionErrorMessage,
+  type ActionFeedbackMessage
+} from "../../components/shared/ActionFeedback";
 
 const targetTypes = ["agent", "mcp-server", "runtime", "environment"];
 const incidentSeverities = ["info", "warning", "critical"];
@@ -66,7 +71,7 @@ export function ObservabilityPage() {
   const [chaosFilters, setChaosFilters] = useState<ObservabilityParams>({});
   const [rolloutFilters, setRolloutFilters] = useState<ObservabilityParams>({});
   const [chaosRuns, setChaosRuns] = useState<ChaosRun[]>([]);
-  const [message, setMessage] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<ActionFeedbackMessage | null>(null);
 
   const slosQuery = useObservabilitySlos();
   const costsQuery = useObservabilityCosts();
@@ -84,9 +89,9 @@ export function ObservabilityPage() {
   async function runTask(label: string, task: () => Promise<unknown>) {
     try {
       await mutation.mutateAsync(task);
-      setMessage(label);
+      setFeedback({ type: "success", message: label });
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Action failed");
+      setFeedback({ type: "error", message: actionErrorMessage(error) });
     }
   }
 
@@ -94,9 +99,9 @@ export function ObservabilityPage() {
     try {
       const result = (await mutation.mutateAsync(task)) as T;
       onResult(result);
-      setMessage(label);
+      setFeedback({ type: "success", message: label });
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Action failed");
+      setFeedback({ type: "error", message: actionErrorMessage(error) });
     }
   }
 
@@ -107,11 +112,7 @@ export function ObservabilityPage() {
         description="SLO, cost, incident, chaos, and rollout operations for governed agents."
       />
       <div className="space-y-6 p-6">
-        {message ? (
-          <div className="feedback-success">
-            {message}
-          </div>
-        ) : null}
+        <ActionFeedback feedback={feedback} />
         <ObservabilitySummary costs={costs} incidents={incidents} rollouts={rollouts} slos={slos} />
         <div className="grid gap-6 2xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
           <SloPanel

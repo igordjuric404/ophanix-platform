@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { apiClient, queryString } from "./client";
+import { apiClient, queryString, type TenantContext } from "./client";
+import { scopedQueryKey, useTenantQueryScope } from "./queryScope";
 
 export type WorkflowParams = Record<string, string | number | boolean | null | undefined>;
 
@@ -84,8 +85,10 @@ export interface ArtifactDownload {
   metadata: Record<string, unknown>;
 }
 
-export function listWorkflows(params: WorkflowParams = {}) {
-  return apiClient.request<WorkflowDefinition[]>(`/workflows${queryString(params)}`);
+export function listWorkflows(params: WorkflowParams = {}, tenantContext?: TenantContext) {
+  return apiClient.request<WorkflowDefinition[]>(`/workflows${queryString(params)}`, {
+    tenantContext
+  });
 }
 
 export function createWorkflowRun(workflowId: string, body: Record<string, unknown>) {
@@ -95,12 +98,16 @@ export function createWorkflowRun(workflowId: string, body: Record<string, unkno
   });
 }
 
-export function listWorkflowRuns(params: WorkflowParams = {}) {
-  return apiClient.request<WorkflowRun[]>(`/workflow-runs${queryString(params)}`);
+export function listWorkflowRuns(params: WorkflowParams = {}, tenantContext?: TenantContext) {
+  return apiClient.request<WorkflowRun[]>(`/workflow-runs${queryString(params)}`, {
+    tenantContext
+  });
 }
 
-export function getWorkflowRun(runId: string) {
-  return apiClient.request<WorkflowRun>(`/workflow-runs/${encodeURIComponent(runId)}`);
+export function getWorkflowRun(runId: string, tenantContext?: TenantContext) {
+  return apiClient.request<WorkflowRun>(`/workflow-runs/${encodeURIComponent(runId)}`, {
+    tenantContext
+  });
 }
 
 export function cancelWorkflowRun(runId: string) {
@@ -113,12 +120,14 @@ export function createArtifact(body: Record<string, unknown>) {
   return apiClient.request<Artifact>("/artifacts", { method: "POST", body });
 }
 
-export function listArtifacts(params: WorkflowParams = {}) {
-  return apiClient.request<Artifact[]>(`/artifacts${queryString(params)}`);
+export function listArtifacts(params: WorkflowParams = {}, tenantContext?: TenantContext) {
+  return apiClient.request<Artifact[]>(`/artifacts${queryString(params)}`, { tenantContext });
 }
 
-export function getArtifact(artifactId: string) {
-  return apiClient.request<Artifact>(`/artifacts/${encodeURIComponent(artifactId)}`);
+export function getArtifact(artifactId: string, tenantContext?: TenantContext) {
+  return apiClient.request<Artifact>(`/artifacts/${encodeURIComponent(artifactId)}`, {
+    tenantContext
+  });
 }
 
 export function downloadArtifact(artifactId: string) {
@@ -142,50 +151,56 @@ export function attestArtifact(artifactId: string, body: Record<string, unknown>
 }
 
 export function useWorkflows(params: WorkflowParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["workflows", "definitions", params],
-    queryFn: () => listWorkflows(params)
+    queryKey: scopedQueryKey(["workflows", "definitions", params], scope),
+    queryFn: () => listWorkflows(params, scope.context)
   });
 }
 
 export function useWorkflowRuns(params: WorkflowParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["workflows", "runs", params],
-    queryFn: () => listWorkflowRuns(params)
+    queryKey: scopedQueryKey(["workflows", "runs", params], scope),
+    queryFn: () => listWorkflowRuns(params, scope.context)
   });
 }
 
 export function useWorkflowRun(runId: string | null) {
+  const scope = useTenantQueryScope();
   return useQuery({
     enabled: Boolean(runId),
-    queryKey: ["workflows", "runs", runId],
-    queryFn: () => getWorkflowRun(runId as string)
+    queryKey: scopedQueryKey(["workflows", "runs", runId], scope),
+    queryFn: () => getWorkflowRun(runId as string, scope.context)
   });
 }
 
 export function useArtifacts(params: WorkflowParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["artifacts", params],
-    queryFn: () => listArtifacts(params)
+    queryKey: scopedQueryKey(["artifacts", params], scope),
+    queryFn: () => listArtifacts(params, scope.context)
   });
 }
 
 export function useArtifact(artifactId: string | null) {
+  const scope = useTenantQueryScope();
   return useQuery({
     enabled: Boolean(artifactId),
-    queryKey: ["artifacts", artifactId],
-    queryFn: () => getArtifact(artifactId as string)
+    queryKey: scopedQueryKey(["artifacts", artifactId], scope),
+    queryFn: () => getArtifact(artifactId as string, scope.context)
   });
 }
 
 export function useWorkflowMutation() {
   const queryClient = useQueryClient();
+  const scope = useTenantQueryScope();
   return useMutation({
     mutationFn: async (task: () => Promise<unknown>) => task(),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["workflows"] });
-      void queryClient.invalidateQueries({ queryKey: ["artifacts"] });
-      void queryClient.invalidateQueries({ queryKey: ["audit"] });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["workflows"], scope) });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["artifacts"], scope) });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["audit"], scope) });
     }
   });
 }

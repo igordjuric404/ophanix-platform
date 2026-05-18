@@ -33,6 +33,7 @@ import {
   type ComplianceReport,
   type ComplianceViolation
 } from "../../api/compliance";
+import { scopedQueryKey, useTenantQueryScope } from "../../api/queryScope";
 import { useDetailDrawer } from "../../app/drawerContext";
 import { PageHeader } from "../../components/layout/PageHeader";
 import { EmptyState } from "../../components/shared/EmptyState";
@@ -63,59 +64,60 @@ export function CompliancePage() {
   const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
   const [attestationId, setAttestationId] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const scope = useTenantQueryScope();
 
   const auditEventsQuery = useQuery({
-    queryKey: ["audit", "events", auditFilters],
-    queryFn: () => listAuditEvents(auditFilters)
+    queryKey: scopedQueryKey(["audit", "events", auditFilters], scope),
+    queryFn: () => listAuditEvents(auditFilters, scope.context)
   });
   const auditEvents = auditEventsQuery.data ?? [];
   const activeEventId = selectedEventId ?? auditEvents[0]?.id ?? null;
   const activeListEvent = auditEvents.find((event) => event.id === activeEventId) ?? auditEvents[0] ?? null;
   const activeEventQuery = useQuery({
     enabled: Boolean(activeEventId),
-    queryKey: ["audit", "events", activeEventId],
-    queryFn: () => getAuditEvent(activeEventId as string)
+    queryKey: scopedQueryKey(["audit", "events", activeEventId], scope),
+    queryFn: () => getAuditEvent(activeEventId as string, scope.context)
   });
   const activeEvent = activeEventQuery.data ?? activeListEvent;
   const verificationQuery = useQuery({
     enabled: Boolean(activeEventId),
-    queryKey: ["audit", "events", activeEventId, "verification"],
-    queryFn: () => verifyAuditEvent(activeEventId as string)
+    queryKey: scopedQueryKey(["audit", "events", activeEventId, "verification"], scope),
+    queryFn: () => verifyAuditEvent(activeEventId as string, scope.context)
   });
   const relatedEventsQuery = useQuery({
     enabled: Boolean(activeEvent?.correlation_id),
-    queryKey: ["audit", "events", "correlation", activeEvent?.correlation_id],
-    queryFn: () => listAuditEvents({ correlation_id: activeEvent?.correlation_id })
+    queryKey: scopedQueryKey(["audit", "events", "correlation", activeEvent?.correlation_id], scope),
+    queryFn: () => listAuditEvents({ correlation_id: activeEvent?.correlation_id }, scope.context)
   });
   const frameworksQuery = useQuery({
-    queryKey: ["compliance", "frameworks"],
-    queryFn: listComplianceFrameworks
+    queryKey: scopedQueryKey(["compliance", "frameworks"], scope),
+    queryFn: () => listComplianceFrameworks(scope.context)
   });
   const controlsQuery = useQuery({
-    queryKey: ["compliance", "controls"],
-    queryFn: () => listComplianceControls()
+    queryKey: scopedQueryKey(["compliance", "controls"], scope),
+    queryFn: () => listComplianceControls({}, scope.context)
   });
   const evidenceQuery = useQuery({
-    queryKey: ["compliance", "evidence", evidenceFilters],
-    queryFn: () => listComplianceEvidence(evidenceFilters)
+    queryKey: scopedQueryKey(["compliance", "evidence", evidenceFilters], scope),
+    queryFn: () => listComplianceEvidence(evidenceFilters, scope.context)
   });
   const violationsQuery = useQuery({
-    queryKey: ["compliance", "violations", violationFilters],
-    queryFn: () => listComplianceViolations(violationFilters)
+    queryKey: scopedQueryKey(["compliance", "violations", violationFilters], scope),
+    queryFn: () => listComplianceViolations(violationFilters, scope.context)
   });
   const reportsQuery = useQuery({
-    queryKey: ["compliance", "reports"],
-    queryFn: () => listComplianceReports()
+    queryKey: scopedQueryKey(["compliance", "reports"], scope),
+    queryFn: () => listComplianceReports({}, scope.context)
   });
   const artifactsQuery = useQuery({
-    queryKey: ["artifacts", "compliance.report"],
-    queryFn: () => listArtifacts({ artifact_type: "compliance.report" })
+    queryKey: scopedQueryKey(["artifacts", "compliance.report"], scope),
+    queryFn: () => listArtifacts({ artifact_type: "compliance.report" }, scope.context)
   });
   const activeReportId = selectedReportId ?? reportsQuery.data?.[0]?.id ?? null;
   const selectedReportQuery = useQuery({
     enabled: Boolean(activeReportId),
-    queryKey: ["compliance", "reports", activeReportId],
-    queryFn: () => getComplianceReport(activeReportId as string)
+    queryKey: scopedQueryKey(["compliance", "reports", activeReportId], scope),
+    queryFn: () => getComplianceReport(activeReportId as string, scope.context)
   });
   const mutation = useComplianceMutation();
   const drawer = useDetailDrawer();
@@ -133,7 +135,7 @@ export function CompliancePage() {
       />
       <div className="space-y-6 p-6" data-compliance-workspace>
         {message ? (
-          <div className="feedback-success">
+          <div className="feedback-success" role="status">
             {message}
           </div>
         ) : null}

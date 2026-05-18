@@ -7,7 +7,7 @@ export interface EventStreamOptions {
   path: string;
   params?: Record<string, unknown>;
   eventName: string;
-  queryKeysToInvalidate?: readonly unknown[][];
+  queryKeysToInvalidate?: readonly (readonly unknown[])[];
   onMessage?: (event: MessageEvent) => void;
   enabled?: boolean;
 }
@@ -48,4 +48,3 @@ export function useEventStream({
     };
   }, [enabled, eventName, onMessage, params, path, queryClient, queryKeysToInvalidate]);
 }
-

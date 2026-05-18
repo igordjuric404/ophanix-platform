@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { apiClient, queryString } from "./client";
+import { apiClient, queryString, type TenantContext } from "./client";
+import { scopedQueryKey, useTenantQueryScope } from "./queryScope";
 
 export type ToolRuntimeParams = Record<string, string | number | boolean | null | undefined>;
 
@@ -39,29 +40,36 @@ export interface ToolRuntimeActionDetail extends ToolRuntimeAction {
   events: ToolRuntimeActionEvent[];
 }
 
-export function listToolRuntimeActions(params: ToolRuntimeParams = {}) {
+export function listToolRuntimeActions(
+  params: ToolRuntimeParams = {},
+  tenantContext?: TenantContext
+) {
   return apiClient.request<ToolRuntimeAction[]>(
-    `/tool-runtime/actions${queryString(params)}`
+    `/tool-runtime/actions${queryString(params)}`,
+    { tenantContext }
   );
 }
 
-export function getToolRuntimeAction(actionId: string) {
+export function getToolRuntimeAction(actionId: string, tenantContext?: TenantContext) {
   return apiClient.request<ToolRuntimeActionDetail>(
-    `/tool-runtime/actions/${encodeURIComponent(actionId)}`
+    `/tool-runtime/actions/${encodeURIComponent(actionId)}`,
+    { tenantContext }
   );
 }
 
 export function useToolRuntimeActions(params: ToolRuntimeParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["tool-runtime", "actions", params],
-    queryFn: () => listToolRuntimeActions(params)
+    queryKey: scopedQueryKey(["tool-runtime", "actions", params], scope),
+    queryFn: () => listToolRuntimeActions(params, scope.context)
   });
 }
 
 export function useToolRuntimeActionDetail(actionId: string | null) {
+  const scope = useTenantQueryScope();
   return useQuery({
     enabled: Boolean(actionId),
-    queryKey: ["tool-runtime", "actions", actionId],
-    queryFn: () => getToolRuntimeAction(actionId as string)
+    queryKey: scopedQueryKey(["tool-runtime", "actions", actionId], scope),
+    queryFn: () => getToolRuntimeAction(actionId as string, scope.context)
   });
 }

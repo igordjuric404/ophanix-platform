@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { apiClient, queryString } from "./client";
+import { apiClient, queryString, type TenantContext } from "./client";
+import { scopedQueryKey, useTenantQueryScope } from "./queryScope";
 
 export interface AgentSummary {
   id: string;
@@ -81,22 +82,27 @@ export interface AgentCredential {
 
 export type AgentListParams = Record<string, string | number | boolean | null | undefined>;
 
-export function listAgents(params: AgentListParams = {}) {
-  return apiClient.request<AgentSummary[]>(`/agents${queryString(params)}`);
+export function listAgents(params: AgentListParams = {}, tenantContext?: TenantContext) {
+  return apiClient.request<AgentSummary[]>(`/agents${queryString(params)}`, { tenantContext });
 }
 
-export function getAgent(agentId: string) {
-  return apiClient.request<AgentDetail>(`/agents/${encodeURIComponent(agentId)}`);
+export function getAgent(agentId: string, tenantContext?: TenantContext) {
+  return apiClient.request<AgentDetail>(`/agents/${encodeURIComponent(agentId)}`, {
+    tenantContext
+  });
 }
 
-export function getAgentTimeline(agentId: string) {
+export function getAgentTimeline(agentId: string, tenantContext?: TenantContext) {
   return apiClient.request<AgentLifecycleEvent[]>(
-    `/agents/${encodeURIComponent(agentId)}/timeline`
+    `/agents/${encodeURIComponent(agentId)}/timeline`,
+    { tenantContext }
   );
 }
 
-export function getAgentAudit(agentId: string) {
-  return apiClient.request<AgentAuditEvent[]>(`/agents/${encodeURIComponent(agentId)}/audit`);
+export function getAgentAudit(agentId: string, tenantContext?: TenantContext) {
+  return apiClient.request<AgentAuditEvent[]>(`/agents/${encodeURIComponent(agentId)}/audit`, {
+    tenantContext
+  });
 }
 
 export function createAgentRegistrationDraft(body: Record<string, unknown>) {
@@ -165,9 +171,14 @@ export function runOrphanDetection() {
   });
 }
 
-export function listAgentCredentials(agentId: string, params: AgentListParams = {}) {
+export function listAgentCredentials(
+  agentId: string,
+  params: AgentListParams = {},
+  tenantContext?: TenantContext
+) {
   return apiClient.request<AgentCredential[]>(
-    `/agents/${encodeURIComponent(agentId)}/credentials${queryString(params)}`
+    `/agents/${encodeURIComponent(agentId)}/credentials${queryString(params)}`,
+    { tenantContext }
   );
 }
 
@@ -199,63 +210,75 @@ export function verifyCredential(credentialId: string, body: Record<string, unkn
   );
 }
 
-export function listExpiringCredentials(params: AgentListParams = {}) {
-  return apiClient.request<AgentCredential[]>(`/credentials/expiring${queryString(params)}`);
+export function listExpiringCredentials(
+  params: AgentListParams = {},
+  tenantContext?: TenantContext
+) {
+  return apiClient.request<AgentCredential[]>(`/credentials/expiring${queryString(params)}`, {
+    tenantContext
+  });
 }
 
 export function useAgents(params: AgentListParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["agents", params],
-    queryFn: () => listAgents(params)
+    queryKey: scopedQueryKey(["agents", params], scope),
+    queryFn: () => listAgents(params, scope.context)
   });
 }
 
 export function useAgentDetail(agentId: string | null) {
+  const scope = useTenantQueryScope();
   return useQuery({
     enabled: Boolean(agentId),
-    queryKey: ["agents", agentId, "detail"],
-    queryFn: () => getAgent(agentId as string)
+    queryKey: scopedQueryKey(["agents", agentId, "detail"], scope),
+    queryFn: () => getAgent(agentId as string, scope.context)
   });
 }
 
 export function useAgentTimeline(agentId: string | null) {
+  const scope = useTenantQueryScope();
   return useQuery({
     enabled: Boolean(agentId),
-    queryKey: ["agents", agentId, "timeline"],
-    queryFn: () => getAgentTimeline(agentId as string)
+    queryKey: scopedQueryKey(["agents", agentId, "timeline"], scope),
+    queryFn: () => getAgentTimeline(agentId as string, scope.context)
   });
 }
 
 export function useAgentAudit(agentId: string | null) {
+  const scope = useTenantQueryScope();
   return useQuery({
     enabled: Boolean(agentId),
-    queryKey: ["agents", agentId, "audit"],
-    queryFn: () => getAgentAudit(agentId as string)
+    queryKey: scopedQueryKey(["agents", agentId, "audit"], scope),
+    queryFn: () => getAgentAudit(agentId as string, scope.context)
   });
 }
 
 export function useAgentCredentials(agentId: string | null) {
+  const scope = useTenantQueryScope();
   return useQuery({
     enabled: Boolean(agentId),
-    queryKey: ["agents", agentId, "credentials"],
-    queryFn: () => listAgentCredentials(agentId as string)
+    queryKey: scopedQueryKey(["agents", agentId, "credentials"], scope),
+    queryFn: () => listAgentCredentials(agentId as string, {}, scope.context)
   });
 }
 
 export function useExpiringCredentials() {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["credentials", "expiring"],
-    queryFn: () => listExpiringCredentials({ threshold_hours: 24 })
+    queryKey: scopedQueryKey(["credentials", "expiring"], scope),
+    queryFn: () => listExpiringCredentials({ threshold_hours: 24 }, scope.context)
   });
 }
 
 export function useAgentMutation() {
   const queryClient = useQueryClient();
+  const scope = useTenantQueryScope();
   return useMutation({
     mutationFn: async (task: () => Promise<unknown>) => task(),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["agents"] });
-      void queryClient.invalidateQueries({ queryKey: ["credentials"] });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["agents"], scope) });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["credentials"], scope) });
     }
   });
 }

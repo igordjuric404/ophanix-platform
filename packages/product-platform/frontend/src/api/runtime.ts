@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { apiClient, queryString } from "./client";
+import { apiClient, queryString, type TenantContext } from "./client";
+import { scopedQueryKey, useTenantQueryScope } from "./queryScope";
 
 export type RuntimeParams = Record<string, string | number | boolean | null | undefined>;
 
@@ -170,12 +171,16 @@ export function createRuntimeSession(body: Record<string, unknown>) {
   return apiClient.request<RuntimeSession>("/runtime/sessions", { method: "POST", body });
 }
 
-export function listRuntimeSessions(params: RuntimeParams = {}) {
-  return apiClient.request<RuntimeSession[]>(`/runtime/sessions${queryString(params)}`);
+export function listRuntimeSessions(params: RuntimeParams = {}, tenantContext?: TenantContext) {
+  return apiClient.request<RuntimeSession[]>(`/runtime/sessions${queryString(params)}`, {
+    tenantContext
+  });
 }
 
-export function getRuntimeSession(sessionId: string) {
-  return apiClient.request<RuntimeSession>(`/runtime/sessions/${encodeURIComponent(sessionId)}`);
+export function getRuntimeSession(sessionId: string, tenantContext?: TenantContext) {
+  return apiClient.request<RuntimeSession>(`/runtime/sessions/${encodeURIComponent(sessionId)}`, {
+    tenantContext
+  });
 }
 
 export function endRuntimeSession(sessionId: string, body: Record<string, unknown> = {}) {
@@ -192,14 +197,20 @@ export function createRuntimeAction(sessionId: string, body: Record<string, unkn
   );
 }
 
-export function listRuntimeRingDecisions(params: RuntimeParams = {}) {
+export function listRuntimeRingDecisions(
+  params: RuntimeParams = {},
+  tenantContext?: TenantContext
+) {
   return apiClient.request<RuntimeRingDecision[]>(
-    `/runtime/ring-decisions${queryString(params)}`
+    `/runtime/ring-decisions${queryString(params)}`,
+    { tenantContext }
   );
 }
 
-export function listRuntimeRingRules(params: RuntimeParams = {}) {
-  return apiClient.request<RuntimeRingRule[]>(`/runtime/ring-rules${queryString(params)}`);
+export function listRuntimeRingRules(params: RuntimeParams = {}, tenantContext?: TenantContext) {
+  return apiClient.request<RuntimeRingRule[]>(`/runtime/ring-rules${queryString(params)}`, {
+    tenantContext
+  });
 }
 
 export function createRuntimeRingRule(body: Record<string, unknown>) {
@@ -210,12 +221,16 @@ export function createRuntimeSaga(body: Record<string, unknown>) {
   return apiClient.request<RuntimeSaga>("/runtime/sagas", { method: "POST", body });
 }
 
-export function listRuntimeSagas(params: RuntimeParams = {}) {
-  return apiClient.request<RuntimeSaga[]>(`/runtime/sagas${queryString(params)}`);
+export function listRuntimeSagas(params: RuntimeParams = {}, tenantContext?: TenantContext) {
+  return apiClient.request<RuntimeSaga[]>(`/runtime/sagas${queryString(params)}`, {
+    tenantContext
+  });
 }
 
-export function getRuntimeSaga(sagaId: string) {
-  return apiClient.request<RuntimeSaga>(`/runtime/sagas/${encodeURIComponent(sagaId)}`);
+export function getRuntimeSaga(sagaId: string, tenantContext?: TenantContext) {
+  return apiClient.request<RuntimeSaga>(`/runtime/sagas/${encodeURIComponent(sagaId)}`, {
+    tenantContext
+  });
 }
 
 export function addRuntimeSagaStep(sagaId: string, body: Record<string, unknown>) {
@@ -246,9 +261,13 @@ export function createRuntimeSandboxProfile(body: Record<string, unknown>) {
   });
 }
 
-export function listRuntimeSandboxProfiles(params: RuntimeParams = {}) {
+export function listRuntimeSandboxProfiles(
+  params: RuntimeParams = {},
+  tenantContext?: TenantContext
+) {
   return apiClient.request<RuntimeSandboxProfile[]>(
-    `/runtime/sandbox-profiles${queryString(params)}`
+    `/runtime/sandbox-profiles${queryString(params)}`,
+    { tenantContext }
   );
 }
 
@@ -273,79 +292,92 @@ export function triggerRuntimeKillSwitch(body: Record<string, unknown>) {
   });
 }
 
-export function listRuntimeKillSwitchEvents(params: RuntimeParams = {}) {
+export function listRuntimeKillSwitchEvents(
+  params: RuntimeParams = {},
+  tenantContext?: TenantContext
+) {
   return apiClient.request<RuntimeKillSwitchEvent[]>(
-    `/runtime/kill-switch/events${queryString(params)}`
+    `/runtime/kill-switch/events${queryString(params)}`,
+    { tenantContext }
   );
 }
 
 export function useRuntimeSessions(params: RuntimeParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["runtime", "sessions", params],
-    queryFn: () => listRuntimeSessions(params)
+    queryKey: scopedQueryKey(["runtime", "sessions", params], scope),
+    queryFn: () => listRuntimeSessions(params, scope.context)
   });
 }
 
 export function useRuntimeSessionDetail(sessionId: string | null) {
+  const scope = useTenantQueryScope();
   return useQuery({
     enabled: Boolean(sessionId),
-    queryKey: ["runtime", "sessions", sessionId],
-    queryFn: () => getRuntimeSession(sessionId as string)
+    queryKey: scopedQueryKey(["runtime", "sessions", sessionId], scope),
+    queryFn: () => getRuntimeSession(sessionId as string, scope.context)
   });
 }
 
 export function useRuntimeRingDecisions(params: RuntimeParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["runtime", "ring-decisions", params],
-    queryFn: () => listRuntimeRingDecisions(params)
+    queryKey: scopedQueryKey(["runtime", "ring-decisions", params], scope),
+    queryFn: () => listRuntimeRingDecisions(params, scope.context)
   });
 }
 
 export function useRuntimeRingRules(params: RuntimeParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["runtime", "ring-rules", params],
-    queryFn: () => listRuntimeRingRules(params)
+    queryKey: scopedQueryKey(["runtime", "ring-rules", params], scope),
+    queryFn: () => listRuntimeRingRules(params, scope.context)
   });
 }
 
 export function useRuntimeSagas(params: RuntimeParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["runtime", "sagas", params],
-    queryFn: () => listRuntimeSagas(params)
+    queryKey: scopedQueryKey(["runtime", "sagas", params], scope),
+    queryFn: () => listRuntimeSagas(params, scope.context)
   });
 }
 
 export function useRuntimeSagaDetail(sagaId: string | null) {
+  const scope = useTenantQueryScope();
   return useQuery({
     enabled: Boolean(sagaId),
-    queryKey: ["runtime", "sagas", sagaId],
-    queryFn: () => getRuntimeSaga(sagaId as string)
+    queryKey: scopedQueryKey(["runtime", "sagas", sagaId], scope),
+    queryFn: () => getRuntimeSaga(sagaId as string, scope.context)
   });
 }
 
 export function useRuntimeSandboxProfiles(params: RuntimeParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["runtime", "sandbox-profiles", params],
-    queryFn: () => listRuntimeSandboxProfiles(params)
+    queryKey: scopedQueryKey(["runtime", "sandbox-profiles", params], scope),
+    queryFn: () => listRuntimeSandboxProfiles(params, scope.context)
   });
 }
 
 export function useRuntimeKillSwitchEvents(params: RuntimeParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["runtime", "kill-switch-events", params],
-    queryFn: () => listRuntimeKillSwitchEvents(params)
+    queryKey: scopedQueryKey(["runtime", "kill-switch-events", params], scope),
+    queryFn: () => listRuntimeKillSwitchEvents(params, scope.context)
   });
 }
 
 export function useRuntimeMutation() {
   const queryClient = useQueryClient();
+  const scope = useTenantQueryScope();
   return useMutation({
     mutationFn: async (task: () => Promise<unknown>) => task(),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["runtime"] });
-      void queryClient.invalidateQueries({ queryKey: ["agents"] });
-      void queryClient.invalidateQueries({ queryKey: ["trust"] });
-      void queryClient.invalidateQueries({ queryKey: ["policies"] });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["runtime"], scope) });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["agents"], scope) });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["trust"], scope) });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["policies"], scope) });
     }
   });
 }

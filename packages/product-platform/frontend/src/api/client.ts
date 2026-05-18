@@ -26,12 +26,33 @@ export interface ApiClientOptions {
   getTenantContext?: () => TenantContext;
 }
 
-export type ApiRequestInit = Omit<RequestInit, "body"> & { body?: unknown };
+export type ApiRequestInit = Omit<RequestInit, "body"> & {
+  body?: unknown;
+  tenantContext?: TenantContext;
+};
 
 let activeTenantContext: TenantContext = { organizationId: null, environmentId: null };
+const tenantContextSubscribers = new Set<() => void>();
 
 export function setApiTenantContext(context: TenantContext) {
+  if (
+    activeTenantContext.organizationId === context.organizationId &&
+    activeTenantContext.environmentId === context.environmentId
+  ) {
+    return;
+  }
+
   activeTenantContext = context;
+  tenantContextSubscribers.forEach((notify) => notify());
+}
+
+export function getApiTenantContext() {
+  return activeTenantContext;
+}
+
+export function subscribeApiTenantContext(notify: () => void) {
+  tenantContextSubscribers.add(notify);
+  return () => tenantContextSubscribers.delete(notify);
 }
 
 export function createApiClient({
@@ -47,8 +68,8 @@ export function createApiClient({
   }
 
   async function request<TResponse>(path: string, options: ApiRequestInit = {}): Promise<TResponse> {
-    const tenant = getTenantContext();
-    const { body, ...requestOptions } = options;
+    const { body, tenantContext, ...requestOptions } = options;
+    const tenant = tenantContext ?? getTenantContext();
     const headers = new Headers(options.headers);
     headers.set("Accept", "application/json");
     if (tenant.organizationId) {

@@ -23,6 +23,11 @@ import {
   type DemoStepRun
 } from "../../api/demo";
 import { PageHeader } from "../../components/layout/PageHeader";
+import {
+  ActionFeedback,
+  actionErrorMessage,
+  type ActionFeedbackMessage
+} from "../../components/shared/ActionFeedback";
 import { EmptyState } from "../../components/shared/EmptyState";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -44,7 +49,7 @@ export function DemoLabPage() {
   const [selectedScenarioId, setSelectedScenarioId] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedResetId, setSelectedResetId] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<ActionFeedbackMessage | null>(null);
 
   const scenariosQuery = useDemoScenarios();
   const resetRunsQuery = useDemoResetRuns({ limit: 10 });
@@ -69,9 +74,9 @@ export function DemoLabPage() {
     try {
       const result = (await mutation.mutateAsync(task)) as T;
       onResult(result);
-      setMessage(label);
+      setFeedback({ type: "success", message: label });
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Action failed");
+      setFeedback({ type: "error", message: actionErrorMessage(error) });
     }
   }
 
@@ -82,11 +87,7 @@ export function DemoLabPage() {
         description="Run governed demo scenarios, reset the local environment, and follow live proof links across the platform."
       />
       <div className="space-y-6 p-6" data-demo-lab-workspace>
-        {message ? (
-          <div className="feedback-success">
-            {message}
-          </div>
-        ) : null}
+        <ActionFeedback feedback={feedback} />
         <DemoSummary
           baselineStatus={baselineStatus}
           resetRun={activeReset}

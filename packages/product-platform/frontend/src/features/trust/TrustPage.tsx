@@ -104,7 +104,7 @@ export function TrustPage() {
       <PageHeader title="Trust" description="Trust scores, cards, thresholds, and handshakes." />
       <div className="space-y-6 p-6">
         {message ? (
-          <div className="feedback-success">
+          <div className="feedback-success" role="status">
             {message}
           </div>
         ) : null}
@@ -559,8 +559,13 @@ function TrustCardDetail({
       ) : null}
       {verification ? (
         <div
-          className="mt-3 feedback-success px-3 py-2"
+          aria-live={verification.verified ? "polite" : "assertive"}
+          className={cn(
+            "mt-3 px-3 py-2",
+            verification.verified ? "feedback-success" : "feedback-danger"
+          )}
           data-trust-card-verification
+          role={verification.verified ? "status" : "alert"}
         >
           {verification.verified ? "Verified" : "Invalid"} {verification.reason}
         </div>
@@ -780,6 +785,7 @@ function TrustHandshakesPanel({
           <div
             className="feedback-success"
             data-trust-handshake-simulation
+            role="status"
           >
             {simulation.result} {simulation.reason}
           </div>

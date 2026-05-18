@@ -20,6 +20,11 @@ import {
   type WorkflowRun
 } from "../../api/workflows";
 import { PageHeader } from "../../components/layout/PageHeader";
+import {
+  ActionFeedback,
+  actionErrorMessage,
+  type ActionFeedbackMessage
+} from "../../components/shared/ActionFeedback";
 import { EmptyState } from "../../components/shared/EmptyState";
 import { StatusBadge } from "../../components/shared/StatusBadge";
 import { Badge } from "../../components/ui/badge";
@@ -47,7 +52,7 @@ export function WorkflowsPage() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const [downloadResult, setDownloadResult] = useState<ArtifactDownload | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<ActionFeedbackMessage | null>(null);
 
   const workflowsQuery = useWorkflows({ enabled: true });
   const runsQuery = useWorkflowRuns(runFilters);
@@ -70,9 +75,9 @@ export function WorkflowsPage() {
   async function runTask(label: string, task: () => Promise<unknown>) {
     try {
       await mutation.mutateAsync(task);
-      setMessage(label);
+      setFeedback({ type: "success", message: label });
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Action failed");
+      setFeedback({ type: "error", message: actionErrorMessage(error) });
     }
   }
 
@@ -80,9 +85,9 @@ export function WorkflowsPage() {
     try {
       const result = (await mutation.mutateAsync(task)) as T;
       onResult(result);
-      setMessage(label);
+      setFeedback({ type: "success", message: label });
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Action failed");
+      setFeedback({ type: "error", message: actionErrorMessage(error) });
     }
   }
 
@@ -93,11 +98,7 @@ export function WorkflowsPage() {
         description="Run governed product workflows, inspect logs, and manage artifacts and attestations."
       />
       <div className="space-y-6 p-6" data-workflow-workspace>
-        {message ? (
-          <div className="feedback-success">
-            {message}
-          </div>
-        ) : null}
+        <ActionFeedback feedback={feedback} />
         <WorkflowSummary artifacts={artifacts} runs={runs} workflows={workflows} />
         <div className="grid gap-6 2xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
           <WorkflowCatalog

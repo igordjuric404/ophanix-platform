@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { apiClient, queryString } from "./client";
+import { apiClient, queryString, type TenantContext } from "./client";
+import { scopedQueryKey, useTenantQueryScope } from "./queryScope";
 
 export interface DiscoveryScanner {
   id: string;
@@ -72,12 +73,12 @@ export interface DiscoveryFinding {
 
 export type DiscoveryParams = Record<string, string | number | boolean | null | undefined>;
 
-export function listDiscoveryScanners() {
-  return apiClient.request<DiscoveryScanner[]>("/discovery/scanners");
+export function listDiscoveryScanners(tenantContext?: TenantContext) {
+  return apiClient.request<DiscoveryScanner[]>("/discovery/scanners", { tenantContext });
 }
 
-export function listDiscoveryTargets() {
-  return apiClient.request<DiscoveryTarget[]>("/discovery/targets");
+export function listDiscoveryTargets(tenantContext?: TenantContext) {
+  return apiClient.request<DiscoveryTarget[]>("/discovery/targets", { tenantContext });
 }
 
 export function createDiscoveryTarget(body: Record<string, unknown>) {
@@ -101,17 +102,21 @@ export function createDiscoveryRun(body: Record<string, unknown>) {
   });
 }
 
-export function listDiscoveryRuns() {
-  return apiClient.request<DiscoveryRun[]>("/discovery/runs");
+export function listDiscoveryRuns(tenantContext?: TenantContext) {
+  return apiClient.request<DiscoveryRun[]>("/discovery/runs", { tenantContext });
 }
 
 export function getDiscoveryRun(runId: string) {
   return apiClient.request<DiscoveryRun>(`/discovery/runs/${encodeURIComponent(runId)}`);
 }
 
-export function listDiscoveryFindings(params: DiscoveryParams = {}) {
+export function listDiscoveryFindings(
+  params: DiscoveryParams = {},
+  tenantContext?: TenantContext
+) {
   return apiClient.request<DiscoveryFinding[]>(
-    `/discovery/findings${queryString(params)}`
+    `/discovery/findings${queryString(params)}`,
+    { tenantContext }
   );
 }
 
@@ -157,30 +162,44 @@ export function markDiscoveryFindingDecommissioned(findingId: string) {
 }
 
 export function useDiscoveryScanners() {
-  return useQuery({ queryKey: ["discovery", "scanners"], queryFn: listDiscoveryScanners });
+  const scope = useTenantQueryScope();
+  return useQuery({
+    queryKey: scopedQueryKey(["discovery", "scanners"], scope),
+    queryFn: () => listDiscoveryScanners(scope.context)
+  });
 }
 
 export function useDiscoveryTargets() {
-  return useQuery({ queryKey: ["discovery", "targets"], queryFn: listDiscoveryTargets });
+  const scope = useTenantQueryScope();
+  return useQuery({
+    queryKey: scopedQueryKey(["discovery", "targets"], scope),
+    queryFn: () => listDiscoveryTargets(scope.context)
+  });
 }
 
 export function useDiscoveryRuns() {
-  return useQuery({ queryKey: ["discovery", "runs"], queryFn: listDiscoveryRuns });
+  const scope = useTenantQueryScope();
+  return useQuery({
+    queryKey: scopedQueryKey(["discovery", "runs"], scope),
+    queryFn: () => listDiscoveryRuns(scope.context)
+  });
 }
 
 export function useDiscoveryFindings(params: DiscoveryParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["discovery", "findings", params],
-    queryFn: () => listDiscoveryFindings(params)
+    queryKey: scopedQueryKey(["discovery", "findings", params], scope),
+    queryFn: () => listDiscoveryFindings(params, scope.context)
   });
 }
 
 export function useDiscoveryMutation() {
   const queryClient = useQueryClient();
+  const scope = useTenantQueryScope();
   return useMutation({
     mutationFn: async (task: () => Promise<unknown>) => task(),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["discovery"] });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["discovery"], scope) });
     }
   });
 }

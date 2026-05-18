@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { apiClient, queryString } from "./client";
+import { apiClient, queryString, type TenantContext } from "./client";
+import { scopedQueryKey, useTenantQueryScope } from "./queryScope";
 
 export type IntegrationParams = Record<string, string | number | boolean | null | undefined>;
 
@@ -72,9 +73,13 @@ export interface IntegrationHealthCheck {
   checked_at: string;
 }
 
-export function listIntegrationFrameworks(params: IntegrationParams = {}) {
+export function listIntegrationFrameworks(
+  params: IntegrationParams = {},
+  tenantContext?: TenantContext
+) {
   return apiClient.request<FrameworkIntegration[]>(
-    `/integrations/frameworks${queryString(params)}`
+    `/integrations/frameworks${queryString(params)}`,
+    { tenantContext }
   );
 }
 
@@ -85,9 +90,13 @@ export function createFrameworkInstance(body: Record<string, unknown>) {
   });
 }
 
-export function listFrameworkInstances(params: IntegrationParams = {}) {
+export function listFrameworkInstances(
+  params: IntegrationParams = {},
+  tenantContext?: TenantContext
+) {
   return apiClient.request<FrameworkInstance[]>(
-    `/integrations/framework-instances${queryString(params)}`
+    `/integrations/framework-instances${queryString(params)}`,
+    { tenantContext }
   );
 }
 
@@ -105,9 +114,13 @@ export function linkFrameworkAgent(instanceId: string, body: Record<string, unkn
   );
 }
 
-export function listFrameworkAgentLinks(params: IntegrationParams = {}) {
+export function listFrameworkAgentLinks(
+  params: IntegrationParams = {},
+  tenantContext?: TenantContext
+) {
   return apiClient.request<FrameworkAgentLink[]>(
-    `/integrations/framework-agents${queryString(params)}`
+    `/integrations/framework-agents${queryString(params)}`,
+    { tenantContext }
   );
 }
 
@@ -125,9 +138,13 @@ export function createProviderCredential(body: Record<string, unknown>) {
   });
 }
 
-export function listProviderCredentials(params: IntegrationParams = {}) {
+export function listProviderCredentials(
+  params: IntegrationParams = {},
+  tenantContext?: TenantContext
+) {
   return apiClient.request<ProviderCredential[]>(
-    `/integrations/provider-credentials${queryString(params)}`
+    `/integrations/provider-credentials${queryString(params)}`,
+    { tenantContext }
   );
 }
 
@@ -145,9 +162,13 @@ export function createIntegrationHealthCheck(body: Record<string, unknown>) {
   });
 }
 
-export function listIntegrationHealthChecks(params: IntegrationParams = {}) {
+export function listIntegrationHealthChecks(
+  params: IntegrationParams = {},
+  tenantContext?: TenantContext
+) {
   return apiClient.request<IntegrationHealthCheck[]>(
-    `/integrations/health-checks${queryString(params)}`
+    `/integrations/health-checks${queryString(params)}`,
+    { tenantContext }
   );
 }
 
@@ -156,47 +177,53 @@ export function listLatestIntegrationHealthChecks() {
 }
 
 export function useIntegrationFrameworks(params: IntegrationParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["integrations", "frameworks", params],
-    queryFn: () => listIntegrationFrameworks(params)
+    queryKey: scopedQueryKey(["integrations", "frameworks", params], scope),
+    queryFn: () => listIntegrationFrameworks(params, scope.context)
   });
 }
 
 export function useFrameworkInstances(params: IntegrationParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["integrations", "framework-instances", params],
-    queryFn: () => listFrameworkInstances(params)
+    queryKey: scopedQueryKey(["integrations", "framework-instances", params], scope),
+    queryFn: () => listFrameworkInstances(params, scope.context)
   });
 }
 
 export function useFrameworkAgentLinks(params: IntegrationParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["integrations", "framework-agents", params],
-    queryFn: () => listFrameworkAgentLinks(params)
+    queryKey: scopedQueryKey(["integrations", "framework-agents", params], scope),
+    queryFn: () => listFrameworkAgentLinks(params, scope.context)
   });
 }
 
 export function useProviderCredentials(params: IntegrationParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["integrations", "provider-credentials", params],
-    queryFn: () => listProviderCredentials(params)
+    queryKey: scopedQueryKey(["integrations", "provider-credentials", params], scope),
+    queryFn: () => listProviderCredentials(params, scope.context)
   });
 }
 
 export function useIntegrationHealthChecks(params: IntegrationParams = {}) {
+  const scope = useTenantQueryScope();
   return useQuery({
-    queryKey: ["integrations", "health-checks", params],
-    queryFn: () => listIntegrationHealthChecks(params)
+    queryKey: scopedQueryKey(["integrations", "health-checks", params], scope),
+    queryFn: () => listIntegrationHealthChecks(params, scope.context)
   });
 }
 
 export function useIntegrationMutation() {
   const queryClient = useQueryClient();
+  const scope = useTenantQueryScope();
   return useMutation({
     mutationFn: async (task: () => Promise<unknown>) => task(),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["integrations"] });
-      void queryClient.invalidateQueries({ queryKey: ["agents"] });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["integrations"], scope) });
+      void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["agents"], scope) });
     }
   });
 }

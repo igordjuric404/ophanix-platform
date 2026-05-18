@@ -38,6 +38,11 @@ import {
   type McpToolCall
 } from "../../api/mcp";
 import { PageHeader } from "../../components/layout/PageHeader";
+import {
+  ActionFeedback,
+  actionErrorMessage,
+  type ActionFeedbackMessage
+} from "../../components/shared/ActionFeedback";
 import { EmptyState } from "../../components/shared/EmptyState";
 import { StatusBadge } from "../../components/shared/StatusBadge";
 import { Badge } from "../../components/ui/badge";
@@ -68,7 +73,7 @@ export function McpPage() {
   const [approvalFilters, setApprovalFilters] = useState<McpParams>({ status: "pending" });
   const [selectedToolId, setSelectedToolId] = useState<string | null>(null);
   const [selectedFindingId, setSelectedFindingId] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<ActionFeedbackMessage | null>(null);
 
   const serversQuery = useMcpServers();
   const toolsQuery = useMcpTools();
@@ -95,9 +100,9 @@ export function McpPage() {
   async function runTask(label: string, task: () => Promise<unknown>) {
     try {
       await mutation.mutateAsync(task);
-      setMessage(label);
+      setFeedback({ type: "success", message: label });
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Action failed");
+      setFeedback({ type: "error", message: actionErrorMessage(error) });
     }
   }
 
@@ -108,11 +113,7 @@ export function McpPage() {
         description="MCP server registry, tool discovery, security scans, proxy approvals, and rate limits."
       />
       <div className="space-y-6 p-6">
-        {message ? (
-          <div className="feedback-success">
-            {message}
-          </div>
-        ) : null}
+        <ActionFeedback feedback={feedback} />
         <McpSummary approvals={approvals} findings={findings} servers={servers} tools={tools} />
         <ServerRegistryPanel
           isLoading={serversQuery.isLoading}

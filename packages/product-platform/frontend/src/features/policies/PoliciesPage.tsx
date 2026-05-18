@@ -64,6 +64,7 @@ import {
   type PolicySummary,
   type PolicyVersion
 } from "../../api/policies";
+import { scopedQueryKey, useTenantQueryScope } from "../../api/queryScope";
 import { useEnvironments } from "../../api/system";
 import type { Environment } from "../../api/types";
 import { PageHeader } from "../../components/layout/PageHeader";
@@ -111,6 +112,7 @@ export function PoliciesPage() {
   const [simulationResult, setSimulationResult] = useState<PolicyEvaluation | null>(null);
   const [simulationError, setSimulationError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const scope = useTenantQueryScope();
 
   const policiesQuery = usePolicies(filters);
   const policies = policiesQuery.data ?? [];
@@ -129,12 +131,12 @@ export function PoliciesPage() {
     () => withSelectedEnvironment(evaluationFilters),
     [evaluationFilters]
   );
-  const evaluationStreamQueryKeys = useMemo<unknown[][]>(
+  const evaluationStreamQueryKeys = useMemo(
     () => [
-      ["policies", "evaluations", evaluationFilters],
-      ["policies", "evaluations", "summary", evaluationFilters]
+      scopedQueryKey(["policies", "evaluations", evaluationFilters], scope),
+      scopedQueryKey(["policies", "evaluations", "summary", evaluationFilters], scope)
     ],
-    [evaluationFilters]
+    [evaluationFilters, scope]
   );
   const handlePolicyEvaluationStreamMessage = useCallback(
     (event: MessageEvent) => {
@@ -147,8 +149,8 @@ export function PoliciesPage() {
   );
   const selectedEvaluationQuery = useQuery({
     enabled: Boolean(selectedEvaluationId),
-    queryKey: ["policies", "evaluations", selectedEvaluationId],
-    queryFn: () => getPolicyEvaluation(selectedEvaluationId as string)
+    queryKey: scopedQueryKey(["policies", "evaluations", selectedEvaluationId], scope),
+    queryFn: () => getPolicyEvaluation(selectedEvaluationId as string, scope.context)
   });
   const mutation = usePolicyMutation();
   const evaluationRows = useMemo(() => {
@@ -192,7 +194,7 @@ export function PoliciesPage() {
       />
       <div className="space-y-6 p-6">
         {message ? (
-          <div className="feedback-success">
+          <div className="feedback-success" role="status">
             {message}
           </div>
         ) : null}

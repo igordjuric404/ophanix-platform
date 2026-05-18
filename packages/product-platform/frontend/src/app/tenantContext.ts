@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 
 import { useEnvironments, useOrganizations } from "../api/system";
 import type { Environment, Organization, UserPrincipal } from "../api/types";
@@ -39,10 +39,17 @@ export function useTenantSelection(user: UserPrincipal): TenantSelection {
     organizationEnvironments[0] ??
     null;
 
-  setApiTenantContext({
-    organizationId: selectedOrganization?.id ?? user.organization_id ?? null,
-    environmentId: selectedEnvironment?.id ?? null
-  });
+  const apiTenantContext = useMemo(
+    () => ({
+      organizationId: selectedOrganization?.id ?? user.organization_id ?? null,
+      environmentId: selectedEnvironment?.id ?? null
+    }),
+    [selectedEnvironment?.id, selectedOrganization?.id, user.organization_id]
+  );
+
+  useLayoutEffect(() => {
+    setApiTenantContext(apiTenantContext);
+  }, [apiTenantContext]);
 
   useEffect(() => {
     if (selectedEnvironment) {
@@ -66,4 +73,3 @@ export function useTenantSelection(user: UserPrincipal): TenantSelection {
           : null
   };
 }
-

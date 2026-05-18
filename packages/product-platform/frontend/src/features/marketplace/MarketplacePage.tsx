@@ -37,6 +37,11 @@ import {
   type PluginVersion
 } from "../../api/marketplace";
 import { PageHeader } from "../../components/layout/PageHeader";
+import {
+  ActionFeedback,
+  actionErrorMessage,
+  type ActionFeedbackMessage
+} from "../../components/shared/ActionFeedback";
 import { EmptyState } from "../../components/shared/EmptyState";
 import { StatusBadge } from "../../components/shared/StatusBadge";
 import { Badge } from "../../components/ui/badge";
@@ -65,7 +70,7 @@ export function MarketplacePage() {
   const [policyResult, setPolicyResult] = useState<PluginPolicyResult | null>(null);
   const [qualityAssessment, setQualityAssessment] = useState<PluginQualityAssessment | null>(null);
   const [trustEvents, setTrustEvents] = useState<PluginTrustEvent[]>([]);
-  const [message, setMessage] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<ActionFeedbackMessage | null>(null);
 
   const pluginsQuery = useMarketplacePlugins(pluginFilters);
   const installationsQuery = useMarketplaceInstallations();
@@ -86,9 +91,9 @@ export function MarketplacePage() {
   async function runTask(label: string, task: () => Promise<unknown>) {
     try {
       await mutation.mutateAsync(task);
-      setMessage(label);
+      setFeedback({ type: "success", message: label });
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Action failed");
+      setFeedback({ type: "error", message: actionErrorMessage(error) });
     }
   }
 
@@ -96,9 +101,9 @@ export function MarketplacePage() {
     try {
       const result = (await mutation.mutateAsync(task)) as T;
       onResult(result);
-      setMessage(label);
+      setFeedback({ type: "success", message: label });
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Action failed");
+      setFeedback({ type: "error", message: actionErrorMessage(error) });
     }
   }
 
@@ -109,11 +114,7 @@ export function MarketplacePage() {
         description="Review, govern, install, sign, assess, and monitor trusted marketplace plugins."
       />
       <div className="space-y-6 p-6">
-        {message ? (
-          <div className="feedback-success">
-            {message}
-          </div>
-        ) : null}
+        <ActionFeedback feedback={feedback} />
         <MarketplaceSummary
           installations={installations}
           plugins={plugins}
