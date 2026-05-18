@@ -60,8 +60,12 @@ class WorkflowRunWorker:
 
         with self.database.transaction() as connection:
             jobs = JobStateRepository(connection)
-            job = jobs.get_job(job_id) if job_id else jobs.next_queued_job(job_type=WORKFLOW_JOB_TYPE)
-            if job is None or job["status"] != JobStatus.QUEUED:
+            job = (
+                jobs.claim_queued_job(job_id)
+                if job_id
+                else jobs.claim_next_queued_job(job_type=WORKFLOW_JOB_TYPE)
+            )
+            if job is None:
                 return None
             payload = _loads_mapping(job["payload_json"])
             workflow_run_id = str(payload.get("workflow_run_id") or "")
@@ -83,7 +87,18 @@ class WorkflowRunWorker:
                     status=failed["status"],
                 )
 
-            jobs.mark_running(job["id"])
+            if workflow_run["status"] != JobStatus.QUEUED:
+                failed = jobs.mark_failed(
+                    job["id"],
+                    error_message="Workflow run is not queued.",
+                    logs=[f"workflow run status was {workflow_run['status']}"],
+                )
+                return WorkflowJobExecution(
+                    job_id=failed["id"],
+                    workflow_run_id=workflow_run_id,
+                    status=failed["status"],
+                )
+
             started = repository.start_run(workflow_run_id, environment_id=environment_id)
             _insert_workflow_audit_event(
                 connection,
@@ -93,22 +108,26 @@ class WorkflowRunWorker:
                 workflow_type=str(started["workflow_type"]),
                 status=started["status"],
             )
-            try:
-                result = self.runner_registry.run(command_ref, inputs)
-            except WorkflowRunnerError as exc:
-                result = WorkflowRunResult(
-                    status="failed",
-                    exit_code=1,
-                    summary={"error": str(exc)},
-                    logs=[
-                        WorkflowRunLogLine(
-                            stream="stderr",
-                            line_number=1,
-                            message=str(exc),
-                        )
-                    ],
-                )
 
+        try:
+            result = self.runner_registry.run(command_ref, inputs)
+        except WorkflowRunnerError as exc:
+            result = WorkflowRunResult(
+                status="failed",
+                exit_code=1,
+                summary={"error": str(exc)},
+                logs=[
+                    WorkflowRunLogLine(
+                        stream="stderr",
+                        line_number=1,
+                        message=str(exc),
+                    )
+                ],
+            )
+
+        with self.database.transaction() as connection:
+            jobs = JobStateRepository(connection)
+            repository = WorkflowRepository(connection, organization_id)
             completed = repository.complete_run(
                 workflow_run_id,
                 environment_id=environment_id,

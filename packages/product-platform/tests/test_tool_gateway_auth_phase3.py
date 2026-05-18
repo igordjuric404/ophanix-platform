@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from product_platform import create_app
 from product_platform.agents.credentials import AgentCredentialRepository
 from product_platform.agents.models import CredentialScopeRequest
+from product_platform.api.auth import DevLoginRequest
 from product_platform.api.settings import Settings
 from product_platform.audit.store import AuditEventQuery, AuditEventRepository
 from product_platform.db.seed import DEMO_ADMIN_USER_ID, DEMO_ENV_ID, DEMO_ORG_ID, seed_demo_data
@@ -503,6 +504,29 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
         self.assertEqual(client.get("/docs").status_code, 404)
         self.assertEqual(client.get("/openapi.json").status_code, 404)
         self.assertEqual(client.get("/api/openapi.json").status_code, 404)
+
+    def test_api_does_not_register_dev_login_outside_local_test(self) -> None:
+        app = create_app(
+            self._production_settings(),
+            database=self.database,
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+        auth_response = app.state.auth_service.login(DevLoginRequest(email="admin@example.com"))
+
+        response = client.post(
+            "/api/v1/auth/dev-login",
+            headers={"Authorization": f"Bearer {auth_response.access_token}"},
+            json={"email": "admin@example.com", "roles": ["Platform Admin"]},
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_api_rejects_dev_login_in_any_non_local_environment(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Development login"):
+            create_app(
+                self._production_settings(environment="staging", enable_dev_login=True),
+                database=self.database,
+            )
 
     def test_api_system_config_hides_docs_url_when_docs_disabled(self) -> None:
         app = create_app(

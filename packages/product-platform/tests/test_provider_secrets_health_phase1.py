@@ -89,6 +89,47 @@ class ProviderCredentialPhase1Tests(unittest.TestCase):
         self.assertNotIn("sk-raw-value-not-in-db", serialized)
         self.assertIn("secref_", serialized)
 
+    def test_create_credential_accepts_precreated_secret_ref_for_read_only_provider(self) -> None:
+        self.app.state.secret_provider = EnvironmentSecretProvider()
+        with patch.dict(os.environ, {"PROVIDER_TOKEN": "sk-demo-secret"}, clear=False):
+            credential = self.client.post(
+                "/api/v1/integrations/provider-credentials",
+                headers=self._headers(),
+                json={
+                    "name": "OpenAI env key",
+                    "provider_type": "model_provider",
+                    "secret_ref": "env:PROVIDER_TOKEN",
+                },
+            )
+            self.assertEqual(credential.status_code, 201, credential.text)
+
+            health = self.client.post(
+                f"/api/v1/integrations/provider-credentials/{credential.json()['id']}/test",
+                headers=self._headers(),
+            )
+
+        self.assertEqual(credential.json()["secret_ref"], "env:PROVIDER_TOKEN")
+        self.assertNotIn("sk-demo-secret", credential.text)
+        self.assertEqual(health.status_code, 201, health.text)
+        self.assertEqual(health.json()["status"], "healthy")
+
+    def test_create_credential_with_read_only_provider_requires_secret_ref(self) -> None:
+        self.app.state.secret_provider = EnvironmentSecretProvider()
+
+        response = self.client.post(
+            "/api/v1/integrations/provider-credentials",
+            headers=self._headers(),
+            json={
+                "name": "OpenAI raw key",
+                "provider_type": "model_provider",
+                "secret_value": "sk-demo-secret",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("secret_ref", response.json()["message"])
+        self.assertNotIn("sk-demo-secret", response.text)
+
     def test_demo_secret_provider_retrieves_by_ref(self) -> None:
         secret_ref = self.secret_provider.store("demo-secret-value")
 

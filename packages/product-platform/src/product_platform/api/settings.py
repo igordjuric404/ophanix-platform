@@ -107,6 +107,12 @@ class Settings:
     artifact_storage_path: str = field(
         default_factory=lambda: os.environ.get("OPHANIX_ARTIFACT_STORAGE_PATH", "/tmp/ophanix-product-artifacts")
     )
+    artifact_max_bytes: int = field(
+        default_factory=lambda: _int_env("OPHANIX_ARTIFACT_MAX_BYTES", 25_000_000)
+    )
+    api_max_body_bytes: int = field(
+        default_factory=lambda: _int_env("OPHANIX_API_MAX_BODY_BYTES", 35_000_000)
+    )
     secret_manager_ref: str | None = field(
         default_factory=lambda: os.environ.get("OPHANIX_SECRET_MANAGER_REF")
     )

@@ -84,6 +84,49 @@ class ProductApiShellPhase3Tests(unittest.TestCase):
         self.assertEqual(payload["dependencies"][0]["status"], "unhealthy")
         self.assertFalse(payload["dependencies"][0]["required"])
 
+    def test_production_readiness_redacts_dependency_messages(self) -> None:
+        database = create_test_database()
+        try:
+            registry = DependencyRegistry()
+            registry.register(
+                "database",
+                static_dependency(
+                    "database",
+                    status="unhealthy",
+                    message="postgresql://user:secret@db.example.com/ophanix failed",
+                ),
+                required=True,
+            )
+            client = TestClient(
+                create_app(
+                    Settings(
+                        app_name="Ophanix Test Platform",
+                        environment="production",
+                        build_sha="test-sha",
+                        build_time="2026-04-30T00:00:00Z",
+                        database_url=database.database_url,
+                        session_secret="production-test-secret",
+                        secret_manager_ref="env",
+                        gateway_token_hash_pepper="test-pepper",
+                        tool_gateway_upstream_host_allowlist=["*.example.com"],
+                    ),
+                    database=database,
+                    dependency_registry=registry,
+                ),
+                raise_server_exceptions=False,
+            )
+
+            response = client.get("/ready")
+        finally:
+            database.close()
+
+        self.assertEqual(response.status_code, 503)
+        dependency = response.json()["dependencies"][0]
+        self.assertEqual(dependency["name"], "database")
+        self.assertEqual(dependency["status"], "unhealthy")
+        self.assertIsNone(dependency["message"])
+        self.assertNotIn("secret", response.text)
+
     def test_system_dependencies_return_registered_statuses(self) -> None:
         registry = DependencyRegistry()
         registry.register("database", static_dependency("database", status="healthy"), required=True)

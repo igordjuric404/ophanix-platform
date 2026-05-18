@@ -143,6 +143,7 @@ class JobScheduleRepository:
             SELECT * FROM job_schedules
             WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?
             ORDER BY next_run_at, id
+            FOR UPDATE SKIP LOCKED
             """,
             (now_iso,),
         ).fetchall()

@@ -65,6 +65,10 @@ class ProviderCredentialNotFoundError(ValueError):
     """Raised when a provider credential is missing."""
 
 
+class ProviderCredentialSecretError(ValueError):
+    """Raised when a provider credential secret source cannot be used safely."""
+
+
 class IntegrationRegistryRepository:
     """Read and manage framework integration metadata."""
 
@@ -107,7 +111,17 @@ class IntegrationRegistryRepository:
     ) -> Row:
         """Create provider credential metadata after storing the raw secret externally."""
 
-        secret_ref = secret_provider.store(body.secret_value)
+        if body.secret_ref is not None:
+            secret_ref = body.secret_ref
+        elif body.secret_value is not None:
+            try:
+                secret_ref = secret_provider.store(body.secret_value)
+            except RuntimeError as exc:
+                raise ProviderCredentialSecretError(
+                    "Configured secret provider cannot store secret values; submit a pre-created secret_ref."
+                ) from exc
+        else:
+            raise ProviderCredentialSecretError("Exactly one of secret_value or secret_ref is required.")
         now = utc_now_iso()
         credential_id = generate_id("provcred")
         self.connection.execute(

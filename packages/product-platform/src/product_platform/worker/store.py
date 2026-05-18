@@ -113,17 +113,51 @@ class JobStateRepository:
             values,
         ).fetchone()
 
-    def mark_running(self, job_id: str) -> Row:
+    def claim_next_queued_job(self, *, job_type: str | None = None) -> Row | None:
+        """Atomically claim the next queued job for one worker."""
+
         now = utc_now_iso()
-        self.connection.execute(
+        clauses = ["status = ?"]
+        values: list[object] = [JobStatus.QUEUED]
+        if job_type is not None:
+            clauses.append("job_type = ?")
+            values.append(job_type)
+        return self.connection.execute(
+            f"""
+            UPDATE background_jobs
+            SET status = ?, started_at = ?, attempts = attempts + 1, updated_at = ?
+            WHERE id = (
+                SELECT id
+                FROM background_jobs
+                WHERE {' AND '.join(clauses)}
+                ORDER BY created_at ASC, id ASC
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+            )
+            RETURNING *
+            """,
+            (JobStatus.RUNNING, now, now, *values),
+        ).fetchone()
+
+    def claim_queued_job(self, job_id: str) -> Row | None:
+        """Atomically claim a specific queued job."""
+
+        now = utc_now_iso()
+        return self.connection.execute(
             """
             UPDATE background_jobs
             SET status = ?, started_at = ?, attempts = attempts + 1, updated_at = ?
-            WHERE id = ?
+            WHERE id = ? AND status = ?
+            RETURNING *
             """,
-            (JobStatus.RUNNING, now, now, job_id),
-        )
-        return self.get_job(job_id)
+            (JobStatus.RUNNING, now, now, job_id, JobStatus.QUEUED),
+        ).fetchone()
+
+    def mark_running(self, job_id: str) -> Row:
+        row = self.claim_queued_job(job_id)
+        if row is None:
+            raise RuntimeError("Queued job could not be claimed.")
+        return row
 
     def mark_succeeded(
         self,

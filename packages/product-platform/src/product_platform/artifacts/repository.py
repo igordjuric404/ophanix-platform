@@ -47,15 +47,18 @@ class ArtifactRepository:
         organization_id: str,
         environment_id: str,
         storage: LocalArtifactProvider,
+        *,
+        max_size_bytes: int | None = None,
     ) -> None:
         self.connection = connection
         self.organization_id = organization_id
         self.environment_id = environment_id
         self.storage = storage
+        self.max_size_bytes = max_size_bytes
 
     def create(self, body: ArtifactCreateRequest, *, actor_id: str) -> Row:
         artifact_id = generate_id("art")
-        data = _decode_base64(body.content_base64)
+        data = _decode_base64(body.content_base64, max_size_bytes=self.max_size_bytes)
         key = f"{self.organization_id}/{self.environment_id}/{artifact_id}/{_safe_name(body.name)}"
         storage_uri = self.storage.upload(key, data)
         now = utc_now_iso()
@@ -306,11 +309,18 @@ def artifact_attestation_response(row: Row) -> ArtifactAttestationResponse:
     )
 
 
-def _decode_base64(content: str) -> bytes:
+def _decode_base64(content: str, *, max_size_bytes: int | None = None) -> bytes:
+    if max_size_bytes is not None and max_size_bytes > 0:
+        max_encoded_length = ((max_size_bytes + 2) // 3) * 4
+        if len(content) > max_encoded_length + 4:
+            raise ArtifactValidationError("Artifact content exceeds the configured size limit.")
     try:
-        return base64.b64decode(content, validate=True)
+        data = base64.b64decode(content, validate=True)
     except binascii.Error as exc:
         raise ArtifactValidationError("content_base64 must be valid base64.") from exc
+    if max_size_bytes is not None and max_size_bytes > 0 and len(data) > max_size_bytes:
+        raise ArtifactValidationError("Artifact content exceeds the configured size limit.")
+    return data
 
 
 def _safe_name(name: str) -> str:

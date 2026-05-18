@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class FrameworkIntegrationResponse(BaseModel):
@@ -117,16 +117,25 @@ class ProviderCredentialCreateRequest(BaseModel):
 
     name: str = Field(min_length=1)
     provider_type: str = Field(min_length=1)
-    secret_value: str = Field(min_length=1)
+    secret_value: str | None = Field(default=None, min_length=1)
+    secret_ref: str | None = Field(default=None, min_length=1)
     status: str = "active"
 
-    @field_validator("name", "provider_type", "secret_value", "status")
+    @field_validator("name", "provider_type", "secret_value", "secret_ref", "status")
     @classmethod
-    def _strip_credential_string(cls, value: str) -> str:
+    def _strip_credential_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         stripped = value.strip()
         if not stripped:
             raise ValueError("field must not be blank.")
         return stripped
+
+    @model_validator(mode="after")
+    def _require_exactly_one_secret_source(self) -> "ProviderCredentialCreateRequest":
+        if bool(self.secret_value) == bool(self.secret_ref):
+            raise ValueError("Exactly one of secret_value or secret_ref is required.")
+        return self
 
 
 class ProviderCredentialResponse(BaseModel):

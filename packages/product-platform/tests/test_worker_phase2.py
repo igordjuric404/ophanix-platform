@@ -68,6 +68,41 @@ class WorkerPhase2Tests(unittest.TestCase):
         finally:
             database.close()
 
+    def test_claim_next_queued_job_is_atomic_state_transition(self) -> None:
+        database = create_migrated_test_database()
+        try:
+            with database.transaction() as connection:
+                seed_demo_data(connection)
+                repository = JobStateRepository(connection)
+                first = repository.create_job(
+                    organization_id="org_default",
+                    environment_id="env_default",
+                    job_type="demo.claim",
+                    payload={"order": 1},
+                    job_id="job_claim_first",
+                )
+                second = repository.create_job(
+                    organization_id="org_default",
+                    environment_id="env_default",
+                    job_type="demo.claim",
+                    payload={"order": 2},
+                    job_id="job_claim_second",
+                )
+
+                claimed = repository.claim_next_queued_job(job_type="demo.claim")
+                duplicate = repository.claim_queued_job(first["id"])
+                next_claimed = repository.claim_next_queued_job(job_type="demo.claim")
+
+            self.assertIsNotNone(claimed)
+            self.assertEqual(claimed["id"], first["id"])
+            self.assertEqual(claimed["status"], JobStatus.RUNNING)
+            self.assertEqual(claimed["attempts"], 1)
+            self.assertIsNone(duplicate)
+            self.assertIsNotNone(next_claimed)
+            self.assertEqual(next_claimed["id"], second["id"])
+        finally:
+            database.close()
+
     def test_retry_increments_attempt_count(self) -> None:
         database = create_migrated_test_database()
         try:
@@ -95,4 +130,3 @@ class WorkerPhase2Tests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

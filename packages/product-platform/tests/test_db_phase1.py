@@ -1509,7 +1509,6 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
                         display_name="Postgres Lookup",
                         owner_team="platform",
                         required_scope="tools:postgres.lookup",
-                        status="active",
                     ),
                     created_by=DEMO_ADMIN_USER_ID,
                 )

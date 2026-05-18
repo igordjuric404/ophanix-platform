@@ -44,6 +44,7 @@ class WorkflowRunnerPhase3ArtifactTests(unittest.TestCase):
                 dev_login_allowed_emails=["operator@example.com"],
                 session_secret="test-secret",
                 artifact_storage_path=self.artifact_root.name,
+                artifact_max_bytes=64,
             ),
             database=self.database,
         )
@@ -148,6 +149,21 @@ class WorkflowRunnerPhase3ArtifactTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400, response.text)
         self.assertIn("path separators", response.json()["message"])
+
+    def test_artifact_upload_rejects_configured_size_limit(self) -> None:
+        response = self.client.post(
+            "/api/v1/artifacts",
+            headers=self._headers(),
+            json={
+                "artifact_type": "workflow.output",
+                "name": "too-large.bin",
+                "content_type": "application/octet-stream",
+                "content_base64": base64.b64encode(b"x" * 65).decode("ascii"),
+            },
+        )
+
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("size limit", response.json()["message"])
 
     def test_artifact_links_validate_target_type_and_target_existence(self) -> None:
         artifact = self._upload_artifact()

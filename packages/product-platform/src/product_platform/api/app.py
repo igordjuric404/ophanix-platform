@@ -30,6 +30,7 @@ from product_platform.api.api_keys import (
     ApiKeyCreateResponse,
     ApiKeyResponse,
     ApiKeyStore,
+    DatabaseApiKeyStore,
 )
 from product_platform.audit.events import AuditEventEnvelope, agent_lifecycle_event, workflow_run_event
 from product_platform.audit.hash_chain import AuditVerificationResult
@@ -228,6 +229,7 @@ from product_platform.integrations.repository import (
     FrameworkInstanceNotFoundError,
     FrameworkIntegrationNotFoundError,
     IntegrationRegistryRepository,
+    ProviderCredentialSecretError,
     framework_agent_response,
     framework_instance_response,
     framework_integration_response,
@@ -648,6 +650,9 @@ from product_platform.workflows.worker import WORKFLOW_JOB_TYPE
 MAX_TRACE_ID_LENGTH = 128
 TRACE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:/@+-]+$")
 LOGGER = logging.getLogger(__name__)
+SAFE_PRODUCTION_HTTP_DETAIL_PREFIXES = (
+    "Disabling Tool Gateway response policy is blocked",
+)
 
 
 def _request_context_from_request(request: Request) -> RequestContext:
@@ -739,6 +744,57 @@ def _error_response(
     )
 
 
+def _validation_error_details(exc: RequestValidationError, environment: str) -> dict[str, Any]:
+    if _is_local_environment(environment):
+        return {"errors": jsonable_encoder(exc.errors())}
+    return {
+        "errors": [
+            {
+                "loc": jsonable_encoder(error.get("loc", [])),
+                "msg": "Invalid request value.",
+                "type": str(error.get("type") or "value_error"),
+            }
+            for error in exc.errors()
+        ]
+    }
+
+
+def _safe_http_error_message(exc: StarletteHTTPException, environment: str) -> str:
+    detail = exc.detail if isinstance(exc.detail, str) else ""
+    if _is_local_environment(environment):
+        return detail or "HTTP error."
+    if detail and any(detail.startswith(prefix) for prefix in SAFE_PRODUCTION_HTTP_DETAIL_PREFIXES):
+        return detail
+    return {
+        400: "Invalid request.",
+        401: "Authentication is required.",
+        403: "Access is denied.",
+        404: "Resource not found.",
+        409: "Request conflicts with current resource state.",
+        413: "Request body too large.",
+        422: "Request validation failed.",
+        429: "Rate limit exceeded.",
+    }.get(exc.status_code, "HTTP error.")
+
+
+def _public_dependency_statuses(
+    dependencies: list[DependencyStatus],
+    *,
+    expose_messages: bool,
+) -> list[DependencyStatus]:
+    if expose_messages:
+        return dependencies
+    return [
+        DependencyStatus(
+            name=dependency.name,
+            status=dependency.status,
+            required=dependency.required,
+            message=None,
+        )
+        for dependency in dependencies
+    ]
+
+
 def _is_local_environment(environment: str) -> bool:
     return environment.strip().lower() in {"development", "dev", "local", "local-demo", "test"}
 
@@ -757,7 +813,7 @@ def _validate_production_settings(settings: Settings) -> None:
         else _is_local_environment(settings.environment)
     )
     if enable_dev_login:
-        raise ValueError("Development login must be disabled in production.")
+        raise ValueError("Development login must be disabled outside local/test environments.")
     if is_production:
         if not is_supported_secret_manager_ref(settings.secret_manager_ref):
             raise ValueError(
@@ -775,6 +831,8 @@ def _validate_production_settings(settings: Settings) -> None:
         raise ValueError("OPHANIX_GATEWAY_TOKEN_HASH_PEPPER must be set in production.")
     positive_gateway_limits = {
         "OPHANIX_DATABASE_MAX_POOL_SIZE": settings.database_max_pool_size,
+        "OPHANIX_API_MAX_BODY_BYTES": settings.api_max_body_bytes,
+        "OPHANIX_ARTIFACT_MAX_BYTES": settings.artifact_max_bytes,
         "OPHANIX_TOOL_GATEWAY_MAX_BODY_BYTES": settings.tool_gateway_max_body_bytes,
         "OPHANIX_TOOL_GATEWAY_RATE_LIMIT_WINDOW_SECONDS": (
             settings.tool_gateway_rate_limit_window_seconds
@@ -811,6 +869,10 @@ def _is_tool_gateway_runtime_path(path: str) -> bool:
         and path.startswith("/api/v1/tools/")
         and path.endswith("/invoke")
     )
+
+
+def _is_api_body_limited_path(path: str) -> bool:
+    return path.startswith("/api/v1/")
 
 
 def _gateway_rate_limit_key(request: Request, *, secret: str) -> str:
@@ -881,20 +943,53 @@ def _validate_upstream_target_host_allowed(base_url: str, settings: Settings) ->
 
 
 class ToolGatewayBodyLimitMiddleware:
-    """ASGI receive wrapper that enforces gateway body caps without private Request mutation."""
+    """ASGI receive wrapper that enforces body caps without private Request mutation."""
 
-    def __init__(self, app: Any, *, max_body_bytes: int) -> None:
+    def __init__(
+        self,
+        app: Any,
+        *,
+        max_body_bytes: int,
+        path_predicate: Any = _is_tool_gateway_runtime_path,
+        message: str = "Tool Gateway request body exceeds the configured size limit.",
+    ) -> None:
         self.app = app
         self.max_body_bytes = int(max_body_bytes)
+        self.path_predicate = path_predicate
+        self.message = message
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if (
             scope.get("type") != "http"
             or self.max_body_bytes <= 0
-            or not _is_tool_gateway_runtime_path(str(scope.get("path") or ""))
+            or str(scope.get("method") or "").upper() not in {"POST", "PUT", "PATCH"}
+            or not self.path_predicate(str(scope.get("path") or ""))
         ):
             await self.app(scope, receive, send)
             return
+        headers = _scope_headers(scope)
+        content_length = headers.get("content-length")
+        if content_length is not None:
+            try:
+                body_bytes = int(content_length)
+            except ValueError:
+                await _send_asgi_error_response(
+                    scope,
+                    send,
+                    status_code=400,
+                    code="INVALID_CONTENT_LENGTH",
+                    message="Content-Length must be an integer.",
+                )
+                return
+            if body_bytes > self.max_body_bytes:
+                await _send_asgi_error_response(
+                    scope,
+                    send,
+                    status_code=413,
+                    code="REQUEST_BODY_TOO_LARGE",
+                    message=self.message,
+                )
+                return
         received_bytes = 0
         chunks: list[bytes] = []
         while True:
@@ -911,7 +1006,7 @@ class ToolGatewayBodyLimitMiddleware:
                         send,
                         status_code=413,
                         code="REQUEST_BODY_TOO_LARGE",
-                        message="Tool Gateway request body exceeds the configured size limit.",
+                        message=self.message,
                     )
                     return
                 chunks.append(body)
@@ -1010,6 +1105,7 @@ def create_app(
     auth_service = AuthService(resolved_settings)
     tenants = tenant_store or TenantStore()
     api_keys = api_key_store or ApiKeyStore(resolved_settings.session_secret)
+    use_persistent_api_keys = api_key_store is None
     started_at = time.monotonic()
 
     enable_api_docs = (
@@ -1075,6 +1171,12 @@ def create_app(
             "X-Request-ID",
             "X-User-ID",
         ],
+    )
+    app.add_middleware(
+        ToolGatewayBodyLimitMiddleware,
+        max_body_bytes=int(resolved_settings.api_max_body_bytes),
+        path_predicate=_is_api_body_limited_path,
+        message="API request body exceeds the configured size limit.",
     )
     app.add_middleware(
         ToolGatewayBodyLimitMiddleware,
@@ -1161,7 +1263,11 @@ def create_app(
                 authorization = request.headers.get("Authorization", "")
                 scheme, _, token = authorization.partition(" ")
                 if scheme.lower() == "bearer" and token:
-                    principal = api_keys.authenticate(token)
+                    if use_persistent_api_keys:
+                        with _audit_database().transaction() as connection:
+                            principal = _api_key_store(connection).authenticate(token)
+                    else:
+                        principal = api_keys.authenticate(token)
             if principal is None:
                 return _error_response(
                     request,
@@ -1180,7 +1286,8 @@ def create_app(
                     code="FORBIDDEN",
                     message="Organization access is denied.",
                 )
-            if tenants.get_organization(selected_organization_id) is None:
+            organization_id = str(selected_organization_id)
+            if tenants.get_organization(organization_id) is None:
                 return _error_response(
                     request,
                     status_code=403,
@@ -1190,14 +1297,14 @@ def create_app(
             selected_environment_id = request.headers.get("X-Environment-ID")
             if selected_environment_id:
                 environment = tenants.get_environment(selected_environment_id)
-                if environment is None or environment.organization_id != selected_organization_id:
+                if environment is None or environment.organization_id != organization_id:
                     return _error_response(
                         request,
                         status_code=403,
                         code="FORBIDDEN",
                         message="Environment access is denied.",
                     )
-            request.state.selected_organization_id = selected_organization_id
+            request.state.selected_organization_id = organization_id
             request.state.selected_environment_id = selected_environment_id
         return await call_next(request)
 
@@ -1210,17 +1317,16 @@ def create_app(
             status_code=422,
             code="VALIDATION_ERROR",
             message="Request validation failed.",
-            details={"errors": jsonable_encoder(exc.errors())},
+            details=_validation_error_details(exc, resolved_settings.environment),
         )
 
     @app.exception_handler(StarletteHTTPException)
     async def http_error_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
-        detail = exc.detail if isinstance(exc.detail, str) else "HTTP error."
         return _error_response(
             request,
             status_code=exc.status_code,
             code="HTTP_ERROR",
-            message=detail,
+            message=_safe_http_error_message(exc, resolved_settings.environment),
             details={},
         )
 
@@ -1484,7 +1590,11 @@ def create_app(
             organization_id,
             environment_id,
             LocalArtifactProvider(Path(resolved_settings.artifact_storage_path)),
+            max_size_bytes=int(resolved_settings.artifact_max_bytes),
         )
+
+    def _api_key_store(connection: Any) -> DatabaseApiKeyStore:
+        return DatabaseApiKeyStore(connection, resolved_settings.session_secret)
 
     def _create_generated_artifact(
         *,
@@ -3275,7 +3385,7 @@ def create_app(
         return HealthStatus(
             status="ok",
             version=__version__,
-            dependencies=registry.check_all(),
+            dependencies=[],
             uptime_seconds=round(time.monotonic() - started_at, 3),
         )
 
@@ -3287,7 +3397,10 @@ def create_app(
         payload = HealthStatus(
             status="ready" if ready_status else "unhealthy",
             version=__version__,
-            dependencies=dependencies,
+            dependencies=_public_dependency_statuses(
+                dependencies,
+                expose_messages=resolved_settings.environment.strip().lower() != "production",
+            ),
             uptime_seconds=round(time.monotonic() - started_at, 3),
         )
         if not ready_status:
@@ -3326,25 +3439,28 @@ def create_app(
             },
         )
 
-    @app.post("/api/v1/auth/dev-login", response_model=AuthResponse, tags=["auth"])
-    async def dev_login(body: DevLoginRequest) -> JSONResponse:
-        """Development-only login for allowlisted local users."""
+    if enable_dev_login:
 
-        try:
-            auth_response = auth_service.login(body)
-        except PermissionError as exc:
-            raise HTTPException(status_code=403, detail=str(exc))
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-        response = JSONResponse(content=auth_response.model_dump())
-        response.set_cookie(
-            SESSION_COOKIE_NAME,
-            auth_response.access_token,
-            httponly=True,
-            samesite="lax",
-            max_age=resolved_settings.session_ttl_seconds,
-        )
-        return response
+        @app.post("/api/v1/auth/dev-login", response_model=AuthResponse, tags=["auth"])
+        async def dev_login(body: DevLoginRequest) -> JSONResponse:
+            """Development-only login for allowlisted local users."""
+
+            try:
+                auth_response = auth_service.login(body)
+            except PermissionError as exc:
+                raise HTTPException(status_code=403, detail=str(exc))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            response = JSONResponse(content=auth_response.model_dump())
+            response.set_cookie(
+                SESSION_COOKIE_NAME,
+                auth_response.access_token,
+                httponly=True,
+                samesite="lax",
+                max_age=resolved_settings.session_ttl_seconds,
+                secure=not _is_local_environment(resolved_settings.environment),
+            )
+            return response
 
     @app.post("/api/v1/auth/logout", tags=["auth"])
     async def logout() -> JSONResponse:
@@ -4084,13 +4200,23 @@ def create_app(
 
         if current_user.organization_id is None:
             raise HTTPException(status_code=400, detail="Organization context is required.")
-        record, secret = api_keys.create_key(
-            organization_id=current_user.organization_id,
-            name=body.name,
-            scopes=body.scopes,
-            kind=body.kind,
-            expires_at=body.expires_at,
-        )
+        if use_persistent_api_keys:
+            with _audit_database().transaction() as connection:
+                record, secret = _api_key_store(connection).create_key(
+                    organization_id=current_user.organization_id,
+                    name=body.name,
+                    scopes=body.scopes,
+                    kind=body.kind,
+                    expires_at=body.expires_at,
+                )
+        else:
+            record, secret = api_keys.create_key(
+                organization_id=current_user.organization_id,
+                name=body.name,
+                scopes=body.scopes,
+                kind=body.kind,
+                expires_at=body.expires_at,
+            )
         return ApiKeyCreateResponse(key=record.to_response(), secret=secret)
 
     @app.get("/api/v1/api-keys", response_model=list[ApiKeyResponse], tags=["auth"])
@@ -4101,7 +4227,12 @@ def create_app(
 
         if current_user.organization_id is None:
             return []
-        return [record.to_response() for record in api_keys.list_keys(current_user.organization_id)]
+        if use_persistent_api_keys:
+            with _audit_database().transaction() as connection:
+                records = _api_key_store(connection).list_keys(current_user.organization_id)
+        else:
+            records = api_keys.list_keys(current_user.organization_id)
+        return [record.to_response() for record in records]
 
     @app.delete("/api/v1/api-keys/{key_id}", status_code=204, tags=["auth"])
     async def revoke_api_key(
@@ -4110,9 +4241,14 @@ def create_app(
     ) -> None:
         """Revoke an API key for the current organization."""
 
-        if current_user.organization_id is None or not api_keys.revoke(
-            key_id, current_user.organization_id
-        ):
+        if current_user.organization_id is None:
+            raise HTTPException(status_code=404, detail="API key not found.")
+        if use_persistent_api_keys:
+            with _audit_database().transaction() as connection:
+                revoked = _api_key_store(connection).revoke(key_id, current_user.organization_id)
+        else:
+            revoked = api_keys.revoke(key_id, current_user.organization_id)
+        if not revoked:
             raise HTTPException(status_code=404, detail="API key not found.")
 
     @app.post("/api/v1/audit/events", response_model=AuditEventEnvelope, status_code=201, tags=["audit"])
@@ -10703,11 +10839,14 @@ def create_app(
         organization_id = _require_organization_id(current_user)
         with _audit_database().transaction() as connection:
             repository = IntegrationRegistryRepository(connection, organization_id, environment_id)
-            row = repository.create_provider_credential(
-                body,
-                created_by=current_user.id,
-                secret_provider=_secret_provider(),
-            )
+            try:
+                row = repository.create_provider_credential(
+                    body,
+                    created_by=current_user.id,
+                    secret_provider=_secret_provider(),
+                )
+            except ProviderCredentialSecretError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
             return provider_credential_response(row)
 
     @app.get(

@@ -58,8 +58,13 @@ class AuthPhase4Tests(unittest.TestCase):
 
         self.assertTrue(created["secret"].startswith("opx_"))
         self.assertEqual(created["key"]["name"], "Scoped key")
-        records = self.app.state.api_key_store.records
-        self.assertNotIn(created["secret"], records[created["key"]["id"]].hashed_secret)
+        with self.app.state.database.transaction() as connection:
+            row = connection.execute(
+                "SELECT hashed_secret FROM api_keys WHERE id = ?",
+                (created["key"]["id"],),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertNotIn(created["secret"], row["hashed_secret"])
 
         listed = self.client.get("/api/v1/api-keys", headers=self.admin_headers)
         self.assertEqual(listed.status_code, 200)
@@ -105,7 +110,29 @@ class AuthPhase4Tests(unittest.TestCase):
         matching = [key for key in listed if key["id"] == key_id][0]
         self.assertIsNotNone(matching["last_used_at"])
 
+    def test_api_key_authentication_survives_app_recreation(self) -> None:
+        created = self._create_key([Permission.TENANT_READ])
+        database = self.app.state.database
+        second_app = create_app(
+            Settings(
+                app_name="Ophanix Test Platform",
+                environment="test",
+                build_sha="test-sha",
+                build_time="2026-04-30T00:00:00Z",
+                dev_login_allowed_emails=["admin@example.com"],
+                session_secret="test-secret",
+            ),
+            database=database,
+        )
+        second_client = TestClient(second_app, raise_server_exceptions=False)
+
+        response = second_client.get(
+            "/api/v1/organizations",
+            headers={"Authorization": f"Bearer {created['secret']}"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+
 
 if __name__ == "__main__":
     unittest.main()
-
