@@ -22,7 +22,12 @@ export function useTenantSelection(user: UserPrincipal): TenantSelection {
   const organizations = useOrganizations();
   const environments = useEnvironments();
   const [selectedEnvironmentId, setSelectedEnvironmentId] = useState(() =>
-    typeof window === "undefined" ? null : readSelectedEnvironmentId()
+    typeof window === "undefined"
+      ? null
+      : readSelectedEnvironmentId(window.localStorage, {
+          organizationId: user.organization_id,
+          userId: user.id
+        })
   );
 
   const organizationItems = organizations.data ?? [];
@@ -55,9 +60,12 @@ export function useTenantSelection(user: UserPrincipal): TenantSelection {
 
   useEffect(() => {
     if (selectedEnvironment) {
-      writeSelectedEnvironmentId(selectedEnvironment.id);
+      writeSelectedEnvironmentId(selectedEnvironment.id, window.localStorage, {
+        organizationId: selectedOrganization?.id ?? user.organization_id,
+        userId: user.id
+      });
     }
-  }, [selectedEnvironment]);
+  }, [selectedEnvironment, selectedOrganization?.id, user.id, user.organization_id]);
 
   return {
     organizations: organizationItems,

@@ -60,7 +60,7 @@ import {
   TableHeader,
   TableRow
 } from "../../components/ui/table";
-import { parseJsonObjectField } from "../../lib/forms";
+import { parseJsonObjectField, parseRequiredNumberField } from "../../lib/forms";
 
 const pluginTypes = ["", "policy_template", "integration", "agent", "validator"];
 const pluginStatuses = ["", "available", "deprecated", "disabled"];
@@ -1122,12 +1122,12 @@ export function marketplaceSigningKeyPayloadFromForm(form: HTMLFormElement) {
 
 export function marketplaceTrustPayloadFromValues(values: Record<string, unknown>) {
   return {
-    daily_active_users: integerValue(values.daily_active_users),
-    total_invocations: integerValue(values.total_invocations),
-    error_count: integerValue(values.error_count),
-    incident_count: integerValue(values.incident_count),
-    days_since_update: integerValue(values.days_since_update),
-    adoption_trend: numberValue(values.adoption_trend),
+    daily_active_users: integerValue(values.daily_active_users, "Daily Active Users"),
+    total_invocations: integerValue(values.total_invocations, "Total Invocations"),
+    error_count: integerValue(values.error_count, "Error Count"),
+    incident_count: integerValue(values.incident_count, "Incident Count"),
+    days_since_update: integerValue(values.days_since_update, "Days Since Update"),
+    adoption_trend: numberValue(values.adoption_trend, "Adoption Trend"),
     source_event_id: optionalString(values.source_event_id)
   };
 }
@@ -1160,14 +1160,12 @@ function optionalString(value: unknown) {
   return normalized || null;
 }
 
-function integerValue(value: unknown) {
-  const parsed = Number.parseInt(String(value ?? "0"), 10);
-  return Number.isFinite(parsed) ? parsed : 0;
+function integerValue(value: unknown, fieldName: string) {
+  return parseRequiredNumberField(value, fieldName, { integer: true });
 }
 
-function numberValue(value: unknown) {
-  const parsed = Number.parseFloat(String(value ?? "0"));
-  return Number.isFinite(parsed) ? parsed : 0;
+function numberValue(value: unknown, fieldName: string) {
+  return parseRequiredNumberField(value, fieldName);
 }
 
 function parseObjectJson(value: string) {

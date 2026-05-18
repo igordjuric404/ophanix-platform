@@ -68,6 +68,7 @@ import {
 } from "../../components/shared/ActionFeedback";
 import type { TenantContext } from "../../api/client";
 import { QueryErrorSummary } from "../../components/shared/ErrorState";
+import { parseOptionalNumberField, parseRequiredNumberField } from "../../lib/forms";
 import { cn } from "../../lib/utils";
 
 const rings = ["0", "1", "2", "3"];
@@ -1221,8 +1222,8 @@ export function runtimeSagaCancelPayloadFromForm(form: HTMLFormElement) {
 }
 
 export function runtimeSandboxProfilePayloadFromForm(form: HTMLFormElement) {
-  const timeout = formNumber(form, "timeout_seconds", Number.NaN);
-  const memory = formNumber(form, "memory_mb", Number.NaN);
+  const timeout = optionalFormInteger(form, "timeout_seconds");
+  const memory = optionalFormInteger(form, "memory_mb");
   const networkEgress = emptyToNull(formString(form, "network_egress"));
   return {
     name: formString(form, "name"),
@@ -1232,8 +1233,8 @@ export function runtimeSandboxProfilePayloadFromForm(form: HTMLFormElement) {
     allowed_paths: splitList(formString(form, "allowed_paths")),
     network_policy: networkEgress ? { egress: networkEgress } : {},
     resource_limits: {
-      ...(Number.isFinite(timeout) ? { timeout_seconds: timeout } : {}),
-      ...(Number.isFinite(memory) ? { memory_mb: memory } : {})
+      ...(timeout !== null ? { timeout_seconds: timeout } : {}),
+      ...(memory !== null ? { memory_mb: memory } : {})
     }
   };
 }
@@ -1266,8 +1267,16 @@ function formString(form: HTMLFormElement, name: string, fallback = "") {
 }
 
 function formNumber(form: HTMLFormElement, name: string, fallback: number) {
-  const parsed = Number.parseInt(formString(form, name, String(fallback)), 10);
-  return Number.isFinite(parsed) ? parsed : fallback;
+  return parseRequiredNumberField(formString(form, name), humanizeFieldName(name), {
+    emptyFallback: fallback,
+    integer: true
+  });
+}
+
+function optionalFormInteger(form: HTMLFormElement, name: string) {
+  return parseOptionalNumberField(formString(form, name), humanizeFieldName(name), {
+    integer: true
+  });
 }
 
 function formBoolean(form: HTMLFormElement, name: string) {
@@ -1285,4 +1294,11 @@ function splitList(value: string) {
 function emptyToNull(value: string) {
   const stripped = value.trim();
   return stripped || null;
+}
+
+function humanizeFieldName(name: string) {
+  return name
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }

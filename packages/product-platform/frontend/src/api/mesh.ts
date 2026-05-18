@@ -107,8 +107,8 @@ export interface ProtocolBridge {
   updated_at?: string | null;
 }
 
-export function createMeshMessage(body: Record<string, unknown>) {
-  return apiClient.request<MeshMessage>("/mesh/messages", { method: "POST", body });
+export function createMeshMessage(body: Record<string, unknown>, tenantContext?: TenantContext) {
+  return apiClient.request<MeshMessage>("/mesh/messages", { method: "POST", body, tenantContext });
 }
 
 export function listMeshMessages(params: MeshParams = {}, tenantContext?: TenantContext) {
@@ -117,8 +117,8 @@ export function listMeshMessages(params: MeshParams = {}, tenantContext?: Tenant
   });
 }
 
-export function createMeshHandoff(body: Record<string, unknown>) {
-  return apiClient.request<MeshHandoff>("/mesh/handoffs", { method: "POST", body });
+export function createMeshHandoff(body: Record<string, unknown>, tenantContext?: TenantContext) {
+  return apiClient.request<MeshHandoff>("/mesh/handoffs", { method: "POST", body, tenantContext });
 }
 
 export function listMeshHandoffs(params: MeshParams = {}, tenantContext?: TenantContext) {
@@ -133,8 +133,12 @@ export function getMeshTopology(params: MeshParams = {}, tenantContext?: TenantC
   });
 }
 
-export function createProtocolBridge(body: Record<string, unknown>) {
-  return apiClient.request<ProtocolBridge>("/mesh/protocol-bridges", { method: "POST", body });
+export function createProtocolBridge(body: Record<string, unknown>, tenantContext?: TenantContext) {
+  return apiClient.request<ProtocolBridge>("/mesh/protocol-bridges", {
+    method: "POST",
+    body,
+    tenantContext
+  });
 }
 
 export function listProtocolBridges(params: MeshParams = {}, tenantContext?: TenantContext) {
@@ -150,24 +154,32 @@ export function getProtocolBridge(bridgeId: string, tenantContext?: TenantContex
   );
 }
 
-export function patchProtocolBridge(bridgeId: string, body: Record<string, unknown>) {
+export function patchProtocolBridge(
+  bridgeId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<ProtocolBridge>(
     `/mesh/protocol-bridges/${encodeURIComponent(bridgeId)}`,
-    { method: "PATCH", body }
+    { method: "PATCH", body, tenantContext }
   );
 }
 
-export function createProtocolBridgeRoute(bridgeId: string, body: Record<string, unknown>) {
+export function createProtocolBridgeRoute(
+  bridgeId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<ProtocolBridgeRoute>(
     `/mesh/protocol-bridges/${encodeURIComponent(bridgeId)}/routes`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
-export function runProtocolBridgeHealthCheck(bridgeId: string) {
+export function runProtocolBridgeHealthCheck(bridgeId: string, tenantContext?: TenantContext) {
   return apiClient.request<ProtocolBridgeHealthCheck>(
     `/mesh/protocol-bridges/${encodeURIComponent(bridgeId)}/health-check`,
-    { method: "POST" }
+    { method: "POST", tenantContext }
   );
 }
 
@@ -216,7 +228,8 @@ export function useMeshMutation() {
   const queryClient = useQueryClient();
   const scope = useTenantQueryScope();
   return useMutation({
-    mutationFn: async (task: () => Promise<unknown>) => task(),
+    mutationFn: async (task: (tenantContext: TenantContext) => Promise<unknown>) =>
+      task(scope.context),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["mesh"], scope) });
       void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["agents"], scope) });

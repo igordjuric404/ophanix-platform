@@ -9,6 +9,7 @@ import {
   type AuditEvent,
   type AuditVerification
 } from "../../api/audit";
+import type { TenantContext } from "../../api/client";
 import {
   attestComplianceReport,
   createComplianceReport,
@@ -124,7 +125,7 @@ export function CompliancePage() {
   const mutation = useComplianceMutation();
   const drawer = useDetailDrawer();
 
-  async function runTask(label: string, task: () => Promise<unknown>) {
+  async function runTask(label: string, task: (tenantContext: TenantContext) => Promise<unknown>) {
     await runWithFeedback(() => mutation.mutateAsync(task), {
       errorMessage: `${label} failed`,
       successMessage: label
@@ -162,8 +163,8 @@ export function CompliancePage() {
           onExport={async (payload) => {
             const result = await runWithFeedback<{ artifact_uri?: string }>(
               () =>
-                mutation.mutateAsync(() =>
-                  exportAuditEvents(payload)
+                mutation.mutateAsync((tenantContext) =>
+                  exportAuditEvents(payload, tenantContext)
                 ) as Promise<{ artifact_uri?: string }>,
               {
                 errorMessage: "Audit export failed"
@@ -197,8 +198,8 @@ export function CompliancePage() {
             onRecompute={async () => {
               const result = await runWithFeedback<ComplianceEvidenceRecompute>(
                 () =>
-                  mutation.mutateAsync(() =>
-                    recomputeComplianceEvidence()
+                  mutation.mutateAsync((tenantContext) =>
+                    recomputeComplianceEvidence(tenantContext)
                   ) as Promise<ComplianceEvidenceRecompute>,
                 {
                   errorMessage: "Evidence recompute failed"
@@ -215,14 +216,18 @@ export function CompliancePage() {
         <ViolationQueue
           filters={violationFilters}
           onAcknowledge={(violationId) =>
-            runTask("Violation acknowledged", () =>
-              patchComplianceViolation(violationId, { status: "acknowledged" })
+            runTask("Violation acknowledged", (tenantContext) =>
+              patchComplianceViolation(violationId, { status: "acknowledged" }, tenantContext)
             )
           }
           onFilter={setViolationFilters}
           onResolve={(violationId, reason) =>
-            runTask("Violation resolved", () =>
-              patchComplianceViolation(violationId, { status: "resolved", reason })
+            runTask("Violation resolved", (tenantContext) =>
+              patchComplianceViolation(
+                violationId,
+                { status: "resolved", reason },
+                tenantContext
+              )
             )
           }
           violations={violationsQuery.data ?? []}
@@ -234,8 +239,8 @@ export function CompliancePage() {
           onAttest={async (reportId, payload) => {
             const result = await runWithFeedback<{ id?: string }>(
               () =>
-                mutation.mutateAsync(() =>
-                  attestComplianceReport(reportId, payload)
+                mutation.mutateAsync((tenantContext) =>
+                  attestComplianceReport(reportId, payload, tenantContext)
                 ) as Promise<{ id?: string }>,
               {
                 errorMessage: "Report attestation failed"
@@ -249,8 +254,8 @@ export function CompliancePage() {
           onCreate={async (payload) => {
             const report = await runWithFeedback<ComplianceReport>(
               () =>
-                mutation.mutateAsync(() =>
-                  createComplianceReport(payload)
+                mutation.mutateAsync((tenantContext) =>
+                  createComplianceReport(payload, tenantContext)
                 ) as Promise<ComplianceReport>,
               {
                 errorMessage: "Report creation failed",
@@ -265,8 +270,8 @@ export function CompliancePage() {
           onGenerate={async (reportId) => {
             const report = await runWithFeedback<ComplianceReport>(
               () =>
-                mutation.mutateAsync(() =>
-                  generateComplianceReport(reportId)
+                mutation.mutateAsync((tenantContext) =>
+                  generateComplianceReport(reportId, tenantContext)
                 ) as Promise<ComplianceReport>,
               {
                 errorMessage: "Report generation failed",

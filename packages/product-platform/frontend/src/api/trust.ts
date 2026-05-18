@@ -128,8 +128,10 @@ export function listTrustScores(tenantContext?: TenantContext) {
   return apiClient.request<TrustScore[]>("/trust/scores", { tenantContext });
 }
 
-export function getTrustScore(agentId: string) {
-  return apiClient.request<TrustScore>(`/trust/scores/${encodeURIComponent(agentId)}`);
+export function getTrustScore(agentId: string, tenantContext?: TenantContext) {
+  return apiClient.request<TrustScore>(`/trust/scores/${encodeURIComponent(agentId)}`, {
+    tenantContext
+  });
 }
 
 export function listTrustEvents(params: TrustParams = {}, tenantContext?: TenantContext) {
@@ -138,10 +140,14 @@ export function listTrustEvents(params: TrustParams = {}, tenantContext?: Tenant
   });
 }
 
-export function recalculateTrust(body: Record<string, unknown> = {}) {
+export function recalculateTrust(
+  body: Record<string, unknown> = {},
+  tenantContext?: TenantContext
+) {
   return apiClient.request<TrustRecalculationRun>("/trust/recalculate", {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
@@ -151,10 +157,15 @@ export function listTrustRules(params: TrustParams = {}, tenantContext?: TenantC
   });
 }
 
-export function patchTrustRule(ruleId: string, body: Record<string, unknown> = {}) {
+export function patchTrustRule(
+  ruleId: string,
+  body: Record<string, unknown> = {},
+  tenantContext?: TenantContext
+) {
   return apiClient.request<TrustRule>(`/trust/rules/${encodeURIComponent(ruleId)}`, {
     method: "PATCH",
-    body
+    body,
+    tenantContext
   });
 }
 
@@ -164,14 +175,23 @@ export function listTrustThresholds(params: TrustParams = {}, tenantContext?: Te
   });
 }
 
-export function createTrustThreshold(body: Record<string, unknown>) {
-  return apiClient.request<TrustThreshold>("/trust/thresholds", { method: "POST", body });
+export function createTrustThreshold(body: Record<string, unknown>, tenantContext?: TenantContext) {
+  return apiClient.request<TrustThreshold>("/trust/thresholds", {
+    method: "POST",
+    body,
+    tenantContext
+  });
 }
 
-export function patchTrustThreshold(thresholdId: string, body: Record<string, unknown> = {}) {
+export function patchTrustThreshold(
+  thresholdId: string,
+  body: Record<string, unknown> = {},
+  tenantContext?: TenantContext
+) {
   return apiClient.request<TrustThreshold>(`/trust/thresholds/${encodeURIComponent(thresholdId)}`, {
     method: "PATCH",
-    body
+    body,
+    tenantContext
   });
 }
 
@@ -181,22 +201,27 @@ export function listTrustHandshakes(params: TrustParams = {}, tenantContext?: Te
   });
 }
 
-export function simulateTrustHandshake(body: Record<string, unknown>) {
+export function simulateTrustHandshake(
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<TrustHandshake>("/trust/handshakes/simulate", {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
-export function recordTrustHandshake(body: Record<string, unknown>) {
+export function recordTrustHandshake(body: Record<string, unknown>, tenantContext?: TenantContext) {
   return apiClient.request<TrustHandshake>("/trust/handshakes/record", {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
-export function issueTrustCard(body: Record<string, unknown>) {
-  return apiClient.request<TrustCard>("/trust/cards", { method: "POST", body });
+export function issueTrustCard(body: Record<string, unknown>, tenantContext?: TenantContext) {
+  return apiClient.request<TrustCard>("/trust/cards", { method: "POST", body, tenantContext });
 }
 
 export function listTrustCards(params: TrustParams = {}, tenantContext?: TenantContext) {
@@ -211,17 +236,22 @@ export function getTrustCard(cardId: string, tenantContext?: TenantContext) {
   });
 }
 
-export function verifyTrustCard(cardId: string) {
+export function verifyTrustCard(cardId: string, tenantContext?: TenantContext) {
   return apiClient.request<TrustCardVerification>(
     `/trust/cards/${encodeURIComponent(cardId)}/verify`,
-    { method: "POST" }
+    { method: "POST", tenantContext }
   );
 }
 
-export function revokeTrustCard(cardId: string, body: Record<string, unknown>) {
+export function revokeTrustCard(
+  cardId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<TrustCard>(`/trust/cards/${encodeURIComponent(cardId)}/revoke`, {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
@@ -301,7 +331,8 @@ export function useTrustMutation() {
   const queryClient = useQueryClient();
   const scope = useTenantQueryScope();
   return useMutation({
-    mutationFn: async (task: () => Promise<unknown>) => task(),
+    mutationFn: async (task: (tenantContext: TenantContext) => Promise<unknown>) =>
+      task(scope.context),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["trust"], scope) });
       void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["agents"], scope) });

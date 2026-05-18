@@ -209,7 +209,7 @@ export function PoliciesPage() {
     window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}`);
   }
 
-  async function runTask(label: string, task: () => Promise<unknown>) {
+  async function runTask(label: string, task: (tenantContext: TenantContext) => Promise<unknown>) {
     await runWithFeedback(() => mutation.mutateAsync(task), {
       errorMessage: `${label} failed`,
       successMessage: label
@@ -294,7 +294,10 @@ export function PoliciesPage() {
           isLoading={policiesQuery.isLoading}
           onExport={async (policyId) => {
             const result = await runWithFeedback<PolicyExport>(
-              () => mutation.mutateAsync(() => exportPolicy(policyId)) as Promise<PolicyExport>,
+              () =>
+                mutation.mutateAsync((tenantContext) =>
+                  exportPolicy(policyId, null, tenantContext)
+                ) as Promise<PolicyExport>,
               {
                 errorMessage: "Policy export failed",
                 successMessage: (value) => `Exported ${value.filename ?? policyId}`
@@ -309,7 +312,9 @@ export function PoliciesPage() {
           onImport={async (payload) => {
             const imported = await runWithFeedback<PolicyImportResult>(
               () =>
-                mutation.mutateAsync(() => importPolicy(payload)) as Promise<PolicyImportResult>,
+                mutation.mutateAsync((tenantContext) =>
+                  importPolicy(payload, tenantContext)
+                ) as Promise<PolicyImportResult>,
               {
                 errorMessage: "Policy import failed",
                 successMessage: (value) => `Imported ${value.policy.id}`
@@ -337,18 +342,18 @@ export function PoliciesPage() {
               }
               const policyId = selectedPolicy.id;
               if (action === "activate") {
-                await runTask("Policy version activated", () =>
-                  activatePolicyVersion(policyId, versionId)
+                await runTask("Policy version activated", (tenantContext) =>
+                  activatePolicyVersion(policyId, versionId, tenantContext)
                 );
               }
               if (action === "rollback") {
-                await runTask("Policy version rolled back", () =>
-                  rollbackPolicyVersion(policyId, versionId)
+                await runTask("Policy version rolled back", (tenantContext) =>
+                  rollbackPolicyVersion(policyId, versionId, tenantContext)
                 );
               }
               if (action === "archive") {
-                await runTask("Policy version archived", () =>
-                  archivePolicyVersion(policyId, versionId)
+                await runTask("Policy version archived", (tenantContext) =>
+                  archivePolicyVersion(policyId, versionId, tenantContext)
                 );
               }
             }}
@@ -365,7 +370,10 @@ export function PoliciesPage() {
             lintResult={editorLint}
             onLint={async (payload) => {
               const result = await runWithFeedback<PolicyLintResult>(
-                () => mutation.mutateAsync(() => lintPolicy(payload)) as Promise<PolicyLintResult>,
+                () =>
+                  mutation.mutateAsync((tenantContext) =>
+                    lintPolicy(payload, tenantContext)
+                  ) as Promise<PolicyLintResult>,
                 {
                   errorMessage: "Policy lint failed"
                 }
@@ -384,10 +392,12 @@ export function PoliciesPage() {
               }
               const version = await runWithFeedback<PolicyVersion>(
                 async () => {
-                  const saved = (await mutation.mutateAsync(() =>
-                    savePolicyDraftVersion(selectedPolicy.id, payload)
+                  const saved = (await mutation.mutateAsync((tenantContext) =>
+                    savePolicyDraftVersion(selectedPolicy.id, payload, tenantContext)
                   )) as PolicyVersion;
-                  await mutation.mutateAsync(() => lintPolicyVersion(selectedPolicy.id, saved.id));
+                  await mutation.mutateAsync((tenantContext) =>
+                    lintPolicyVersion(selectedPolicy.id, saved.id, tenantContext)
+                  );
                   return saved;
                 },
                 {
@@ -410,16 +420,18 @@ export function PoliciesPage() {
           exceptions={exceptionsQuery.data ?? []}
           isActionPending={mutation.isPending}
           onCreateBinding={async (payload) => {
-            await runTask("Policy binding created", () => createPolicyBinding(payload));
+            await runTask("Policy binding created", (tenantContext) =>
+              createPolicyBinding(payload, tenantContext)
+            );
           }}
           onCreateException={async (bindingId, payload) => {
-            await runTask("Policy exception created", () =>
-              createPolicyException(bindingId, payload)
+            await runTask("Policy exception created", (tenantContext) =>
+              createPolicyException(bindingId, payload, tenantContext)
             );
           }}
           onPromote={async (bindingId, payload) => {
-            await runTask("Policy binding promoted", () =>
-              promotePolicyBinding(bindingId, payload)
+            await runTask("Policy binding promoted", (tenantContext) =>
+              promotePolicyBinding(bindingId, payload, tenantContext)
             );
           }}
           policies={policies}
@@ -433,8 +445,8 @@ export function PoliciesPage() {
             onError={setSimulationError}
             onSubmit={async (payload) => {
               try {
-                const result = (await mutation.mutateAsync(() =>
-                  simulatePolicyEvaluation(payload)
+                const result = (await mutation.mutateAsync((tenantContext) =>
+                  simulatePolicyEvaluation(payload, tenantContext)
                 )) as PolicyEvaluation;
                 setSimulationResult(result);
                 setSimulationError(null);

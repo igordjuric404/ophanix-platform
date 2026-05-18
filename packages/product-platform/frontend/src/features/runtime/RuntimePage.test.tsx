@@ -2,7 +2,12 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { renderWithQueryClient } from "../../test/test-utils";
-import { RuntimePage } from "./RuntimePage";
+import {
+  RuntimePage,
+  runtimeRingRulePayloadFromForm,
+  runtimeSagaStepPayloadFromForm,
+  runtimeSandboxProfilePayloadFromForm
+} from "./RuntimePage";
 
 const ringDecision = {
   id: "rtdcsn_1",
@@ -314,6 +319,41 @@ describe("RuntimePage", () => {
       expect(calls.some((call) => call.path === "/api/v1/runtime/kill-switch" && call.method === "POST")).toBe(true)
     );
   });
+
+  it("rejects invalid numeric runtime payload fields instead of using fallbacks", () => {
+    expect(() =>
+      runtimeRingRulePayloadFromForm(
+        formWithValues({
+          action_pattern: "refund.*",
+          min_trust_score: "high",
+          required_ring: "2"
+        })
+      )
+    ).toThrow("Min Trust Score must be a valid integer.");
+
+    expect(() =>
+      runtimeSagaStepPayloadFromForm(
+        formWithValues({
+          action_name: "email.send",
+          name: "Send receipt",
+          retry_count: "1.5",
+          step_order: "1",
+          target_agent_id: "agent_1",
+          timeout_seconds: "300"
+        })
+      )
+    ).toThrow("Retry Count must be a valid integer.");
+
+    expect(() =>
+      runtimeSandboxProfilePayloadFromForm(
+        formWithValues({
+          memory_mb: "128",
+          name: "Node Restricted",
+          timeout_seconds: "soon"
+        })
+      )
+    ).toThrow("Timeout Seconds must be a valid integer.");
+  });
 });
 
 interface RecordedCall {
@@ -408,4 +448,15 @@ function json(value: unknown, status = 200) {
     status,
     headers: { "Content-Type": "application/json" }
   });
+}
+
+function formWithValues(values: Record<string, string>) {
+  const form = document.createElement("form");
+  for (const [name, value] of Object.entries(values)) {
+    const input = document.createElement("input");
+    input.name = name;
+    input.value = value;
+    form.append(input);
+  }
+  return form;
 }

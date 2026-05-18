@@ -5,6 +5,7 @@ import { renderWithQueryClient } from "../../test/test-utils";
 import {
   ObservabilityPage,
   observabilityChaosExperimentPayloadFromValues,
+  observabilityChaosRunPayloadFromValues,
   observabilityRolloutPayloadFromValues
 } from "./ObservabilityPage";
 
@@ -308,6 +309,22 @@ describe("ObservabilityPage", () => {
         gates_json: "[]"
       })
     ).toThrow("Gates JSON must be a JSON object.");
+  });
+
+  it("rejects invalid numeric observability payload fields instead of using zero", () => {
+    expect(() =>
+      observabilityRolloutPayloadFromValues({
+        gates_json: "{}",
+        stages: "5, soon, 100"
+      })
+    ).toThrow("Stages must be a comma-separated list of valid integers.");
+
+    expect(() =>
+      observabilityChaosRunPayloadFromValues({
+        acknowledge_blast_radius: "on",
+        latency_ms: "fast"
+      })
+    ).toThrow("Latency Ms must be a valid number.");
   });
 });
 

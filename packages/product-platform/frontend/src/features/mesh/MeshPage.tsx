@@ -10,6 +10,7 @@ import {
 import { useState, type FormEvent, type ReactNode } from "react";
 
 import { useAgents, type AgentSummary } from "../../api/agents";
+import type { TenantContext } from "../../api/client";
 import {
   createProtocolBridge,
   createProtocolBridgeRoute,
@@ -81,7 +82,7 @@ export function MeshPage() {
   const selectedMessage = messages.find((item) => item.id === selectedMessageId) ?? messages[0] ?? null;
   const selectedHandoff = handoffs.find((item) => item.id === selectedHandoffId) ?? handoffs[0] ?? null;
 
-  async function runTask(label: string, task: () => Promise<unknown>) {
+  async function runTask(label: string, task: (tenantContext: TenantContext) => Promise<unknown>) {
     await runWithFeedback(() => mutation.mutateAsync(task), {
       errorMessage: `${label} failed`,
       successMessage: label
@@ -119,8 +120,8 @@ export function MeshPage() {
           filters={bridgeFilters}
           healthResult={healthResult}
           onCreate={(payload) =>
-            runTask("Protocol bridge registered", async () => {
-              const bridge = (await createProtocolBridge(payload)) as ProtocolBridge;
+            runTask("Protocol bridge registered", async (tenantContext) => {
+              const bridge = (await createProtocolBridge(payload, tenantContext)) as ProtocolBridge;
               setSelectedBridgeId(bridge.id);
               setHealthResult(null);
               return bridge;
@@ -128,16 +129,20 @@ export function MeshPage() {
           }
           onFilter={setBridgeFilters}
           onPatch={(bridgeId, payload) =>
-            runTask("Protocol bridge updated", () => patchProtocolBridge(bridgeId, payload))
+            runTask("Protocol bridge updated", (tenantContext) =>
+              patchProtocolBridge(bridgeId, payload, tenantContext)
+            )
           }
           onRouteCreate={(bridgeId, payload) =>
-            runTask("Protocol bridge route added", () => createProtocolBridgeRoute(bridgeId, payload))
+            runTask("Protocol bridge route added", (tenantContext) =>
+              createProtocolBridgeRoute(bridgeId, payload, tenantContext)
+            )
           }
           onRunHealth={async (bridgeId) => {
             const result = await runWithFeedback<ProtocolBridgeHealthCheck>(
               () =>
-                mutation.mutateAsync(() =>
-                  runProtocolBridgeHealthCheck(bridgeId)
+                mutation.mutateAsync((tenantContext) =>
+                  runProtocolBridgeHealthCheck(bridgeId, tenantContext)
                 ) as Promise<ProtocolBridgeHealthCheck>,
               {
                 errorMessage: "Protocol bridge health check failed",

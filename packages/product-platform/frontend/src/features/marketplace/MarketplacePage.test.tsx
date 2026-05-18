@@ -6,7 +6,8 @@ import { renderWithQueryClient } from "../../test/test-utils";
 import {
   MarketplacePage,
   marketplaceImportPayloadFromValues,
-  marketplacePolicyPayloadFromValues
+  marketplacePolicyPayloadFromValues,
+  marketplaceTrustPayloadFromValues
 } from "./MarketplacePage";
 
 const plugin = {
@@ -249,6 +250,30 @@ describe("MarketplacePage", () => {
         manifest_json: "[]"
       })
     ).toThrow("Manifest JSON must be a JSON object.");
+  });
+
+  it("rejects invalid numeric marketplace trust payload fields instead of using zero", () => {
+    expect(() =>
+      marketplaceTrustPayloadFromValues({
+        adoption_trend: "steady",
+        daily_active_users: "5",
+        days_since_update: "1",
+        error_count: "0",
+        incident_count: "0",
+        total_invocations: "50"
+      })
+    ).toThrow("Adoption Trend must be a valid number.");
+
+    expect(() =>
+      marketplaceTrustPayloadFromValues({
+        adoption_trend: "0.1",
+        daily_active_users: "5.5",
+        days_since_update: "1",
+        error_count: "0",
+        incident_count: "0",
+        total_invocations: "50"
+      })
+    ).toThrow("Daily Active Users must be a valid integer.");
   });
 });
 

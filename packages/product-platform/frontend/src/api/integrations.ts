@@ -83,10 +83,11 @@ export function listIntegrationFrameworks(
   );
 }
 
-export function createFrameworkInstance(body: Record<string, unknown>) {
+export function createFrameworkInstance(body: Record<string, unknown>, tenantContext?: TenantContext) {
   return apiClient.request<FrameworkInstance>("/integrations/framework-instances", {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
@@ -100,17 +101,25 @@ export function listFrameworkInstances(
   );
 }
 
-export function patchFrameworkInstance(instanceId: string, body: Record<string, unknown>) {
+export function patchFrameworkInstance(
+  instanceId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<FrameworkInstance>(
     `/integrations/framework-instances/${encodeURIComponent(instanceId)}`,
-    { method: "PATCH", body }
+    { method: "PATCH", body, tenantContext }
   );
 }
 
-export function linkFrameworkAgent(instanceId: string, body: Record<string, unknown>) {
+export function linkFrameworkAgent(
+  instanceId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<FrameworkAgentLink>(
     `/integrations/framework-instances/${encodeURIComponent(instanceId)}/link-agent`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
@@ -124,17 +133,21 @@ export function listFrameworkAgentLinks(
   );
 }
 
-export function unlinkFrameworkAgent(linkId: string) {
+export function unlinkFrameworkAgent(linkId: string, tenantContext?: TenantContext) {
   return apiClient.request<FrameworkAgentLink>(
     `/integrations/framework-agents/${encodeURIComponent(linkId)}`,
-    { method: "DELETE" }
+    { method: "DELETE", tenantContext }
   );
 }
 
-export function createProviderCredential(body: Record<string, unknown>) {
+export function createProviderCredential(
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<ProviderCredential>("/integrations/provider-credentials", {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
@@ -148,17 +161,21 @@ export function listProviderCredentials(
   );
 }
 
-export function testProviderCredential(credentialId: string) {
+export function testProviderCredential(credentialId: string, tenantContext?: TenantContext) {
   return apiClient.request<IntegrationHealthCheck>(
     `/integrations/provider-credentials/${encodeURIComponent(credentialId)}/test`,
-    { method: "POST" }
+    { method: "POST", tenantContext }
   );
 }
 
-export function createIntegrationHealthCheck(body: Record<string, unknown>) {
+export function createIntegrationHealthCheck(
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<IntegrationHealthCheck>("/integrations/health-checks", {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
@@ -172,8 +189,10 @@ export function listIntegrationHealthChecks(
   );
 }
 
-export function listLatestIntegrationHealthChecks() {
-  return apiClient.request<IntegrationHealthCheck[]>("/integrations/health-checks/latest");
+export function listLatestIntegrationHealthChecks(tenantContext?: TenantContext) {
+  return apiClient.request<IntegrationHealthCheck[]>("/integrations/health-checks/latest", {
+    tenantContext
+  });
 }
 
 export function useIntegrationFrameworks(params: IntegrationParams = {}) {
@@ -220,7 +239,8 @@ export function useIntegrationMutation() {
   const queryClient = useQueryClient();
   const scope = useTenantQueryScope();
   return useMutation({
-    mutationFn: async (task: () => Promise<unknown>) => task(),
+    mutationFn: async (task: (tenantContext: TenantContext) => Promise<unknown>) =>
+      task(scope.context),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["integrations"], scope) });
       void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["agents"], scope) });

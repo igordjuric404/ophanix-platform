@@ -1,8 +1,10 @@
 import { Bell, X } from "lucide-react";
 import { useId, useMemo, useRef, useState } from "react";
 
+import { useTenantQueryScope } from "../../api/queryScope";
 import { useSystemDependencies, useVersionInfo } from "../../api/system";
 import type { SystemDependency } from "../../api/types";
+import { useCurrentUserPrincipal } from "../../app/userContext";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { announceHeaderPopoverOpen, useHeaderPopoverDismiss } from "./headerPopover";
@@ -21,9 +23,26 @@ interface HeaderNotification {
 
 export function NotificationCenter() {
   const [open, setOpen] = useState(false);
-  const [dismissedNotifications, setDismissedNotifications] = useState(() =>
-    readDismissedNotifications()
+  const currentUser = useCurrentUserPrincipal();
+  const tenantScope = useTenantQueryScope();
+  const storageKey = useMemo(
+    () =>
+      dismissedNotificationsStorageKeyFor({
+        environmentId: tenantScope.context.environmentId,
+        organizationId: tenantScope.context.organizationId,
+        userId: currentUser?.id
+      }),
+    [currentUser?.id, tenantScope.context.environmentId, tenantScope.context.organizationId]
   );
+  const initialDismissedNotifications = useMemo(
+    () => readDismissedNotifications(storageKey),
+    [storageKey]
+  );
+  const [dismissedNotificationsByKey, setDismissedNotificationsByKey] = useState<
+    Record<string, string[]>
+  >({});
+  const dismissedNotifications =
+    dismissedNotificationsByKey[storageKey] ?? initialDismissedNotifications;
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverId = useId();
@@ -66,13 +85,14 @@ export function NotificationCenter() {
   }
 
   function dismissNotification(notification: HeaderNotification) {
-    setDismissedNotifications((current) => {
+    setDismissedNotificationsByKey((currentByKey) => {
+      const current = currentByKey[storageKey] ?? readDismissedNotifications(storageKey);
       if (current.includes(notification.fingerprint)) {
-        return current;
+        return currentByKey;
       }
       const next = [...current, notification.fingerprint];
-      writeDismissedNotifications(next);
-      return next;
+      writeDismissedNotifications(next, storageKey);
+      return { ...currentByKey, [storageKey]: next };
     });
   }
 
@@ -221,14 +241,27 @@ function notificationHref(dependencyName: string) {
   return "/overview";
 }
 
-function readDismissedNotifications(storage?: Storage) {
+interface NotificationStorageScope {
+  environmentId?: string | null;
+  organizationId?: string | null;
+  userId?: string | null;
+}
+
+function dismissedNotificationsStorageKeyFor(scope: NotificationStorageScope = {}) {
+  const userId = sanitizeStorageScopePart(scope.userId ?? "anonymous");
+  const organizationId = sanitizeStorageScopePart(scope.organizationId ?? "no-organization");
+  const environmentId = sanitizeStorageScopePart(scope.environmentId ?? "no-environment");
+  return `${dismissedNotificationsStorageKey}.${userId}.${organizationId}.${environmentId}`;
+}
+
+function readDismissedNotifications(key: string, storage?: Storage) {
   try {
     const resolvedStorage =
       storage ?? (typeof window === "undefined" ? undefined : window.localStorage);
     if (!resolvedStorage) {
       return [];
     }
-    const raw = resolvedStorage.getItem(dismissedNotificationsStorageKey);
+    const raw = resolvedStorage.getItem(key) ?? resolvedStorage.getItem(dismissedNotificationsStorageKey);
     const parsed = raw ? JSON.parse(raw) : [];
     return Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : [];
   } catch {
@@ -236,6 +269,14 @@ function readDismissedNotifications(storage?: Storage) {
   }
 }
 
-function writeDismissedNotifications(values: string[], storage: Storage = window.localStorage) {
-  storage.setItem(dismissedNotificationsStorageKey, JSON.stringify(values));
+function writeDismissedNotifications(
+  values: string[],
+  key: string,
+  storage: Storage = window.localStorage
+) {
+  storage.setItem(key, JSON.stringify(values));
+}
+
+function sanitizeStorageScopePart(value: string) {
+  return value.trim().replace(/[^a-zA-Z0-9_.:-]+/g, "_") || "unknown";
 }

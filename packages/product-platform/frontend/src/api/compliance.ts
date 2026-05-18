@@ -128,22 +128,33 @@ export interface ComplianceAttestation {
 
 export type ComplianceParams = Record<string, string | number | boolean | null | undefined>;
 
-export function exportAuditEvents(body: Record<string, unknown>) {
-  return apiClient.request<AuditExport>("/audit/export", { method: "POST", body });
+export function exportAuditEvents(body: Record<string, unknown>, tenantContext?: TenantContext) {
+  return apiClient.request<AuditExport>("/audit/export", {
+    method: "POST",
+    body,
+    tenantContext
+  });
 }
 
-export function verifyAuditRange() {
-  return apiClient.request<AuditVerification>("/audit/verify-range", { method: "POST" });
+export function verifyAuditRange(tenantContext?: TenantContext) {
+  return apiClient.request<AuditVerification>("/audit/verify-range", {
+    method: "POST",
+    tenantContext
+  });
 }
 
 export function listComplianceFrameworks(tenantContext?: TenantContext) {
   return apiClient.request<ComplianceFramework[]>("/compliance/frameworks", { tenantContext });
 }
 
-export function createComplianceFramework(body: Record<string, unknown>) {
+export function createComplianceFramework(
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<ComplianceFramework>("/compliance/frameworks", {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
@@ -153,10 +164,14 @@ export function listComplianceControls(params: ComplianceParams = {}, tenantCont
   });
 }
 
-export function createComplianceControlMapping(body: Record<string, unknown>) {
+export function createComplianceControlMapping(
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<Record<string, unknown>>("/compliance/control-mappings", {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
@@ -166,9 +181,10 @@ export function listComplianceEvidence(params: ComplianceParams = {}, tenantCont
   });
 }
 
-export function recomputeComplianceEvidence() {
+export function recomputeComplianceEvidence(tenantContext?: TenantContext) {
   return apiClient.request<ComplianceEvidenceRecompute>("/compliance/evidence/recompute", {
-    method: "POST"
+    method: "POST",
+    tenantContext
   });
 }
 
@@ -182,15 +198,26 @@ export function listComplianceViolations(
   );
 }
 
-export function patchComplianceViolation(violationId: string, body: Record<string, unknown>) {
+export function patchComplianceViolation(
+  violationId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<ComplianceViolation>(
     `/compliance/violations/${encodeURIComponent(violationId)}`,
-    { method: "PATCH", body }
+    { method: "PATCH", body, tenantContext }
   );
 }
 
-export function createComplianceReport(body: Record<string, unknown>) {
-  return apiClient.request<ComplianceReport>("/compliance/reports", { method: "POST", body });
+export function createComplianceReport(
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
+  return apiClient.request<ComplianceReport>("/compliance/reports", {
+    method: "POST",
+    body,
+    tenantContext
+  });
 }
 
 export function listComplianceReports(params: ComplianceParams = {}, tenantContext?: TenantContext) {
@@ -206,23 +233,28 @@ export function getComplianceReport(reportId: string, tenantContext?: TenantCont
   );
 }
 
-export function generateComplianceReport(reportId: string) {
+export function generateComplianceReport(reportId: string, tenantContext?: TenantContext) {
   return apiClient.request<ComplianceReport>(
     `/compliance/reports/${encodeURIComponent(reportId)}/generate`,
-    { method: "POST" }
+    { method: "POST", tenantContext }
   );
 }
 
-export function downloadComplianceReport(reportId: string) {
+export function downloadComplianceReport(reportId: string, tenantContext?: TenantContext) {
   return apiClient.request<Record<string, unknown> | string>(
-    `/compliance/reports/${encodeURIComponent(reportId)}/download`
+    `/compliance/reports/${encodeURIComponent(reportId)}/download`,
+    { tenantContext }
   );
 }
 
-export function attestComplianceReport(reportId: string, body: Record<string, unknown>) {
+export function attestComplianceReport(
+  reportId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<ComplianceAttestation>(
     `/compliance/reports/${encodeURIComponent(reportId)}/attest`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
@@ -231,13 +263,16 @@ export function listArtifacts(params: ComplianceParams = {}, tenantContext?: Ten
 }
 
 export function useComplianceAuditEvents(
-  listAuditEvents: (params?: ComplianceParams) => Promise<AuditEvent[]>,
+  listAuditEvents: (
+    params?: ComplianceParams,
+    tenantContext?: TenantContext
+  ) => Promise<AuditEvent[]>,
   params: ComplianceParams = {}
 ) {
   const scope = useTenantQueryScope();
   return useQuery({
     queryKey: scopedQueryKey(["audit", "events", params], scope),
-    queryFn: () => listAuditEvents(params)
+    queryFn: () => listAuditEvents(params, scope.context)
   });
 }
 
@@ -293,7 +328,8 @@ export function useComplianceMutation() {
   const queryClient = useQueryClient();
   const scope = useTenantQueryScope();
   return useMutation({
-    mutationFn: async (task: () => Promise<unknown>) => task(),
+    mutationFn: async (task: (tenantContext: TenantContext) => Promise<unknown>) =>
+      task(scope.context),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["compliance"], scope) });
       void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["audit"], scope) });

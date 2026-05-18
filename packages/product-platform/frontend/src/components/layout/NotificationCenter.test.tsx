@@ -7,7 +7,7 @@ import { NotificationCenter } from "./NotificationCenter";
 
 describe("NotificationCenter", () => {
   beforeEach(() => {
-    window.localStorage.removeItem("ophanix.dismissedNotifications");
+    window.localStorage.clear();
   });
 
   it("opens the empty notifications popover from the header button", async () => {
@@ -131,6 +131,12 @@ describe("NotificationCenter", () => {
       screen.getByRole("button", { name: "Notifications, 1 notification" })
     ).toBeInTheDocument();
     expect(within(screen.getByRole("button", { name: /Notifications, 1/ })).getByText("1")).toBeInTheDocument();
+    expect(window.localStorage.getItem("ophanix.dismissedNotifications")).toBeNull();
+    expect(
+      Object.keys(window.localStorage).some((key) =>
+        key.startsWith("ophanix.dismissedNotifications.anonymous.")
+      )
+    ).toBe(true);
   });
 
   it("builds different notification types from dependency states", () => {

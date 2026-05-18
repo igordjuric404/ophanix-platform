@@ -161,38 +161,60 @@ export function getPolicy(policyId: string, tenantContext?: TenantContext) {
   });
 }
 
-export function createPolicyVersion(policyId: string, body: Record<string, unknown>) {
+export function createPolicyVersion(
+  policyId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<PolicyVersion>(`/policies/${encodeURIComponent(policyId)}/versions`, {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
-export function listPolicyVersions(policyId: string) {
+export function listPolicyVersions(policyId: string, tenantContext?: TenantContext) {
   return apiClient.request<PolicyVersion[]>(
-    `/policies/${encodeURIComponent(policyId)}/versions`
+    `/policies/${encodeURIComponent(policyId)}/versions`,
+    { tenantContext }
   );
 }
 
-export function importPolicy(body: Record<string, unknown>) {
-  return apiClient.request<PolicyImportResult>("/policies/import", { method: "POST", body });
+export function importPolicy(body: Record<string, unknown>, tenantContext?: TenantContext) {
+  return apiClient.request<PolicyImportResult>("/policies/import", {
+    method: "POST",
+    body,
+    tenantContext
+  });
 }
 
-export function lintPolicy(body: Record<string, unknown>) {
-  return apiClient.request<PolicyLintResult>("/policies/lint", { method: "POST", body });
+export function lintPolicy(body: Record<string, unknown>, tenantContext?: TenantContext) {
+  return apiClient.request<PolicyLintResult>("/policies/lint", {
+    method: "POST",
+    body,
+    tenantContext
+  });
 }
 
-export function savePolicyDraftVersion(policyId: string, body: Record<string, unknown>) {
+export function savePolicyDraftVersion(
+  policyId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<PolicyVersion>(
     `/policies/${encodeURIComponent(policyId)}/versions/draft`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
-export function lintPolicyVersion(policyId: string, versionId: string) {
+export function lintPolicyVersion(
+  policyId: string,
+  versionId: string,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<PolicyLintResult>(
     `/policies/${encodeURIComponent(policyId)}/versions/${encodeURIComponent(versionId)}/lint`,
-    { method: "POST" }
+    { method: "POST", tenantContext }
   );
 }
 
@@ -211,36 +233,54 @@ export function getPolicyAffectedResources(policyId: string, tenantContext?: Ten
   );
 }
 
-export function activatePolicyVersion(policyId: string, versionId: string) {
+export function activatePolicyVersion(
+  policyId: string,
+  versionId: string,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<PolicyVersion>(
     `/policies/${encodeURIComponent(policyId)}/versions/${encodeURIComponent(
       versionId
     )}/activate`,
-    { method: "POST" }
+    { method: "POST", tenantContext }
   );
 }
 
-export function rollbackPolicyVersion(policyId: string, versionId: string) {
+export function rollbackPolicyVersion(
+  policyId: string,
+  versionId: string,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<PolicyVersion>(
     `/policies/${encodeURIComponent(policyId)}/versions/${encodeURIComponent(
       versionId
     )}/rollback`,
-    { method: "POST" }
+    { method: "POST", tenantContext }
   );
 }
 
-export function archivePolicyVersion(policyId: string, versionId: string) {
+export function archivePolicyVersion(
+  policyId: string,
+  versionId: string,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<PolicyVersion>(
     `/policies/${encodeURIComponent(policyId)}/versions/${encodeURIComponent(
       versionId
     )}/archive`,
-    { method: "POST" }
+    { method: "POST", tenantContext }
   );
 }
 
-export function exportPolicy(policyId: string, versionId?: string | null) {
+export function exportPolicy(
+  policyId: string,
+  versionId?: string | null,
+  tenantContext?: TenantContext
+) {
   const query = versionId ? `?version_id=${encodeURIComponent(versionId)}` : "";
-  return apiClient.request<PolicyExport>(`/policies/${encodeURIComponent(policyId)}/export${query}`);
+  return apiClient.request<PolicyExport>(`/policies/${encodeURIComponent(policyId)}/export${query}`, {
+    tenantContext
+  });
 }
 
 export function listPolicyBindings(params: PolicyParams = {}, tenantContext?: TenantContext) {
@@ -249,34 +289,52 @@ export function listPolicyBindings(params: PolicyParams = {}, tenantContext?: Te
   });
 }
 
-export function createPolicyBinding(body: Record<string, unknown>) {
-  return apiClient.request<PolicyBinding>("/policy-bindings", { method: "POST", body });
+export function createPolicyBinding(body: Record<string, unknown>, tenantContext?: TenantContext) {
+  return apiClient.request<PolicyBinding>("/policy-bindings", {
+    method: "POST",
+    body,
+    tenantContext
+  });
 }
 
-export function patchPolicyBinding(bindingId: string, body: Record<string, unknown>) {
+export function patchPolicyBinding(
+  bindingId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<PolicyBinding>(`/policy-bindings/${encodeURIComponent(bindingId)}`, {
     method: "PATCH",
-    body
+    body,
+    tenantContext
   });
 }
 
-export function deletePolicyBinding(bindingId: string) {
+export function deletePolicyBinding(bindingId: string, tenantContext?: TenantContext) {
   return apiClient.request<null>(`/policy-bindings/${encodeURIComponent(bindingId)}`, {
-    method: "DELETE"
+    method: "DELETE",
+    tenantContext
   });
 }
 
-export function promotePolicyBinding(bindingId: string, body: Record<string, unknown>) {
+export function promotePolicyBinding(
+  bindingId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<PolicyBinding>(
     `/policy-bindings/${encodeURIComponent(bindingId)}/promote`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
-export function createPolicyException(bindingId: string, body: Record<string, unknown>) {
+export function createPolicyException(
+  bindingId: string,
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<PolicyException>(
     `/policy-bindings/${encodeURIComponent(bindingId)}/exceptions`,
-    { method: "POST", body }
+    { method: "POST", body, tenantContext }
   );
 }
 
@@ -286,17 +344,22 @@ export function listPolicyExceptions(params: PolicyParams = {}, tenantContext?: 
   });
 }
 
-export function simulatePolicyEvaluation(body: Record<string, unknown>) {
+export function simulatePolicyEvaluation(
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
   return apiClient.request<PolicyEvaluation>("/policy-evaluations/simulate", {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
-export function evaluatePolicy(body: Record<string, unknown>) {
+export function evaluatePolicy(body: Record<string, unknown>, tenantContext?: TenantContext) {
   return apiClient.request<PolicyEvaluation>("/policy-evaluations/evaluate", {
     method: "POST",
-    body
+    body,
+    tenantContext
   });
 }
 
@@ -389,7 +452,8 @@ export function usePolicyMutation() {
   const queryClient = useQueryClient();
   const scope = useTenantQueryScope();
   return useMutation({
-    mutationFn: async (task: () => Promise<unknown>) => task(),
+    mutationFn: async (task: (tenantContext: TenantContext) => Promise<unknown>) =>
+      task(scope.context),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: scopedQueryKey(["policies"], scope) });
     }

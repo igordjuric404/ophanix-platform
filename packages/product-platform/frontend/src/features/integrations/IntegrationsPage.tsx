@@ -2,6 +2,7 @@ import { Cable, KeyRound, Link2, PlugZap, RefreshCw } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 
 import { useAgents, type AgentSummary } from "../../api/agents";
+import type { TenantContext } from "../../api/client";
 import {
   createFrameworkInstance,
   createProviderCredential,
@@ -73,11 +74,12 @@ export function IntegrationsPage() {
   const agents = agentsQuery.data ?? [];
   const activeInstanceId = selectedInstanceId ?? instances[0]?.id ?? null;
 
-  async function runTask(label: string, task: () => Promise<unknown>) {
-    await runWithFeedback(() => mutation.mutateAsync(task), {
+  async function runTask(label: string, task: (tenantContext: TenantContext) => Promise<unknown>) {
+    const result = await runWithFeedback(() => mutation.mutateAsync(task), {
       errorMessage: `${label} failed`,
       successMessage: label
     });
+    return result !== null;
   }
 
   return (
@@ -114,10 +116,14 @@ export function IntegrationsPage() {
             frameworks={frameworks}
             instances={instances}
             onCreate={(payload) =>
-              runTask("Connector instance created", () => createFrameworkInstance(payload))
+              runTask("Connector instance created", (tenantContext) =>
+                createFrameworkInstance(payload, tenantContext)
+              )
             }
             onPatch={(instanceId, payload) =>
-              runTask("Connector instance updated", () => patchFrameworkInstance(instanceId, payload))
+              runTask("Connector instance updated", (tenantContext) =>
+                patchFrameworkInstance(instanceId, payload, tenantContext)
+              )
             }
             onInvalidInput={(error) => setError(actionErrorMessage(error, "Invalid connector input"))}
             onSelect={setSelectedInstanceId}
@@ -130,20 +136,28 @@ export function IntegrationsPage() {
             instances={instances}
             links={links}
             onLink={(instanceId, payload) =>
-              runTask("Agent linked to connector", () => linkFrameworkAgent(instanceId, payload))
+              runTask("Agent linked to connector", (tenantContext) =>
+                linkFrameworkAgent(instanceId, payload, tenantContext)
+              )
             }
             onUnlink={(linkId) =>
-              runTask("Agent unlinked from connector", () => unlinkFrameworkAgent(linkId))
+              runTask("Agent unlinked from connector", (tenantContext) =>
+                unlinkFrameworkAgent(linkId, tenantContext)
+              )
             }
             selectedInstanceId={activeInstanceId}
           />
           <ProviderCredentialsPanel
             credentials={credentials}
             onCreate={(payload) =>
-              runTask("Provider credential created", () => createProviderCredential(payload))
+              runTask("Provider credential created", (tenantContext) =>
+                createProviderCredential(payload, tenantContext)
+              )
             }
             onTest={(credentialId) =>
-              runTask("Provider credential tested", () => testProviderCredential(credentialId))
+              runTask("Provider credential tested", (tenantContext) =>
+                testProviderCredential(credentialId, tenantContext)
+              )
             }
           />
         </div>
@@ -254,9 +268,9 @@ function ConnectorInstancesPanel({
 }: {
   frameworks: FrameworkIntegration[];
   instances: FrameworkInstance[];
-  onCreate: (payload: Record<string, unknown>) => void;
+  onCreate: (payload: Record<string, unknown>) => Promise<boolean>;
   onInvalidInput: (error: unknown) => void;
-  onPatch: (instanceId: string, payload: Record<string, unknown>) => void;
+  onPatch: (instanceId: string, payload: Record<string, unknown>) => Promise<boolean>;
   onSelect: (instanceId: string) => void;
   selectedInstanceId: string | null;
 }) {
@@ -268,15 +282,19 @@ function ConnectorInstancesPanel({
       <CardContent className="space-y-4">
         <form
           className="grid gap-3 md:grid-cols-2"
-          onSubmit={(event) => {
+          onSubmit={async (event) => {
             event.preventDefault();
+            const form = event.currentTarget;
+            let payload: Record<string, unknown>;
             try {
-              onCreate(integrationInstancePayloadFromForm(event.currentTarget));
+              payload = integrationInstancePayloadFromForm(form);
             } catch (error) {
               onInvalidInput(error);
               return;
             }
-            event.currentTarget.reset();
+            if (await onCreate(payload)) {
+              form.reset();
+            }
           }}
         >
           <SelectField
@@ -325,13 +343,17 @@ function ConnectorInstancesPanel({
                   <TableCell>
                     <form
                       className="flex flex-wrap gap-2"
-                      onSubmit={(event) => {
+                      onSubmit={async (event) => {
                         event.preventDefault();
-                        const form = new FormData(event.currentTarget);
-                        onPatch(instance.id, {
+                        const target = event.currentTarget;
+                        const form = new FormData(target);
+                        const succeeded = await onPatch(instance.id, {
                           name: optionalString(form.get("name")),
                           status: optionalString(form.get("status"))
                         });
+                        if (succeeded) {
+                          target.reset();
+                        }
                       }}
                     >
                       <Input aria-label={`${instance.name} name`} className="w-36" name="name" placeholder="Name" />
@@ -369,7 +391,7 @@ function LinkedAgentsPanel({
   agents: AgentSummary[];
   instances: FrameworkInstance[];
   links: FrameworkAgentLink[];
-  onLink: (instanceId: string, payload: Record<string, unknown>) => void;
+  onLink: (instanceId: string, payload: Record<string, unknown>) => Promise<boolean>;
   onUnlink: (linkId: string) => void;
   selectedInstanceId: string | null;
 }) {
@@ -389,10 +411,13 @@ function LinkedAgentsPanel({
       <CardContent className="space-y-4">
         <form
           className="grid gap-3 md:grid-cols-2"
-          onSubmit={(event) => {
+          onSubmit={async (event) => {
             event.preventDefault();
             if (activeInstanceId) {
-              onLink(activeInstanceId, integrationAgentLinkPayloadFromForm(event.currentTarget));
+              const form = event.currentTarget;
+              if (await onLink(activeInstanceId, integrationAgentLinkPayloadFromForm(form))) {
+                form.reset();
+              }
             }
           }}
         >
@@ -451,7 +476,7 @@ function ProviderCredentialsPanel({
   onTest
 }: {
   credentials: ProviderCredential[];
-  onCreate: (payload: Record<string, unknown>) => void;
+  onCreate: (payload: Record<string, unknown>) => Promise<boolean>;
   onTest: (credentialId: string) => void;
 }) {
   return (
@@ -462,10 +487,12 @@ function ProviderCredentialsPanel({
       <CardContent className="space-y-4">
         <form
           className="grid gap-3 md:grid-cols-2"
-          onSubmit={(event) => {
+          onSubmit={async (event) => {
             event.preventDefault();
-            onCreate(providerCredentialPayloadFromForm(event.currentTarget));
-            event.currentTarget.reset();
+            const form = event.currentTarget;
+            if (await onCreate(providerCredentialPayloadFromForm(form))) {
+              form.reset();
+            }
           }}
         >
           <Field label="Credential Name" name="name" />

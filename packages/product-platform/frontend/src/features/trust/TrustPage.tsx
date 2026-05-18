@@ -34,6 +34,7 @@ import {
   type TrustScore,
   type TrustThreshold
 } from "../../api/trust";
+import type { TenantContext } from "../../api/client";
 import { useDetailDrawer } from "../../app/drawerContext";
 import { PageHeader } from "../../components/layout/PageHeader";
 import { ActionFeedback, useActionFeedback } from "../../components/shared/ActionFeedback";
@@ -96,7 +97,7 @@ export function TrustPage() {
   const selectedHandshake =
     handshakes.find((handshake) => handshake.id === selectedHandshakeId) ?? handshakes[0] ?? null;
 
-  async function runTask(label: string, task: () => Promise<unknown>) {
+  async function runTask(label: string, task: (tenantContext: TenantContext) => Promise<unknown>) {
     await runWithFeedback(() => mutation.mutateAsync(task), {
       errorMessage: `${label} failed`,
       successMessage: label
@@ -124,16 +125,16 @@ export function TrustPage() {
           <TrustLeaderboard
             isLoading={scoresQuery.isLoading}
             onRecalculate={(agentId) =>
-              runTask("Trust recalculation queued", () =>
-                recalculateTrust(agentId ? { agent_id: agentId } : {})
+              runTask("Trust recalculation queued", (tenantContext) =>
+                recalculateTrust(agentId ? { agent_id: agentId } : {}, tenantContext)
               )
             }
             scores={scores}
           />
           <TrustRulesPanel
             onPatchRule={(rule) =>
-              runTask(rule.enabled ? "Trust rule disabled" : "Trust rule enabled", () =>
-                patchTrustRule(rule.id, { enabled: !rule.enabled })
+              runTask(rule.enabled ? "Trust rule disabled" : "Trust rule enabled", (tenantContext) =>
+                patchTrustRule(rule.id, { enabled: !rule.enabled }, tenantContext)
               )
             }
             rules={rules}
@@ -145,15 +146,17 @@ export function TrustPage() {
           selectedCard={selectedCard}
           verification={verification}
           onIssue={(payload) =>
-            runTask("Trust card issued", async () => {
-              const card = (await issueTrustCard(payload)) as TrustCard;
+            runTask("Trust card issued", async (tenantContext) => {
+              const card = (await issueTrustCard(payload, tenantContext)) as TrustCard;
               setSelectedCardId(card.id);
               setVerification(null);
               return card;
             })
           }
           onRevoke={(cardId, payload) =>
-            runTask("Trust card revoked", () => revokeTrustCard(cardId, payload))
+            runTask("Trust card revoked", (tenantContext) =>
+              revokeTrustCard(cardId, payload, tenantContext)
+            )
           }
           onSelect={(cardId) => {
             setSelectedCardId(cardId);
@@ -162,8 +165,8 @@ export function TrustPage() {
           onVerify={async (cardId) => {
             const result = await runWithFeedback<TrustCardVerification>(
               () =>
-                mutation.mutateAsync(() =>
-                  verifyTrustCard(cardId)
+                mutation.mutateAsync((tenantContext) =>
+                  verifyTrustCard(cardId, tenantContext)
                 ) as Promise<TrustCardVerification>,
               {
                 errorMessage: "Trust card verification failed",
@@ -177,9 +180,15 @@ export function TrustPage() {
           }}
         />
         <TrustThresholdsPanel
-          onCreate={(payload) => runTask("Trust threshold created", () => createTrustThreshold(payload))}
+          onCreate={(payload) =>
+            runTask("Trust threshold created", (tenantContext) =>
+              createTrustThreshold(payload, tenantContext)
+            )
+          }
           onPatch={(thresholdId, payload) =>
-            runTask("Trust threshold updated", () => patchTrustThreshold(thresholdId, payload))
+            runTask("Trust threshold updated", (tenantContext) =>
+              patchTrustThreshold(thresholdId, payload, tenantContext)
+            )
           }
           thresholds={thresholds}
         />
@@ -191,8 +200,8 @@ export function TrustPage() {
           onSimulate={async (payload) => {
             const result = await runWithFeedback<TrustHandshake>(
               () =>
-                mutation.mutateAsync(() =>
-                  simulateTrustHandshake(payload)
+                mutation.mutateAsync((tenantContext) =>
+                  simulateTrustHandshake(payload, tenantContext)
                 ) as Promise<TrustHandshake>,
               {
                 errorMessage: "Handshake simulation failed",

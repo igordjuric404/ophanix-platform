@@ -61,7 +61,12 @@ import {
   useActionFeedback
 } from "../../components/shared/ActionFeedback";
 import { QueryErrorSummary } from "../../components/shared/ErrorState";
-import { parseJsonObjectField } from "../../lib/forms";
+import {
+  parseIntegerListField,
+  parseJsonObjectField,
+  parseOptionalNumberField,
+  parseRequiredNumberField
+} from "../../lib/forms";
 
 const targetTypes = ["agent", "mcp-server", "runtime", "environment"];
 const incidentSeverities = ["info", "warning", "critical"];
@@ -1086,7 +1091,7 @@ export function observabilitySloPayloadFromValues(values: Record<string, unknown
     target_type: String(values.target_type ?? "agent").trim(),
     target_id: String(values.target_id ?? "").trim(),
     sli: String(values.sli ?? "task_success_rate").trim(),
-    target_value: numberValue(values.target_value),
+    target_value: numberValue(values.target_value, "Target Value"),
     window: String(values.window ?? "30d").trim()
   };
 }
@@ -1097,9 +1102,9 @@ export function observabilitySloPayloadFromForm(form: HTMLFormElement) {
 
 export function observabilitySloMeasurementPayloadFromValues(values: Record<string, unknown>) {
   return {
-    value: numberValue(values.value),
-    good_events: optionalNumber(values.good_events),
-    total_events: optionalNumber(values.total_events)
+    value: numberValue(values.value, "Measurement Value"),
+    good_events: optionalNumber(values.good_events, "Good Events"),
+    total_events: optionalNumber(values.total_events, "Total Events")
   };
 }
 
@@ -1112,7 +1117,7 @@ export function observabilityCostBudgetPayloadFromValues(values: Record<string, 
     target_type: String(values.target_type ?? "agent").trim(),
     target_id: String(values.target_id ?? "").trim(),
     period: String(values.period ?? "monthly").trim(),
-    amount_limit: numberValue(values.amount_limit),
+    amount_limit: numberValue(values.amount_limit, "Amount Limit"),
     action_on_breach: String(values.action_on_breach ?? "warn").trim()
   };
 }
@@ -1127,8 +1132,8 @@ export function observabilityCostEventPayloadFromValues(values: Record<string, u
     target_id: String(values.target_id ?? "").trim(),
     provider: String(values.provider ?? "").trim(),
     model: String(values.model ?? "").trim(),
-    amount: numberValue(values.amount),
-    units: numberValue(values.units),
+    amount: numberValue(values.amount, "Amount"),
+    units: numberValue(values.units, "Units"),
     correlation_id: optionalString(values.correlation_id)
   };
 }
@@ -1183,7 +1188,7 @@ export function observabilityChaosRunPayloadFromValues(values: Record<string, un
   const observedMetrics: Record<string, number> = {};
   for (const key of ["error_rate", "duration_seconds", "latency_ms", "trust_score"]) {
     if (optionalString(values[key]) !== null) {
-      observedMetrics[key] = numberValue(values[key]);
+      observedMetrics[key] = numberValue(values[key], humanizeFieldName(key));
     }
   }
   return {
@@ -1204,10 +1209,7 @@ export function observabilityRolloutPayloadFromValues(values: Record<string, unk
     target_id: String(values.target_id ?? "").trim(),
     strategy,
     config: {
-      stages: String(values.stages ?? "5,25,100")
-        .split(",")
-        .map((stage) => Number.parseInt(stage.trim(), 10))
-        .filter((stage) => Number.isFinite(stage)),
+      stages: parseIntegerListField(values.stages ?? "5,25,100", "Stages"),
       gates: parseJsonObjectField(values.gates_json, "Gates JSON", { emptyFallback: {} })
     }
   };
@@ -1224,7 +1226,7 @@ export function observabilityRolloutAdvancePayloadFromValues(values: Record<stri
   }
   for (const key of ["policy_deny_rate", "trust_score", "open_incidents"]) {
     if (optionalString(values[key]) !== null) {
-      metrics[key] = numberValue(values[key]);
+      metrics[key] = numberValue(values[key], humanizeFieldName(key));
     }
   }
   return { metrics };
@@ -1306,13 +1308,12 @@ function formatShortDate(value: string) {
   return parsed.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
-function numberValue(value: unknown) {
-  const parsed = Number.parseFloat(String(value ?? "0"));
-  return Number.isFinite(parsed) ? parsed : 0;
+function numberValue(value: unknown, fieldName: string) {
+  return parseRequiredNumberField(value, fieldName);
 }
 
-function optionalNumber(value: unknown) {
-  return optionalString(value) === null ? null : numberValue(value);
+function optionalNumber(value: unknown, fieldName: string) {
+  return parseOptionalNumberField(value, fieldName);
 }
 
 function optionalString(value: unknown) {
@@ -1343,4 +1344,11 @@ function emptyCostDashboard(): CostDashboard {
     by_provider: {},
     by_model: {}
   };
+}
+
+function humanizeFieldName(name: string) {
+  return name
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
