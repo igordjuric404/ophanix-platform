@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from product_platform.db.postgres import Connection, Row
 from typing import Any
 
@@ -69,6 +70,10 @@ class ProviderCredentialSecretError(ValueError):
     """Raised when a provider credential secret source cannot be used safely."""
 
 
+class ProviderCredentialSelectionError(ValueError):
+    """Raised when a provider credential exists but cannot be selected."""
+
+
 class IntegrationRegistryRepository:
     """Read and manage framework integration metadata."""
 
@@ -128,22 +133,39 @@ class IntegrationRegistryRepository:
             raise ProviderCredentialSecretError("Exactly one of secret_value or secret_ref is required.")
         now = utc_now_iso()
         credential_id = generate_id("provcred")
+        revoked_at = now if body.status == "revoked" else None
         self.connection.execute(
             """
             INSERT INTO provider_credentials (
-                id, organization_id, name, provider_type, secret_ref,
-                status, created_by, created_at, last_used_at
+                id, organization_id, environment_id, name, provider_type, secret_ref,
+                subject_type, subject_id, provider_account_id, credential_type,
+                scopes_json, expires_at, rotation_status, revoked_at, revoked_by,
+                revoked_reason, allowed_tool_ids_json, status, created_by,
+                created_at, updated_at, last_used_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 credential_id,
                 self.organization_id,
+                self.environment_id,
                 body.name,
                 body.provider_type,
                 secret_ref,
+                body.subject_type,
+                body.subject_id,
+                body.provider_account_id,
+                body.credential_type,
+                _json_list(body.scopes),
+                body.expires_at,
+                body.rotation_status,
+                revoked_at,
+                created_by if revoked_at is not None else None,
+                "created in revoked status" if revoked_at is not None else None,
+                _json_list(body.allowed_tool_ids),
                 body.status,
                 created_by,
+                now,
                 now,
                 None,
             ),
@@ -159,10 +181,10 @@ class IntegrationRegistryRepository:
         provider_type: str | None = None,
         status: str | None = None,
     ) -> list[Row]:
-        """List provider credential metadata for the organization."""
+        """List provider credential metadata for the organization and environment."""
 
-        clauses = ["organization_id = ?"]
-        values: list[object] = [self.organization_id]
+        clauses = ["organization_id = ?", "environment_id = ?"]
+        values: list[object] = [self.organization_id, self.environment_id]
         if provider_type:
             clauses.append("provider_type = ?")
             values.append(provider_type)
@@ -180,7 +202,7 @@ class IntegrationRegistryRepository:
         ).fetchall()
 
     def get_provider_credential(self, credential_id: str) -> Row | None:
-        """Get one provider credential in organization scope."""
+        """Get one provider credential in organization and environment scope."""
 
         return self.connection.execute(
             """
@@ -188,8 +210,9 @@ class IntegrationRegistryRepository:
             FROM provider_credentials
             WHERE id = ?
               AND organization_id = ?
+              AND environment_id = ?
             """,
-            (credential_id, self.organization_id),
+            (credential_id, self.organization_id, self.environment_id),
         ).fetchone()
 
     def mark_provider_credential_used(self, credential_id: str, used_at: str) -> None:
@@ -198,12 +221,37 @@ class IntegrationRegistryRepository:
         self.connection.execute(
             """
             UPDATE provider_credentials
-            SET last_used_at = ?
+            SET last_used_at = ?,
+                updated_at = ?
             WHERE id = ?
               AND organization_id = ?
+              AND environment_id = ?
             """,
-            (used_at, credential_id, self.organization_id),
+            (used_at, used_at, credential_id, self.organization_id, self.environment_id),
         )
+
+    def require_provider_credential_selectable(
+        self,
+        credential_id: str,
+        *,
+        required_tool_id: str | None = None,
+        required_scopes: list[str] | None = None,
+        now: str | datetime | None = None,
+    ) -> Row:
+        """Return a credential only if current scope and lifecycle metadata allow selection."""
+
+        row = self.get_provider_credential(credential_id)
+        if row is None:
+            raise ProviderCredentialNotFoundError("Provider credential not found.")
+        reason = _provider_credential_unavailable_reason(
+            row,
+            required_tool_id=required_tool_id,
+            required_scopes=required_scopes or [],
+            now=now,
+        )
+        if reason is not None:
+            raise ProviderCredentialSelectionError(reason)
+        return row
 
     def create_health_check(
         self,
@@ -371,6 +419,7 @@ class IntegrationRegistryRepository:
         if framework is None:
             raise FrameworkIntegrationNotFoundError("Framework integration not found.")
         _validate_framework_config(framework["id"], body.config)
+        self._validate_provider_credential_config(framework["id"], body.config)
         now = utc_now_iso()
         instance_id = generate_id("fwinst")
         self.connection.execute(
@@ -408,6 +457,7 @@ class IntegrationRegistryRepository:
         config = json.loads(existing["config_json"])
         if body.config is not None:
             _validate_framework_config(existing["integration_id"], body.config)
+            self._validate_provider_credential_config(existing["integration_id"], body.config)
             config = body.config
         name = body.name or existing["name"]
         status = body.status or existing["status"]
@@ -437,6 +487,17 @@ class IntegrationRegistryRepository:
         if row is None:
             raise FrameworkInstanceNotFoundError("Framework instance not found.")
         return row
+
+    def _validate_provider_credential_config(self, integration_id: str, config: dict[str, Any]) -> None:
+        credential_id = config.get("credential_id")
+        if credential_id is None:
+            return
+        if not isinstance(credential_id, str) or not credential_id.strip():
+            raise FrameworkInstanceConfigError("Connector credential_id must be a non-empty string.")
+        self.require_provider_credential_selectable(
+            credential_id.strip(),
+            required_tool_id=integration_id,
+        )
 
     def list_instances(
         self,
@@ -683,19 +744,43 @@ def framework_agent_response(row: Row) -> FrameworkAgentResponse:
     )
 
 
-def provider_credential_response(row: Row) -> ProviderCredentialResponse:
+def provider_credential_response(
+    row: Row,
+    *,
+    reveal_secret_ref: bool = False,
+    reveal_sensitive_metadata: bool = False,
+) -> ProviderCredentialResponse:
     """Build a masked provider credential response."""
 
+    subject_id = row["subject_id"]
+    provider_account_id = row["provider_account_id"]
+    reveal_sensitive = reveal_secret_ref or reveal_sensitive_metadata
     return ProviderCredentialResponse(
         id=row["id"],
         organization_id=row["organization_id"],
+        environment_id=row["environment_id"],
         name=row["name"],
         provider_type=row["provider_type"],
-        secret_ref=row["secret_ref"],
+        subject_type=row["subject_type"],
+        subject_id=subject_id if reveal_sensitive else None,
+        subject_id_redacted=subject_id is not None and not reveal_sensitive,
+        provider_account_id=provider_account_id if reveal_sensitive else None,
+        provider_account_id_redacted=provider_account_id is not None and not reveal_sensitive,
+        credential_type=row["credential_type"],
+        scopes=_loads_json_list(row["scopes_json"]),
+        expires_at=row["expires_at"],
+        rotation_status=row["rotation_status"],
+        revoked_at=row["revoked_at"],
+        revoked_by=row["revoked_by"] if reveal_sensitive else None,
+        revoked_reason=row["revoked_reason"] if reveal_sensitive else None,
+        allowed_tool_ids=_loads_json_list(row["allowed_tool_ids_json"]),
+        secret_ref=row["secret_ref"] if reveal_secret_ref else None,
+        secret_ref_redacted=not reveal_secret_ref,
         masked_secret="••••••••",
         status=row["status"],
         created_by=row["created_by"],
         created_at=row["created_at"],
+        updated_at=row["updated_at"],
         last_used_at=row["last_used_at"],
     )
 
@@ -715,6 +800,57 @@ def integration_health_check_response(row: Row) -> IntegrationHealthCheckRespons
         details=json.loads(row["details_json"]),
         checked_at=row["checked_at"],
     )
+
+
+def _json_list(values: list[str]) -> str:
+    return json.dumps(values, separators=(",", ":"))
+
+
+def _loads_json_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    loaded = json.loads(value)
+    if not isinstance(loaded, list):
+        return []
+    return [str(item) for item in loaded if isinstance(item, str)]
+
+
+def _provider_credential_unavailable_reason(
+    row: Row,
+    *,
+    required_tool_id: str | None,
+    required_scopes: list[str],
+    now: str | datetime | None,
+) -> str | None:
+    status = str(row["status"]).strip().lower()
+    if status == "revoked" or row["revoked_at"] is not None:
+        return "Provider credential is revoked."
+    if status != "active":
+        return f"Provider credential is {status}."
+    expires_at = row["expires_at"]
+    if expires_at is not None and _coerce_utc_datetime(expires_at) <= _coerce_utc_datetime(now):
+        return "Provider credential is expired."
+    stored_scopes = set(_loads_json_list(row["scopes_json"]))
+    missing_scopes = sorted(scope for scope in required_scopes if scope not in stored_scopes)
+    if missing_scopes:
+        return f"Provider credential is missing required scope(s): {', '.join(missing_scopes)}."
+    allowed_tool_ids = _loads_json_list(row["allowed_tool_ids_json"])
+    if required_tool_id is not None and allowed_tool_ids:
+        normalized_required = required_tool_id.strip().lower()
+        normalized_allowed = {tool_id.strip().lower() for tool_id in allowed_tool_ids}
+        if normalized_required not in normalized_allowed:
+            return "Provider credential is not allowed for the requested tool."
+    return None
+
+
+def _coerce_utc_datetime(value: datetime | str | None) -> datetime:
+    if value is None:
+        return datetime.now(timezone.utc)
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    normalized = value.replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(normalized)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
 def _validate_framework_config(integration_id: str, config: dict[str, Any]) -> None:

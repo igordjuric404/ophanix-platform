@@ -51,6 +51,7 @@ class ToolRuntimeActionCreate(BaseModel):
     error_code: str | None = None
     delegated_user_id: str | None = None
     provider_account_id: str | None = None
+    delegated_authorization_id: str | None = None
     approval_state: str | None = None
     authorization_session_id: str | None = None
 
@@ -168,6 +169,7 @@ class ToolRuntimeActionResponse(BaseModel):
     error_code: str | None = None
     delegated_user_id: str | None = None
     provider_account_id: str | None = None
+    delegated_authorization_id: str | None = None
     approval_state: str | None = None
     authorization_session_id: str | None = None
     created_at: str
@@ -205,10 +207,10 @@ class ToolRuntimeActionRepository:
                 agent_id, credential_id, tool_id, permission_id, decision_id,
                 action_status, reason_code, upstream_status_code, latency_ms,
                 payload_summary_json, response_summary_json, redaction_applied,
-                error_code, delegated_user_id, provider_account_id, approval_state,
-                authorization_session_id, created_at, updated_at
+                error_code, delegated_user_id, provider_account_id, delegated_authorization_id,
+                approval_state, authorization_session_id, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 action_id,
@@ -231,6 +233,7 @@ class ToolRuntimeActionRepository:
                 body.error_code,
                 body.delegated_user_id,
                 body.provider_account_id,
+                body.delegated_authorization_id,
                 body.approval_state,
                 body.authorization_session_id,
                 now,
@@ -746,6 +749,7 @@ def tool_runtime_action_response(row: Row) -> ToolRuntimeActionResponse:
         error_code=row["error_code"],
         delegated_user_id=row["delegated_user_id"],
         provider_account_id=row["provider_account_id"],
+        delegated_authorization_id=row["delegated_authorization_id"],
         approval_state=row["approval_state"],
         authorization_session_id=row["authorization_session_id"],
         created_at=row["created_at"],

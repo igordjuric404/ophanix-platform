@@ -1,5 +1,132 @@
 # Feature Audit: Integrations and Provider Secrets
 
+## Remediation Summary
+
+Date of remediation: 2026-05-19
+
+Total findings in this report: 4
+
+Number fixed: 4
+
+Number partially fixed: 0
+
+Number blocked: 0
+
+Number already fixed: 0
+
+Files changed:
+
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/api/rbac.py`
+- `packages/product-platform/src/product_platform/integrations/models.py`
+- `packages/product-platform/src/product_platform/integrations/repository.py`
+- `packages/product-platform/src/product_platform/tool_gateway/delegation.py`
+- `packages/product-platform/src/product_platform/tool_gateway/models.py`
+- `packages/product-platform/src/product_platform/tool_gateway/decision.py`
+- `packages/product-platform/src/product_platform/tool_gateway/runtime_audit.py`
+- `packages/product-platform/src/product_platform/db/migrations/0075_oauth_lifecycle_token_refs.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0075_oauth_lifecycle_token_refs.down.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0076_tool_gateway_delegated_execution_evidence.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0076_tool_gateway_delegated_execution_evidence.down.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0077_provider_credential_scopes.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0077_provider_credential_scopes.down.sql`
+- `packages/product-platform/frontend/src/api/integrations.ts`
+- `packages/product-platform/frontend/src/lib/rbac.ts`
+- `packages/product-platform/tests/test_db_phase1.py`
+- `packages/product-platform/tests/test_integrations_oauth_lifecycle_phase2.py`
+- `packages/product-platform/tests/test_provider_credentials_scope_phase4.py`
+- `packages/product-platform/tests/test_provider_secrets_health_phase1.py`
+- `packages/product-platform/tests/test_tool_gateway_delegated_execution_phase3.py`
+- `packages/product-platform/tests/test_tool_gateway_direct_http_examples_phase3.py`
+- `packages/product-platform/tests/test_tool_gateway_forwarding_phase2.py`
+- `packages/product-platform/tests/test_tool_gateway_forwarding_phase3.py`
+- `packages/product-platform/tests/test_tool_gateway_response_phase3.py`
+- `packages/product-platform/tests/test_tool_gateway_upstream_phase1.py`
+- `packages/product-platform/tests/test_tool_gateway_upstream_phase2.py`
+- `packages/product-platform/tests/test_tool_gateway_upstream_phase3.py`
+- `packages/product-platform/tests/tool_gateway_dns.py`
+- `../ophanix-python-sdk/src/ophanix_tool_gateway/sdk.py`
+- `../ophanix-python-sdk/src/ophanix_tool_gateway/__init__.py`
+- `../ophanix-python-sdk/tests/test_sdk_behavior.py`
+- `docs/product-platform-worktree/execution-logs/integrations-provider-secrets-report-v1-remediation/00-execution-index.md`
+- `docs/product-platform-worktree/execution-logs/integrations-provider-secrets-report-v1-remediation/phase-01-secret-governance-and-redaction.md`
+- `docs/product-platform-worktree/execution-logs/integrations-provider-secrets-report-v1-remediation/phase-02-delegated-oauth-lifecycle.md`
+- `docs/product-platform-worktree/execution-logs/integrations-provider-secrets-report-v1-remediation/phase-03-user-delegated-tool-execution-and-approvals.md`
+- `docs/product-platform-worktree/execution-logs/integrations-provider-secrets-report-v1-remediation/phase-04-scoped-provider-credentials.md`
+
+Tests added or updated:
+
+- `packages/product-platform/tests/test_provider_secrets_health_phase1.py`
+  - `test_compliance_reader_list_redacts_secret_ref_by_default`
+  - `test_secret_ref_visibility_requires_dedicated_permission`
+  - `test_provider_secret_retrieve_emits_audit_event_without_secret_material`
+  - `test_non_local_secret_provider_requires_supported_ref`
+- `packages/product-platform/tests/test_integrations_oauth_lifecycle_phase2.py`
+  - `test_oauth_authorization_start_complete_refresh_and_revoke_lifecycle`
+  - `test_gateway_authorization_status_uses_gateway_token`
+  - `test_revoked_delegated_authorization_cannot_be_used_for_tool_calls`
+- `packages/product-platform/tests/test_db_phase1.py`
+  - migration count/schema/rollback coverage updated for migrations `0075`, `0076`, and `0077`
+- `packages/product-platform/tests/test_tool_gateway_upstream_phase1.py`
+  - `test_unit_oauth_auth_mode_requires_provider_without_secret_reference`
+- `packages/product-platform/tests/test_tool_gateway_delegated_execution_phase3.py`
+  - `test_allowed_delegated_call_persists_policy_and_runtime_binding`
+  - `test_pending_approval_does_not_execute_and_persists_approval_evidence`
+- `packages/product-platform/tests/test_provider_credentials_scope_phase4.py`
+  - `test_provider_credential_environment_scope_enforced`
+  - `test_expired_and_revoked_credentials_cannot_be_selected`
+  - `test_sensitive_provider_credential_metadata_is_redacted_for_broad_readers`
+- `packages/product-platform/tests/test_tool_gateway_direct_http_examples_phase3.py`
+- `packages/product-platform/tests/test_tool_gateway_forwarding_phase2.py`
+- `packages/product-platform/tests/test_tool_gateway_forwarding_phase3.py`
+- `packages/product-platform/tests/test_tool_gateway_response_phase3.py`
+- `packages/product-platform/tests/test_tool_gateway_upstream_phase2.py`
+- `packages/product-platform/tests/test_tool_gateway_upstream_phase3.py`
+  - deterministic DNS fixtures for synthetic upstream hosts
+- `../ophanix-python-sdk/tests/test_sdk_behavior.py`
+  - `test_authorization_required_response_raises_challenge_error`
+  - `test_authorization_status_helper_polls_gateway`
+
+Validation commands run:
+
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_provider_secrets_health_phase1.py' -v` - passed, 14 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_provider_secrets_health*.py' -v` - passed, 21 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_auth_phase2.py' -v` - passed, 4 tests.
+- `PYTHONPATH=src python3 -m compileall -q src/product_platform/api/app.py src/product_platform/api/rbac.py src/product_platform/integrations src/product_platform/audit` - passed.
+- `npm run typecheck` from `packages/product-platform/frontend` - passed.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_integrations_oauth_lifecycle_phase2.py' -v` - passed, 3 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_delegated_execution_phase3.py' -v` - passed, 2 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_provider_credentials_scope_phase4.py' -v` - passed, 3 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` - passed, 5 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_framework_connector_registry*.py' -v` - passed, 10 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_auth_remediation_phase2.py' -v` - passed, 3 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_upstream_phase1.py' -v` - passed, 18 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_decision_phase*.py' -v` - passed, 15 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_runtime_audit_phase*.py' -v` - passed, 15 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_invocation_phase3.py' -v` - passed, 12 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_*.py' -v` - passed, 335 tests.
+- `PYTHONPATH=src python3 -m compileall -q src/product_platform/api/app.py src/product_platform/tool_gateway src/product_platform/db src/ophanix_tool_gateway` - passed.
+- `PYTHONPATH=src python3 -m compileall -q src/product_platform/tool_gateway src/product_platform/api/app.py src/product_platform/db` - passed.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_provider_secrets_health*.py' -v` - passed, 21 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_framework_connector_registry*.py' -v` - passed, 10 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_sdk_behavior.py' -v` from `../ophanix-python-sdk` - passed, 30 tests.
+- `python3 -m ruff check src/product_platform/api/app.py src/product_platform/integrations tests/test_provider_credentials_scope_phase4.py tests/test_db_phase1.py` - passed.
+- `python3 -m mypy` from `packages/product-platform` - passed.
+- `python3 -m mypy` from `../ophanix-python-sdk` - passed.
+- `npm run lint` from `packages/product-platform/frontend` - passed.
+- `npm run typecheck` from `packages/product-platform/frontend` - passed.
+- `npm test` from `packages/product-platform/frontend` - passed, 122 tests.
+- `npm run build` from `packages/product-platform/frontend` - passed with Vite chunk-size warning.
+- `python3 -m build` from `packages/product-platform` - passed.
+- `python3 -m build` from `../ophanix-python-sdk` - passed.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_sdk_behavior.py' -v` from `../ophanix-python-sdk` - passed, 30 tests.
+- `PYTHONPATH=src python3 -m compileall -q src/ophanix_tool_gateway` from `../ophanix-python-sdk` - passed.
+
+Remaining risks:
+
+- All findings in this selected report are remediated.
+- No known remaining risks for this selected report after final validation. Full external managed vault/KMS/BYOK integration remains outside this remediation scope.
+
 ## 1. Scope
 
 This audit covers provider credentials, secret storage, secret references, integration health, OAuth/delegated authorization, Tool Gateway upstream auth, SDK/adapters, and third-party tool authorization. It inspects `product_platform/integrations`, `tool_gateway`, provider credential migrations, integration routes in `api/app.py`, Agent OS OpenAI adapters, and `ophanix-python-sdk`. Relevant benchmarks are AWS AgentCore Identity, Arcade authorization challenge, Composio managed OAuth/tool execution, OpenAI Agents SDK approval/MCP integrations, and enterprise secrets/BYOK patterns. Out of scope: generic API keys and human auth, covered in AUTH.
@@ -24,6 +151,43 @@ Current workflow: users can create/list provider credentials, use secret refs, r
 ## 4. Findings
 
 ### F-INT-001 [P1] [Authorization] Provider credentials are organization-wide secret references instead of environment/user/provider-account scoped records
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Provider credentials now persist environment scope, subject type/id, provider account id, credential type, scopes, expiry, rotation status, revocation metadata, allowed tool ids, and updated timestamps. The legacy migration maps existing organization-wide credentials into each organization's oldest environment, then enforces non-null environment scope for all future provider credential access. Provider credential create/list/get/test paths are environment-scoped, expired/revoked credentials are rejected before secret retrieval or connector selection, framework connector credential references must be selectable for the target integration, and broad readers receive redacted subject/provider-account/secret metadata.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/integrations/models.py`
+- `packages/product-platform/src/product_platform/integrations/repository.py`
+- `packages/product-platform/src/product_platform/db/migrations/0077_provider_credential_scopes.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0077_provider_credential_scopes.down.sql`
+- `packages/product-platform/frontend/src/api/integrations.ts`
+- `packages/product-platform/tests/test_db_phase1.py`
+- `packages/product-platform/tests/test_provider_credentials_scope_phase4.py`
+
+**Tests added or updated:**
+- `packages/product-platform/tests/test_provider_credentials_scope_phase4.py::ProviderCredentialScopePhase4Tests::test_provider_credential_environment_scope_enforced`
+- `packages/product-platform/tests/test_provider_credentials_scope_phase4.py::ProviderCredentialScopePhase4Tests::test_expired_and_revoked_credentials_cannot_be_selected`
+- `packages/product-platform/tests/test_provider_credentials_scope_phase4.py::ProviderCredentialScopePhase4Tests::test_sensitive_provider_credential_metadata_is_redacted_for_broad_readers`
+- `packages/product-platform/tests/test_db_phase1.py` migration schema and rollback coverage for `0077`
+
+**Validation performed:**
+- `PYTHONPATH=src python3 -m compileall -q src/product_platform/integrations src/product_platform/api/app.py src/product_platform/db` - passed.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_provider_credentials_scope_phase4.py' -v` - passed, 3 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` - passed, 5 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_provider_secrets_health*.py' -v` - passed, 21 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_framework_connector_registry*.py' -v` - passed, 10 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_integrations_oauth_lifecycle_phase2.py' -v` - passed, 3 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_delegated_execution_phase3.py' -v` - passed, 2 tests.
+- `npm run typecheck` from `packages/product-platform/frontend` - passed.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Risky
 
@@ -76,6 +240,56 @@ Agents may use broad credentials for actions that should be scoped to a user or 
 **Affects stated Ophanix product promise:** Yes
 
 ### F-INT-002 [P0] [Authentication] OAuth authorization challenge and delegated credential lifecycle are missing
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Added first-class OAuth provider app metadata, authorization session lifecycle, delegated authorization token-reference storage, refresh/revoke operations, redacted authorization responses, gateway-token authorization status polling, OAuth upstream auth-mode validation, and SDK authorization challenge/status helpers. Raw OAuth token values are rejected by lifecycle APIs; access and refresh tokens are accepted only as managed secret/vault references. Revoked delegated authorizations no longer authorize tool execution.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/tool_gateway/delegation.py`
+- `packages/product-platform/src/product_platform/tool_gateway/models.py`
+- `packages/product-platform/src/product_platform/db/migrations/0075_oauth_lifecycle_token_refs.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0075_oauth_lifecycle_token_refs.down.sql`
+- `packages/product-platform/tests/test_db_phase1.py`
+- `packages/product-platform/tests/test_integrations_oauth_lifecycle_phase2.py`
+- `packages/product-platform/tests/test_tool_gateway_upstream_phase1.py`
+- `packages/product-platform/tests/test_tool_gateway_direct_http_examples_phase3.py`
+- `packages/product-platform/tests/test_tool_gateway_forwarding_phase2.py`
+- `packages/product-platform/tests/test_tool_gateway_forwarding_phase3.py`
+- `packages/product-platform/tests/test_tool_gateway_response_phase3.py`
+- `packages/product-platform/tests/test_tool_gateway_upstream_phase2.py`
+- `packages/product-platform/tests/test_tool_gateway_upstream_phase3.py`
+- `packages/product-platform/tests/tool_gateway_dns.py`
+- `../ophanix-python-sdk/src/ophanix_tool_gateway/sdk.py`
+- `../ophanix-python-sdk/src/ophanix_tool_gateway/__init__.py`
+- `../ophanix-python-sdk/tests/test_sdk_behavior.py`
+
+**Tests added or updated:**
+- `packages/product-platform/tests/test_integrations_oauth_lifecycle_phase2.py::IntegrationsOAuthLifecyclePhase2Tests::test_oauth_authorization_start_complete_refresh_and_revoke_lifecycle`
+- `packages/product-platform/tests/test_integrations_oauth_lifecycle_phase2.py::IntegrationsOAuthLifecyclePhase2Tests::test_gateway_authorization_status_uses_gateway_token`
+- `packages/product-platform/tests/test_integrations_oauth_lifecycle_phase2.py::IntegrationsOAuthLifecyclePhase2Tests::test_revoked_delegated_authorization_cannot_be_used_for_tool_calls`
+- `packages/product-platform/tests/test_tool_gateway_upstream_phase1.py::ToolGatewayUpstreamPhase1Tests::test_unit_oauth_auth_mode_requires_provider_without_secret_reference`
+- `packages/product-platform/tests/test_db_phase1.py` migration schema and rollback coverage for `0075`
+- `../ophanix-python-sdk/tests/test_sdk_behavior.py::StandaloneSdkBehaviorTests::test_authorization_required_response_raises_challenge_error`
+- `../ophanix-python-sdk/tests/test_sdk_behavior.py::StandaloneSdkBehaviorTests::test_authorization_status_helper_polls_gateway`
+
+**Validation performed:**
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_integrations_oauth_lifecycle_phase2.py' -v` - passed, 3 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` - passed, 5 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_auth_remediation_phase2.py' -v` - passed, 3 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_upstream_phase1.py' -v` - passed, 18 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_*.py' -v` - passed, 333 tests.
+- `PYTHONPATH=src python3 -m compileall -q src/product_platform/api/app.py src/product_platform/tool_gateway src/product_platform/db src/ophanix_tool_gateway` - passed.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_sdk_behavior.py' -v` from `../ophanix-python-sdk` - passed, 30 tests.
+- `PYTHONPATH=src python3 -m compileall -q src/ophanix_tool_gateway` from `../ophanix-python-sdk` - passed.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Missing
 
@@ -130,6 +344,40 @@ Ophanix cannot meet the product promise of governed user-specific tool access.
 
 ### F-INT-003 [P0] [Security] Secret storage is demo/env-only, access is not independently audited, and `secret_ref` is exposed too broadly
 
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Added a dedicated `secrets:read` permission for revealing provider secret reference metadata, redacted `secret_ref` by default from provider credential list responses, added explicit `include_secret_ref=true` handling that fails closed without `secrets:read`, and emitted canonical audit events for provider secret store/reference registration and retrieval during credential health checks. Production/demo secret-provider guard coverage was also made explicit, and frontend RBAC constants now include `secrets:read` so UI permission contracts match backend RBAC.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/api/rbac.py`
+- `packages/product-platform/src/product_platform/integrations/models.py`
+- `packages/product-platform/src/product_platform/integrations/repository.py`
+- `packages/product-platform/frontend/src/api/integrations.ts`
+- `packages/product-platform/frontend/src/lib/rbac.ts`
+- `packages/product-platform/tests/test_provider_secrets_health_phase1.py`
+
+**Tests added or updated:**
+- `packages/product-platform/tests/test_provider_secrets_health_phase1.py::ProviderCredentialPhase1Tests::test_compliance_reader_list_redacts_secret_ref_by_default`
+- `packages/product-platform/tests/test_provider_secrets_health_phase1.py::ProviderCredentialPhase1Tests::test_secret_ref_visibility_requires_dedicated_permission`
+- `packages/product-platform/tests/test_provider_secrets_health_phase1.py::ProviderCredentialPhase1Tests::test_provider_secret_retrieve_emits_audit_event_without_secret_material`
+- `packages/product-platform/tests/test_provider_secrets_health_phase1.py::ProviderCredentialPhase1Tests::test_non_local_secret_provider_requires_supported_ref`
+
+**Validation performed:**
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_provider_secrets_health_phase1.py' -v` - passed, 14 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_provider_secrets_health*.py' -v` - passed, 21 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_auth_phase2.py' -v` - passed, 4 tests.
+- `PYTHONPATH=src python3 -m compileall -q src/product_platform/api/app.py src/product_platform/api/rbac.py src/product_platform/integrations src/product_platform/audit` - passed.
+- `npm run typecheck` from `packages/product-platform/frontend` - passed.
+- `npm test` from `packages/product-platform/frontend` - passed, including RBAC permission contract coverage.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
+
 **Status:** Risky
 
 **Current implementation:**
@@ -182,6 +430,42 @@ Secrets governance will fail security review and may expose integration details 
 **Affects stated Ophanix product promise:** Yes
 
 ### F-INT-004 [P0] [Authorization] Tool Gateway execution is not user-delegated or approval-aware for ordinary external tools
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Persisted delegated execution evidence across Tool Gateway policy decisions and runtime actions. Policy decisions and runtime audit records now retain the gateway credential, delegated authorization, delegated user, provider account, approval state, authorization session, request id, and correlation id where available. Allowed delegated tool calls bind to active delegated authorization records, while approval-required calls persist pending approval evidence and do not execute upstream tools.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/tool_gateway/decision.py`
+- `packages/product-platform/src/product_platform/tool_gateway/runtime_audit.py`
+- `packages/product-platform/src/product_platform/db/migrations/0076_tool_gateway_delegated_execution_evidence.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0076_tool_gateway_delegated_execution_evidence.down.sql`
+- `packages/product-platform/tests/test_db_phase1.py`
+- `packages/product-platform/tests/test_tool_gateway_delegated_execution_phase3.py`
+
+**Tests added or updated:**
+- `packages/product-platform/tests/test_tool_gateway_delegated_execution_phase3.py::ToolGatewayDelegatedExecutionPhase3Tests::test_allowed_delegated_call_persists_policy_and_runtime_binding`
+- `packages/product-platform/tests/test_tool_gateway_delegated_execution_phase3.py::ToolGatewayDelegatedExecutionPhase3Tests::test_pending_approval_does_not_execute_and_persists_approval_evidence`
+- `packages/product-platform/tests/test_db_phase1.py` migration schema and rollback coverage for `0076`
+
+**Validation performed:**
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_delegated_execution_phase3.py' -v` - passed, 2 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` - passed, 5 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_auth_remediation_phase2.py' -v` - passed, 3 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_integrations_oauth_lifecycle_phase2.py' -v` - passed, 3 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_decision_phase*.py' -v` - passed, 15 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_runtime_audit_phase*.py' -v` - passed, 15 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_invocation_phase3.py' -v` - passed, 12 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_*.py' -v` - passed, 335 tests.
+- `PYTHONPATH=src python3 -m compileall -q src/product_platform/tool_gateway src/product_platform/api/app.py src/product_platform/db` - passed.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Missing
 
@@ -282,4 +566,3 @@ None.
 ## 7. Feature-Level Target State
 
 Integrations should treat every credential as a governed delegated capability: vault-backed, environment-scoped, user/provider-account aware, refreshable, revocable, auditable, and redacted. Tool execution should select credentials through policy and consent records, support pending authorization/approval, and emit linked audit/trace evidence. SDKs should include authorization challenge helpers. Health checks should verify real provider/OAuth/MCP state and label manual checks. Tests should cover credential scope, secret redaction, vault access audit, OAuth lifecycle, delegated tool calls, and adapter redaction.
-

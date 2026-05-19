@@ -9,6 +9,7 @@ from product_platform.api.settings import Settings
 from product_platform.audit.store import AuditEventQuery, AuditEventRepository
 from product_platform.db.seed import seed_demo_data
 from product_platform.db.testing import create_migrated_test_database
+from tool_gateway_dns import patch_public_dns_resolution
 
 
 VALID_INPUT_SCHEMA = {
@@ -35,6 +36,9 @@ class FakeHTTPClient:
 
 class ToolGatewayUpstreamPhase3Tests(unittest.TestCase):
     def setUp(self) -> None:
+        dns_patch = patch_public_dns_resolution()
+        dns_patch.start()
+        self.addCleanup(dns_patch.stop)
         self.database = create_migrated_test_database()
         with self.database.transaction() as connection:
             seed_demo_data(connection)

@@ -50,13 +50,29 @@ export interface FrameworkAgentLink {
 export interface ProviderCredential {
   id: string;
   organization_id: string;
+  environment_id: string;
   name: string;
   provider_type: string;
-  secret_ref: string;
+  subject_type: string;
+  subject_id?: string | null;
+  subject_id_redacted?: boolean;
+  provider_account_id?: string | null;
+  provider_account_id_redacted?: boolean;
+  credential_type: string;
+  scopes: string[];
+  expires_at?: string | null;
+  rotation_status: string;
+  revoked_at?: string | null;
+  revoked_by?: string | null;
+  revoked_reason?: string | null;
+  allowed_tool_ids: string[];
+  secret_ref: string | null;
+  secret_ref_redacted?: boolean;
   masked_secret: string;
   status: string;
   created_by: string;
   created_at: string;
+  updated_at: string;
   last_used_at?: string | null;
 }
 

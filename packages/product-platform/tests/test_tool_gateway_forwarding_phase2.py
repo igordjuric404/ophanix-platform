@@ -19,6 +19,7 @@ from product_platform.tool_gateway.models import (
     ToolUpstreamTargetCreateRequest,
 )
 from product_platform.tool_gateway.repository import ToolRegistryRepository
+from tool_gateway_dns import patch_public_dns_resolution
 
 
 VALID_INPUT_SCHEMA = {
@@ -56,6 +57,9 @@ class StaticSecretProvider:
 
 class ToolGatewayForwardingPhase2Tests(unittest.TestCase):
     def setUp(self) -> None:
+        dns_patch = patch_public_dns_resolution()
+        dns_patch.start()
+        self.addCleanup(dns_patch.stop)
         self.database = create_migrated_test_database()
         with self.database.transaction() as connection:
             seed_demo_data(connection)

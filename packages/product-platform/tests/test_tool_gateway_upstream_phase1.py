@@ -28,6 +28,20 @@ VALID_INPUT_SCHEMA = {
 
 class ToolGatewayUpstreamPhase1Tests(unittest.TestCase):
     def setUp(self) -> None:
+        dns_patch = patch(
+            "product_platform.tool_gateway.models.socket.getaddrinfo",
+            return_value=[
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    6,
+                    "",
+                    ("93.184.216.34", 443),
+                )
+            ],
+        )
+        dns_patch.start()
+        self.addCleanup(dns_patch.stop)
         self.database = create_migrated_test_database()
         with self.database.transaction() as connection:
             seed_demo_data(connection)
@@ -111,6 +125,47 @@ class ToolGatewayUpstreamPhase1Tests(unittest.TestCase):
         )
         self.assertEqual(target.auth_mode, "bearer")
         self.assertEqual(target.auth_config_json, {"secret_ref": "secref_upstream_claims"})
+
+    def test_unit_oauth_auth_mode_requires_provider_without_secret_reference(self) -> None:
+        with self.assertRaises(ValidationError) as context:
+            ToolUpstreamTargetCreateRequest(
+                base_url="https://claims.internal.example",
+                path_template="/claims",
+                auth_mode="oauth",
+            )
+
+        self.assertIn("oauth_provider is required", str(context.exception))
+
+        with self.assertRaises(ValidationError) as secret_context:
+            ToolUpstreamTargetCreateRequest(
+                base_url="https://claims.internal.example",
+                path_template="/claims",
+                auth_mode="oauth",
+                auth_config_json={
+                    "oauth_provider": "google-workspace",
+                    "secret_ref": "secref_upstream_claims",
+                },
+            )
+
+        self.assertIn("secret_ref must not be used", str(secret_context.exception))
+
+        target = ToolUpstreamTargetCreateRequest(
+            base_url="https://claims.internal.example",
+            path_template="/claims",
+            auth_mode="oauth",
+            auth_config_json={
+                "oauth_provider": "google-workspace",
+                "required_scopes": ["drive.readonly", "drive.readonly", "calendar.readonly"],
+            },
+        )
+        self.assertEqual(target.auth_mode, "oauth")
+        self.assertEqual(
+            target.auth_config_json,
+            {
+                "oauth_provider": "google-workspace",
+                "required_scopes": ["drive.readonly", "calendar.readonly"],
+            },
+        )
 
     def test_unit_auth_config_rejects_inline_secret_material(self) -> None:
         for secret_ref in [

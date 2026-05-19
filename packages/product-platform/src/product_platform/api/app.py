@@ -246,6 +246,8 @@ from product_platform.integrations.repository import (
     FrameworkInstanceNotFoundError,
     FrameworkIntegrationNotFoundError,
     IntegrationRegistryRepository,
+    ProviderCredentialNotFoundError,
+    ProviderCredentialSelectionError,
     ProviderCredentialSecretError,
     framework_agent_response,
     framework_instance_response,
@@ -611,8 +613,17 @@ from product_platform.tool_gateway.auth import (
 from product_platform.tool_gateway.decision import ToolPolicyDecisionService
 from product_platform.tool_gateway.delegation import (
     AuthorizationStatusResponse,
+    DelegatedAuthorizationResponse,
+    OAuthAuthorizationSessionCompleteRequest,
+    OAuthAuthorizationSessionStartRequest,
+    OAuthDelegatedAuthorizationRefreshRequest,
+    OAuthDelegatedAuthorizationRevokeRequest,
+    OAuthProviderAppCreateRequest,
+    OAuthProviderAppResponse,
     ToolDelegationRepository,
     authorization_session_response,
+    delegated_authorization_response,
+    oauth_provider_app_response,
 )
 from product_platform.tool_gateway.health import ToolUpstreamHealthChecker
 from product_platform.tool_gateway.invocation import (
@@ -911,7 +922,10 @@ def _validate_production_settings(settings: Settings) -> None:
 
 
 def _is_tool_gateway_runtime_path(path: str) -> bool:
-    return path in {"/api/v1/gateway/tools", "/api/v1/gateway/capabilities"} or (
+    return (
+        path in {"/api/v1/gateway/tools", "/api/v1/gateway/capabilities"}
+        or path.startswith("/api/v1/gateway/authorizations/")
+    ) or (
         len(path.split("/")) == 6
         and path.startswith("/api/v1/tools/")
         and path.endswith("/invoke")
@@ -4462,6 +4476,7 @@ def create_app(
                             error_code=decision.reason_code,
                             delegated_user_id=decision.delegated_user_id,
                             provider_account_id=decision.provider_account_id,
+                            delegated_authorization_id=decision.delegated_authorization_id,
                             approval_state=decision.approval_state,
                             authorization_session_id=decision.authorization_session_id,
                         )
@@ -4481,6 +4496,9 @@ def create_app(
                             "decision_id": decision.id,
                             "reason_code": decision.reason_code,
                             "authorization_session_id": decision.authorization_session_id,
+                            "delegation_id": decision.delegated_authorization_id,
+                            "delegated_user_id": decision.delegated_user_id,
+                            "provider_account_id": decision.provider_account_id,
                             "approval_state": decision.approval_state,
                         },
                     )
@@ -4549,6 +4567,7 @@ def create_app(
                                 error_code="schema_validation_failed",
                                 delegated_user_id=principal.delegated_user_id,
                                 provider_account_id=principal.delegated_provider_account_id,
+                                delegated_authorization_id=principal.delegated_authorization_id,
                                 approval_state=principal.approval_state,
                                 authorization_session_id=principal.authorization_session_id,
                             )
@@ -4670,6 +4689,7 @@ def create_app(
                         payload_summary=body.payload,
                         delegated_user_id=principal.delegated_user_id,
                         provider_account_id=principal.delegated_provider_account_id,
+                        delegated_authorization_id=principal.delegated_authorization_id,
                         approval_state=principal.approval_state,
                         authorization_session_id=principal.authorization_session_id,
                     )
@@ -4681,6 +4701,10 @@ def create_app(
                     {
                         "decision_id": decision.id,
                         "reason_code": decision.reason_code,
+                        "delegation_id": principal.delegated_authorization_id,
+                        "delegated_user_id": principal.delegated_user_id,
+                        "provider_account_id": principal.delegated_provider_account_id,
+                        "approval_state": principal.approval_state,
                     },
                 )
                 runtime_action_id = str(runtime_action["id"])
@@ -12657,10 +12681,12 @@ def create_app(
     )
     async def create_integration_provider_credential(
         body: ProviderCredentialCreateRequest,
+        request: Request,
         current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
         environment_id: str = Depends(require_environment_context),
     ) -> ProviderCredentialResponse:
         organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
         with _audit_database().transaction() as connection:
             repository = IntegrationRegistryRepository(connection, organization_id, environment_id)
             try:
@@ -12671,7 +12697,34 @@ def create_app(
                 )
             except ProviderCredentialSecretError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return provider_credential_response(row)
+            AuditEventRepository(connection).insert(
+                AuditEventEnvelope(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    event_type=(
+                        "integration.provider_secret.store"
+                        if body.secret_value is not None
+                        else "integration.provider_secret.reference_registered"
+                    ),
+                    source_component="provider-secrets",
+                    actor_type="user",
+                    actor_id=current_user.id,
+                    resource_type="provider_credential",
+                    resource_id=row["id"],
+                    decision="allow",
+                    correlation_id=context.correlation_id,
+                    payload_json={
+                        "provider_type": row["provider_type"],
+                        "credential_status": row["status"],
+                        "secret_source": "stored_value" if body.secret_value is not None else "external_ref",
+                    },
+                )
+            )
+            return provider_credential_response(
+                row,
+                reveal_secret_ref=has_permission(current_user, Permission.SECRETS_READ),
+                reveal_sensitive_metadata=has_permission(current_user, Permission.SECRETS_READ),
+            )
 
     @app.get(
         "/api/v1/integrations/provider-credentials",
@@ -12681,16 +12734,256 @@ def create_app(
     async def list_integration_provider_credentials(
         provider_type: str | None = Query(default=None),
         status: str | None = Query(default=None),
+        include_secret_ref: bool = Query(default=False),
         current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
         environment_id: str = Depends(require_environment_context),
     ) -> list[ProviderCredentialResponse]:
         organization_id = _require_organization_id(current_user)
+        if include_secret_ref and not has_permission(current_user, Permission.SECRETS_READ):
+            raise HTTPException(status_code=403, detail=f"Missing permission: {Permission.SECRETS_READ}")
         with _audit_database().transaction() as connection:
             repository = IntegrationRegistryRepository(connection, organization_id, environment_id)
             return [
-                provider_credential_response(row)
+                provider_credential_response(
+                    row,
+                    reveal_secret_ref=include_secret_ref,
+                    reveal_sensitive_metadata=include_secret_ref,
+                )
                 for row in repository.list_provider_credentials(provider_type=provider_type, status=status)
             ]
+
+    @app.post(
+        "/api/v1/integrations/oauth/apps",
+        response_model=OAuthProviderAppResponse,
+        status_code=201,
+        tags=["integrations"],
+    )
+    async def create_oauth_provider_app(
+        body: OAuthProviderAppCreateRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> OAuthProviderAppResponse:
+        """Register OAuth app metadata without exposing client secret references."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        with _audit_database().transaction() as connection:
+            repository = ToolDelegationRepository(connection, organization_id, environment_id)
+            row = repository.create_oauth_provider_app(body, created_by=current_user.id)
+            AuditEventRepository(connection).insert(
+                AuditEventEnvelope(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    event_type="integration.oauth_app.created",
+                    source_component="provider-oauth",
+                    actor_type="user",
+                    actor_id=current_user.id,
+                    resource_type="oauth_provider_app",
+                    resource_id=row["id"],
+                    decision="allow",
+                    correlation_id=context.correlation_id,
+                    payload_json={
+                        "provider": row["provider"],
+                        "scope_count": len(body.scopes),
+                        "client_secret_ref_redacted": row["client_secret_ref"] is not None,
+                    },
+                )
+            )
+            return oauth_provider_app_response(row)
+
+    @app.post(
+        "/api/v1/integrations/oauth/authorization-sessions",
+        response_model=AuthorizationStatusResponse,
+        status_code=201,
+        tags=["integrations"],
+    )
+    async def start_oauth_authorization_session(
+        body: OAuthAuthorizationSessionStartRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> AuthorizationStatusResponse:
+        """Start an OAuth authorization session for delegated provider consent."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = ToolDelegationRepository(connection, organization_id, environment_id)
+                row = repository.start_authorization_session(body)
+                AuditEventRepository(connection).insert(
+                    AuditEventEnvelope(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        event_type="integration.oauth_authorization.started",
+                        source_component="provider-oauth",
+                        actor_type="user",
+                        actor_id=current_user.id,
+                        agent_id=body.agent_id,
+                        resource_type="oauth_authorization_session",
+                        resource_id=row["id"],
+                        decision="pending_authorization",
+                        correlation_id=context.correlation_id,
+                        payload_json={
+                            "provider": row["provider"],
+                            "tool_id": row["tool_id"],
+                            "scope_count": len(body.required_scopes),
+                            "oauth_app_id": body.oauth_app_id,
+                        },
+                    )
+                )
+                return authorization_session_response(row)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/integrations/oauth/authorization-sessions/{authorization_session_id}/complete",
+        response_model=DelegatedAuthorizationResponse,
+        status_code=201,
+        tags=["integrations"],
+    )
+    async def complete_oauth_authorization_session(
+        authorization_session_id: str,
+        body: OAuthAuthorizationSessionCompleteRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> DelegatedAuthorizationResponse:
+        """Complete an OAuth session and store only vault/environment token references."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        if body.access_token is not None or body.refresh_token is not None:
+            raise HTTPException(
+                status_code=422,
+                detail="Raw OAuth token material is not accepted; use token references.",
+            )
+        try:
+            with _audit_database().transaction() as connection:
+                repository = ToolDelegationRepository(connection, organization_id, environment_id)
+                row = repository.complete_authorization_session(authorization_session_id, body)
+                AuditEventRepository(connection).insert(
+                    AuditEventEnvelope(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        event_type="integration.oauth_authorization.completed",
+                        source_component="provider-oauth",
+                        actor_type="user",
+                        actor_id=current_user.id,
+                        agent_id=row["agent_id"],
+                        resource_type="delegated_authorization",
+                        resource_id=row["id"],
+                        decision="allow",
+                        correlation_id=context.correlation_id,
+                        payload_json={
+                            "provider": row["provider"],
+                            "tool_id": row["tool_id"],
+                            "user_id": row["user_id"],
+                            "provider_account_id": row["provider_account_id"],
+                            "scope_count": len(body.scopes),
+                            "token_refs_redacted": True,
+                        },
+                    )
+                )
+                return delegated_authorization_response(row)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/integrations/oauth/delegated-authorizations/{authorization_id}/refresh",
+        response_model=DelegatedAuthorizationResponse,
+        tags=["integrations"],
+    )
+    async def refresh_oauth_delegated_authorization(
+        authorization_id: str,
+        body: OAuthDelegatedAuthorizationRefreshRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> DelegatedAuthorizationResponse:
+        """Refresh delegated authorization token references without storing raw tokens."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        if body.access_token is not None or body.refresh_token is not None:
+            raise HTTPException(
+                status_code=422,
+                detail="Raw OAuth token material is not accepted; use token references.",
+            )
+        try:
+            with _audit_database().transaction() as connection:
+                repository = ToolDelegationRepository(connection, organization_id, environment_id)
+                row = repository.refresh_authorization(authorization_id, body)
+                AuditEventRepository(connection).insert(
+                    AuditEventEnvelope(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        event_type="integration.oauth_authorization.refreshed",
+                        source_component="provider-oauth",
+                        actor_type="user",
+                        actor_id=current_user.id,
+                        agent_id=row["agent_id"],
+                        resource_type="delegated_authorization",
+                        resource_id=row["id"],
+                        decision="allow",
+                        correlation_id=context.correlation_id,
+                        payload_json={
+                            "provider": row["provider"],
+                            "tool_id": row["tool_id"],
+                            "token_refs_redacted": True,
+                            "expires_at": row["expires_at"],
+                        },
+                    )
+                )
+                return delegated_authorization_response(row)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/integrations/oauth/delegated-authorizations/{authorization_id}/revoke",
+        response_model=DelegatedAuthorizationResponse,
+        tags=["integrations"],
+    )
+    async def revoke_oauth_delegated_authorization(
+        authorization_id: str,
+        body: OAuthDelegatedAuthorizationRevokeRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> DelegatedAuthorizationResponse:
+        """Revoke delegated authorization so future tool calls cannot use it."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = ToolDelegationRepository(connection, organization_id, environment_id)
+                row = repository.revoke_authorization(authorization_id, body)
+                AuditEventRepository(connection).insert(
+                    AuditEventEnvelope(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        event_type="integration.oauth_authorization.revoked",
+                        source_component="provider-oauth",
+                        actor_type="user",
+                        actor_id=current_user.id,
+                        agent_id=row["agent_id"],
+                        resource_type="delegated_authorization",
+                        resource_id=row["id"],
+                        decision="deny",
+                        severity="warning",
+                        correlation_id=context.correlation_id,
+                        payload_json={
+                            "provider": row["provider"],
+                            "tool_id": row["tool_id"],
+                            "reason": body.reason,
+                        },
+                    )
+                )
+                return delegated_authorization_response(row)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post(
         "/api/v1/integrations/provider-credentials/{credential_id}/test",
@@ -12708,10 +13001,76 @@ def create_app(
         context = _request_context_from_request(request)
         with _audit_database().transaction() as connection:
             repository = IntegrationRegistryRepository(connection, organization_id, environment_id)
-            credential = repository.get_provider_credential(credential_id)
-            if credential is None:
-                raise HTTPException(status_code=404, detail="Provider credential not found.")
-            secret_value = _secret_provider().retrieve(credential["secret_ref"])
+            try:
+                credential = repository.require_provider_credential_selectable(credential_id)
+            except ProviderCredentialNotFoundError as exc:
+                raise HTTPException(status_code=404, detail="Provider credential not found.") from exc
+            except ProviderCredentialSelectionError as exc:
+                AuditEventRepository(connection).insert(
+                    AuditEventEnvelope(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        event_type="integration.provider_secret.retrieve",
+                        source_component="provider-secrets",
+                        actor_type="user",
+                        actor_id=current_user.id,
+                        resource_type="provider_credential",
+                        resource_id=credential_id,
+                        decision="deny",
+                        severity="warning",
+                        correlation_id=context.correlation_id,
+                        payload_json={
+                            "purpose": "health_check",
+                            "reason": "credential_not_selectable",
+                            "message": str(exc),
+                        },
+                    )
+                )
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            try:
+                secret_value = _secret_provider().retrieve(credential["secret_ref"])
+            except ValueError as exc:
+                AuditEventRepository(connection).insert(
+                    AuditEventEnvelope(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        event_type="integration.provider_secret.retrieve",
+                        source_component="provider-secrets",
+                        actor_type="user",
+                        actor_id=current_user.id,
+                        resource_type="provider_credential",
+                        resource_id=credential["id"],
+                        decision="deny",
+                        severity="warning",
+                        correlation_id=context.correlation_id,
+                        payload_json={
+                            "provider_type": credential["provider_type"],
+                            "purpose": "health_check",
+                            "reason": "invalid_secret_ref",
+                            "secret_present": False,
+                        },
+                    )
+                )
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            AuditEventRepository(connection).insert(
+                AuditEventEnvelope(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    event_type="integration.provider_secret.retrieve",
+                    source_component="provider-secrets",
+                    actor_type="user",
+                    actor_id=current_user.id,
+                    resource_type="provider_credential",
+                    resource_id=credential["id"],
+                    decision="allow",
+                    correlation_id=context.correlation_id,
+                    payload_json={
+                        "provider_type": credential["provider_type"],
+                        "purpose": "health_check",
+                        "secret_present": secret_value is not None,
+                    },
+                )
+            )
             result = run_provider_health_test(credential["provider_type"], secret_value)
             row = repository.create_provider_credential_health_check(credential, result)
             _record_integration_health_policy_evaluation(
@@ -12808,6 +13167,10 @@ def create_app(
                 row = repository.create_instance(body, created_by=current_user.id)
             except FrameworkIntegrationNotFoundError as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ProviderCredentialNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ProviderCredentialSelectionError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
             except FrameworkInstanceConfigError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             response = framework_instance_response(row)
@@ -12866,6 +13229,10 @@ def create_app(
                 row = repository.patch_instance(instance_id, body)
             except FrameworkInstanceNotFoundError as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ProviderCredentialNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ProviderCredentialSelectionError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
             except FrameworkInstanceConfigError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             response = framework_instance_response(row)

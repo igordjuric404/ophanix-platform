@@ -81,6 +81,7 @@ class ToolPolicyDecisionCreate(BaseModel):
     """Internal persistence request for a Tool Gateway policy decision."""
 
     agent_id: str | None = None
+    credential_id: str | None = None
     tool_id: str | None = None
     permission_id: str | None = None
     decision: str
@@ -92,6 +93,7 @@ class ToolPolicyDecisionCreate(BaseModel):
     payload_summary: dict[str, Any] = Field(default_factory=dict)
     delegated_user_id: str | None = None
     provider_account_id: str | None = None
+    delegated_authorization_id: str | None = None
     approval_state: str | None = None
     authorization_session_id: str | None = None
 
@@ -123,12 +125,14 @@ class ToolPolicyDecisionCreate(BaseModel):
 
     @field_validator(
         "agent_id",
+        "credential_id",
         "tool_id",
         "permission_id",
         "matched_policy_id",
         "correlation_id",
         "delegated_user_id",
         "provider_account_id",
+        "delegated_authorization_id",
         "approval_state",
         "authorization_session_id",
     )
@@ -147,6 +151,7 @@ class ToolPolicyDecisionResult(BaseModel):
     organization_id: str
     environment_id: str
     agent_id: str | None = None
+    credential_id: str | None = None
     tool_id: str | None = None
     permission_id: str | None = None
     decision: str
@@ -158,6 +163,7 @@ class ToolPolicyDecisionResult(BaseModel):
     payload_summary: dict[str, Any] = Field(default_factory=dict)
     delegated_user_id: str | None = None
     provider_account_id: str | None = None
+    delegated_authorization_id: str | None = None
     approval_state: str | None = None
     authorization_session_id: str | None = None
     authorization_challenge: AuthorizationChallengeResponse | None = None
@@ -170,11 +176,17 @@ class ToolPolicyHookContext(BaseModel):
     organization_id: str
     environment_id: str
     agent_id: str
+    credential_id: str
     tool_id: str
     tool_name: str
     permission_id: str
     required_scope: str
     payload_summary: dict[str, Any]
+    delegated_user_id: str | None = None
+    provider_account_id: str | None = None
+    delegated_authorization_id: str | None = None
+    approval_state: str | None = None
+    delegated_scopes: list[str] = Field(default_factory=list)
     request_id: str
     correlation_id: str | None = None
 
@@ -219,19 +231,20 @@ class ToolPolicyDecisionRepository:
         self.connection.execute(
             """
             INSERT INTO tool_policy_decisions (
-                id, organization_id, environment_id, agent_id, tool_id,
+                id, organization_id, environment_id, agent_id, credential_id, tool_id,
                 permission_id, decision, reason_code, reason_message,
                 matched_policy_id, request_id, correlation_id,
                 payload_summary_json, delegated_user_id, provider_account_id,
-                approval_state, authorization_session_id, created_at
+                delegated_authorization_id, approval_state, authorization_session_id, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 decision_id,
                 self.organization_id,
                 self.environment_id,
                 body.agent_id,
+                body.credential_id,
                 body.tool_id,
                 body.permission_id,
                 body.decision,
@@ -243,6 +256,7 @@ class ToolPolicyDecisionRepository:
                 json.dumps(body.payload_summary, sort_keys=True, separators=(",", ":")),
                 body.delegated_user_id,
                 body.provider_account_id,
+                body.delegated_authorization_id,
                 body.approval_state,
                 body.authorization_session_id,
                 utc_now_iso(),
@@ -321,6 +335,7 @@ class ToolPolicyDecisionService:
         agent = self._get_agent(principal.agent_id)
         if agent is None:
             return self._persist(
+                principal=principal,
                 agent_id=None,
                 tool_id=None,
                 permission_id=None,
@@ -333,6 +348,7 @@ class ToolPolicyDecisionService:
             )
         if agent["status"] != "active":
             return self._persist(
+                principal=principal,
                 agent_id=agent["id"],
                 tool_id=None,
                 permission_id=None,
@@ -347,6 +363,7 @@ class ToolPolicyDecisionService:
         tool = self._get_tool_by_name_any_status(tool_name)
         if tool is None:
             return self._persist(
+                principal=principal,
                 agent_id=agent["id"],
                 tool_id=None,
                 permission_id=None,
@@ -359,6 +376,7 @@ class ToolPolicyDecisionService:
             )
         if tool["status"] != "active":
             return self._persist(
+                principal=principal,
                 agent_id=agent["id"],
                 tool_id=tool["id"],
                 permission_id=None,
@@ -385,6 +403,7 @@ class ToolPolicyDecisionService:
             )
             if active_any_scope is None:
                 return self._persist(
+                    principal=principal,
                     agent_id=agent["id"],
                     tool_id=tool["id"],
                     permission_id=None,
@@ -396,6 +415,7 @@ class ToolPolicyDecisionService:
                     payload_summary=payload_summary,
                 )
             return self._persist(
+                principal=principal,
                 agent_id=agent["id"],
                 tool_id=tool["id"],
                 permission_id=active_any_scope["id"],
@@ -412,6 +432,7 @@ class ToolPolicyDecisionService:
             tool_name=str(tool["name"]),
         ):
             return self._persist(
+                principal=principal,
                 agent_id=agent["id"],
                 tool_id=tool["id"],
                 permission_id=permission["id"],
@@ -440,11 +461,17 @@ class ToolPolicyDecisionService:
                 organization_id=self.organization_id,
                 environment_id=self.environment_id,
                 agent_id=agent["id"],
+                credential_id=principal.credential_id,
                 tool_id=tool["id"],
                 tool_name=tool["name"],
                 permission_id=permission["id"],
                 required_scope=required_scope,
                 payload_summary=payload_summary,
+                delegated_user_id=principal.delegated_user_id,
+                provider_account_id=principal.delegated_provider_account_id,
+                delegated_authorization_id=principal.delegated_authorization_id,
+                approval_state=principal.approval_state,
+                delegated_scopes=list(principal.delegated_scopes),
                 request_id=request_id,
                 correlation_id=correlation_id,
             )
@@ -452,6 +479,7 @@ class ToolPolicyDecisionService:
                 hook_result = ToolPolicyHookResult.model_validate(self.policy_hook.evaluate(context))
             except Exception:
                 return self._persist(
+                    principal=principal,
                     agent_id=agent["id"],
                     tool_id=tool["id"],
                     permission_id=permission["id"],
@@ -464,6 +492,7 @@ class ToolPolicyDecisionService:
                 )
             if hook_result.decision == "deny":
                 return self._persist(
+                    principal=principal,
                     agent_id=agent["id"],
                     tool_id=tool["id"],
                     permission_id=permission["id"],
@@ -476,6 +505,7 @@ class ToolPolicyDecisionService:
                     reason_message=hook_result.reason_message,
                 )
             return self._persist(
+                principal=principal,
                 agent_id=agent["id"],
                 tool_id=tool["id"],
                 permission_id=permission["id"],
@@ -489,6 +519,7 @@ class ToolPolicyDecisionService:
             )
 
         return self._persist(
+            principal=principal,
             agent_id=agent["id"],
             tool_id=tool["id"],
             permission_id=permission["id"],
@@ -531,6 +562,7 @@ class ToolPolicyDecisionService:
             )
             challenge = authorization_session_response(session)
             return self._persist(
+                principal=principal,
                 agent_id=principal.agent_id,
                 tool_id=str(tool["id"]),
                 permission_id=permission_id,
@@ -568,6 +600,7 @@ class ToolPolicyDecisionService:
                 status="pending_authorization",
             )
             return self._persist(
+                principal=principal,
                 agent_id=principal.agent_id,
                 tool_id=str(tool["id"]),
                 permission_id=permission_id,
@@ -598,6 +631,7 @@ class ToolPolicyDecisionService:
                 status="pending_authorization",
             )
             return self._persist(
+                principal=principal,
                 agent_id=principal.agent_id,
                 tool_id=str(tool["id"]),
                 permission_id=permission_id,
@@ -609,6 +643,7 @@ class ToolPolicyDecisionService:
                 payload_summary=payload_summary,
                 delegated_user_id=principal.delegated_user_id,
                 provider_account_id=principal.delegated_provider_account_id,
+                delegated_authorization_id=str(authorization["id"]),
                 approval_state="pending_authorization",
                 authorization_session_id=str(session["id"]),
                 authorization_challenge=authorization_session_response(session),
@@ -628,6 +663,7 @@ class ToolPolicyDecisionService:
                 status="pending_authorization",
             )
             return self._persist(
+                principal=principal,
                 agent_id=principal.agent_id,
                 tool_id=str(tool["id"]),
                 permission_id=permission_id,
@@ -639,6 +675,7 @@ class ToolPolicyDecisionService:
                 payload_summary=payload_summary,
                 delegated_user_id=principal.delegated_user_id,
                 provider_account_id=principal.delegated_provider_account_id,
+                delegated_authorization_id=str(authorization["id"]),
                 approval_state="pending_authorization",
                 authorization_session_id=str(session["id"]),
                 authorization_challenge=authorization_session_response(session),
@@ -658,6 +695,7 @@ class ToolPolicyDecisionService:
                 status="pending_approval",
             )
             return self._persist(
+                principal=principal,
                 agent_id=principal.agent_id,
                 tool_id=str(tool["id"]),
                 permission_id=permission_id,
@@ -669,6 +707,7 @@ class ToolPolicyDecisionService:
                 payload_summary=payload_summary,
                 delegated_user_id=principal.delegated_user_id,
                 provider_account_id=principal.delegated_provider_account_id,
+                delegated_authorization_id=str(authorization["id"]),
                 approval_state="pending_approval",
                 authorization_session_id=str(session["id"]),
                 authorization_challenge=authorization_session_response(session),
@@ -709,7 +748,9 @@ class ToolPolicyDecisionService:
     def _persist(
         self,
         *,
+        principal: GatewayPrincipal | None = None,
         agent_id: str | None,
+        credential_id: str | None = None,
         tool_id: str | None,
         permission_id: str | None,
         decision: str,
@@ -721,13 +762,24 @@ class ToolPolicyDecisionService:
         reason_message: str | None = None,
         delegated_user_id: str | None = None,
         provider_account_id: str | None = None,
+        delegated_authorization_id: str | None = None,
         approval_state: str | None = None,
         authorization_session_id: str | None = None,
         authorization_challenge: AuthorizationChallengeResponse | None = None,
     ) -> ToolPolicyDecisionResult:
+        if principal is not None:
+            credential_id = credential_id or principal.credential_id
+            delegated_user_id = delegated_user_id or principal.delegated_user_id
+            provider_account_id = provider_account_id or principal.delegated_provider_account_id
+            delegated_authorization_id = (
+                delegated_authorization_id or principal.delegated_authorization_id
+            )
+            approval_state = approval_state or principal.approval_state
+            authorization_session_id = authorization_session_id or principal.authorization_session_id
         row = self.decisions.create_decision(
             ToolPolicyDecisionCreate(
                 agent_id=agent_id,
+                credential_id=credential_id,
                 tool_id=tool_id,
                 permission_id=permission_id,
                 decision=decision,
@@ -739,6 +791,7 @@ class ToolPolicyDecisionService:
                 payload_summary=payload_summary,
                 delegated_user_id=delegated_user_id,
                 provider_account_id=provider_account_id,
+                delegated_authorization_id=delegated_authorization_id,
                 approval_state=approval_state,
                 authorization_session_id=authorization_session_id,
             )
@@ -771,6 +824,7 @@ def tool_policy_decision_response(
         organization_id=row["organization_id"],
         environment_id=row["environment_id"],
         agent_id=row["agent_id"],
+        credential_id=row["credential_id"],
         tool_id=row["tool_id"],
         permission_id=row["permission_id"],
         decision=row["decision"],
@@ -782,6 +836,7 @@ def tool_policy_decision_response(
         payload_summary=json.loads(row["payload_summary_json"]),
         delegated_user_id=row["delegated_user_id"],
         provider_account_id=row["provider_account_id"],
+        delegated_authorization_id=row["delegated_authorization_id"],
         approval_state=row["approval_state"],
         authorization_session_id=row["authorization_session_id"],
         authorization_challenge=authorization_challenge,

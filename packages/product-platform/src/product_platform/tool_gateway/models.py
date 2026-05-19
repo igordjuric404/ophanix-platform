@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 SUPPORTED_TOOL_STATUSES = {"draft", "active", "disabled", "retired"}
 TOOL_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]*$")
 SUPPORTED_UPSTREAM_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
-SUPPORTED_UPSTREAM_AUTH_MODES = {"none", "api_key", "bearer"}
+SUPPORTED_UPSTREAM_AUTH_MODES = {"none", "api_key", "bearer", "oauth"}
 SUPPORTED_UPSTREAM_STATUSES = {"configured", "healthy", "degraded", "unhealthy", "disabled"}
 SUPPORTED_AGENT_TOOL_PERMISSION_STATUSES = {"active", "paused", "revoked", "expired"}
 GATEWAY_CONTRACT_VERSION = "tool-gateway.v1"
@@ -604,7 +604,7 @@ def normalize_upstream_auth_config(value: dict[str, Any] | None) -> dict[str, An
 
     if value is None:
         return None
-    allowed = {"header_name", "header_prefix", "secret_ref"}
+    allowed = {"header_name", "header_prefix", "oauth_provider", "required_scopes", "secret_ref"}
     unknown = set(value) - allowed
     if unknown:
         raise ValueError(f"unsupported auth_config_json keys: {', '.join(sorted(unknown))}.")
@@ -628,6 +628,19 @@ def normalize_upstream_auth_config(value: dict[str, Any] | None) -> dict[str, An
                 "auth_config_json.header_prefix must be a single HTTP authentication scheme token."
             )
         normalized["header_prefix"] = header_prefix
+    oauth_provider = _optional_str(value.get("oauth_provider"))
+    if oauth_provider is not None:
+        normalized["oauth_provider"] = oauth_provider
+    required_scopes = value.get("required_scopes")
+    if required_scopes is not None:
+        if not isinstance(required_scopes, list):
+            raise ValueError("auth_config_json.required_scopes must be a list of strings.")
+        normalized_scopes = []
+        for scope in required_scopes:
+            scope_text = _optional_str(scope)
+            if scope_text and scope_text not in normalized_scopes:
+                normalized_scopes.append(scope_text)
+        normalized["required_scopes"] = normalized_scopes
     return normalized or None
 
 
@@ -646,6 +659,12 @@ def validate_upstream_auth_configuration(
     if mode not in SUPPORTED_UPSTREAM_AUTH_MODES:
         supported = ", ".join(sorted(SUPPORTED_UPSTREAM_AUTH_MODES))
         raise ValueError(f"auth_mode must be one of: {supported}.")
+    if mode == "oauth":
+        if not config or not str(config.get("oauth_provider", "")).strip():
+            raise ValueError("auth_config_json.oauth_provider is required when auth_mode is oauth.")
+        if str(config.get("secret_ref", "")).strip():
+            raise ValueError("auth_config_json.secret_ref must not be used when auth_mode is oauth.")
+        return
     if not config or not str(config.get("secret_ref", "")).strip():
         raise ValueError(f"auth_config_json.secret_ref is required when auth_mode is {mode}.")
     if mode == "bearer":

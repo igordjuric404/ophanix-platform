@@ -22,6 +22,7 @@ from product_platform.tool_gateway.models import (
 from product_platform.tool_gateway.repository import ToolRegistryRepository
 from product_platform.tool_gateway import response as response_module
 from product_platform.tool_gateway.response import process_tool_execution_response
+from tool_gateway_dns import patch_public_dns_resolution
 
 
 INPUT_SCHEMA = {"type": "object", "properties": {"claim_id": {"type": "string"}}, "required": ["claim_id"]}
@@ -54,6 +55,11 @@ class FakeHTTPClient:
 
 
 class ToolGatewayResponsePhase3Tests(unittest.TestCase):
+    def setUp(self) -> None:
+        dns_patch = patch_public_dns_resolution()
+        dns_patch.start()
+        self.addCleanup(dns_patch.stop)
+
     def test_unit_token_like_values_are_redacted(self) -> None:
         result = process_tool_execution_response(
             {"output_schema_json": None},

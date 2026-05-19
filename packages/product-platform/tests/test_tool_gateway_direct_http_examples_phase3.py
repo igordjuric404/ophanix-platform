@@ -17,6 +17,7 @@ from product_platform.tool_gateway.direct_http_examples import (
     DIRECT_HTTP_DENIED_TOKEN,
     seed_tool_gateway_direct_http_fixtures,
 )
+from tool_gateway_dns import patch_public_dns_resolution
 
 
 EXAMPLES_DIR = Path(__file__).resolve().parents[1] / "examples" / "tool-gateway-direct-http"
@@ -58,6 +59,9 @@ class FakeGetResponse:
 
 class ToolGatewayDirectHttpExamplesPhase3Tests(unittest.TestCase):
     def setUp(self) -> None:
+        dns_patch = patch_public_dns_resolution()
+        dns_patch.start()
+        self.addCleanup(dns_patch.stop)
         self.database = create_migrated_test_database()
         with self.database.transaction() as connection:
             seed_demo_data(connection)

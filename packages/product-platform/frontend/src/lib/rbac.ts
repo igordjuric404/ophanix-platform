@@ -14,6 +14,7 @@ export const permissions = {
   JOB_CANCEL: "job:cancel",
   API_KEYS_MANAGE: "api-keys:manage",
   SECURITY_MANAGE: "security:manage",
+  SECRETS_READ: "secrets:read",
   COMPLIANCE_READ: "compliance:read",
   COMPLIANCE_WRITE: "compliance:write",
   OBSERVABILITY_READ: "observability:read",
@@ -42,7 +43,8 @@ export const rolePermissions: Record<string, Set<string>> = {
   "Security Admin": new Set([
     ...viewerPermissions,
     permissions.SECURITY_MANAGE,
-    permissions.API_KEYS_MANAGE
+    permissions.API_KEYS_MANAGE,
+    permissions.SECRETS_READ
   ]),
   "Compliance Admin": new Set([...viewerPermissions, permissions.COMPLIANCE_WRITE]),
   "Platform Admin": new Set(Object.values(permissions))
