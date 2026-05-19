@@ -1502,6 +1502,54 @@ def create_app(
 
     app.state.permission_denied_audit_recorder = _record_permission_denied_audit_event
 
+    def _record_admin_settings_audit_event(
+        *,
+        request: Request,
+        principal: UserPrincipal,
+        event_type: str,
+        resource_type: str,
+        resource_id: str,
+        payload_json: dict[str, Any],
+        connection: Any | None = None,
+    ) -> None:
+        organization_id = principal.organization_id
+        if not organization_id:
+            return
+        context = _request_context_from_request(request)
+
+        def insert_event(target_connection: Any) -> None:
+            environment_id = _existing_audit_environment_id(
+                target_connection,
+                organization_id,
+                getattr(request.state, "selected_environment_id", None)
+                or context.environment_id
+                or _default_environment_id_for_org(organization_id),
+            )
+            if environment_id is None:
+                return
+            AuditEventRepository(target_connection).insert(
+                AuditEventEnvelope(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    event_type=event_type,
+                    source_component="admin-settings",
+                    actor_type=principal.actor_type,
+                    actor_id=principal.id,
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                    decision="allow",
+                    correlation_id=context.correlation_id,
+                    trace_id=context.request_id,
+                    payload_json=payload_json,
+                )
+            )
+
+        if connection is not None:
+            insert_event(connection)
+            return
+        with _audit_database().transaction() as audit_connection:
+            insert_event(audit_connection)
+
     def _gateway_token_verification_audit_event(
         *,
         request: Request,
@@ -4345,22 +4393,38 @@ def create_app(
     @app.post("/api/v1/environments", response_model=Environment, status_code=201, tags=["tenancy"])
     async def create_environment(
         body: EnvironmentCreateRequest,
+        request: Request,
         current_user: UserPrincipal = Depends(require_permission(Permission.TENANT_MANAGE)),
     ) -> Environment:
         """Create an environment in the current organization."""
 
         if current_user.organization_id is None:
             raise HTTPException(status_code=400, detail="Organization context is required.")
-        return tenants.create_environment(
+        environment = tenants.create_environment(
             organization_id=current_user.organization_id,
             name=body.name,
             slug=body.slug,
             environment_type=body.type,
         )
+        _record_admin_settings_audit_event(
+            request=request,
+            principal=current_user,
+            event_type="admin.environment.created",
+            resource_type="environment",
+            resource_id=environment.id,
+            payload_json={
+                "environment_id": environment.id,
+                "name": environment.name,
+                "slug": environment.slug,
+                "type": environment.type,
+            },
+        )
+        return environment
 
     @app.post("/api/v1/api-keys", response_model=ApiKeyCreateResponse, status_code=201, tags=["auth"])
     async def create_api_key(
         body: ApiKeyCreateRequest,
+        request: Request,
         current_user: UserPrincipal = Depends(require_permission(Permission.API_KEYS_MANAGE)),
         environment_id: str = Depends(require_environment_context),
     ) -> ApiKeyCreateResponse:
@@ -4389,6 +4453,22 @@ def create_app(
                     environment_ids=environment_ids,
                     expires_at=body.expires_at,
                 )
+                _record_admin_settings_audit_event(
+                    request=request,
+                    principal=current_user,
+                    event_type="admin.api_key.created",
+                    resource_type="api_key",
+                    resource_id=record.id,
+                    payload_json={
+                        "key_id": record.id,
+                        "name": record.name,
+                        "kind": record.kind,
+                        "scopes": list(record.scopes),
+                        "environment_ids": list(record.environment_ids),
+                        "expires_at": record.expires_at,
+                    },
+                    connection=connection,
+                )
         else:
             record, secret = api_keys.create_key(
                 organization_id=current_user.organization_id,
@@ -4397,6 +4477,21 @@ def create_app(
                 kind=body.kind,
                 environment_ids=environment_ids,
                 expires_at=body.expires_at,
+            )
+            _record_admin_settings_audit_event(
+                request=request,
+                principal=current_user,
+                event_type="admin.api_key.created",
+                resource_type="api_key",
+                resource_id=record.id,
+                payload_json={
+                    "key_id": record.id,
+                    "name": record.name,
+                    "kind": record.kind,
+                    "scopes": list(record.scopes),
+                    "environment_ids": list(record.environment_ids),
+                    "expires_at": record.expires_at,
+                },
             )
         return ApiKeyCreateResponse(key=record.to_response(), secret=secret)
 
@@ -4418,6 +4513,7 @@ def create_app(
     @app.delete("/api/v1/api-keys/{key_id}", status_code=204, tags=["auth"])
     async def revoke_api_key(
         key_id: str,
+        request: Request,
         current_user: UserPrincipal = Depends(require_permission(Permission.API_KEYS_MANAGE)),
     ) -> None:
         """Revoke an API key for the current organization."""
@@ -4427,8 +4523,27 @@ def create_app(
         if use_persistent_api_keys:
             with _audit_database().transaction() as connection:
                 revoked = _api_key_store(connection).revoke(key_id, current_user.organization_id)
+                if revoked:
+                    _record_admin_settings_audit_event(
+                        request=request,
+                        principal=current_user,
+                        event_type="admin.api_key.revoked",
+                        resource_type="api_key",
+                        resource_id=key_id,
+                        payload_json={"key_id": key_id},
+                        connection=connection,
+                    )
         else:
             revoked = api_keys.revoke(key_id, current_user.organization_id)
+            if revoked:
+                _record_admin_settings_audit_event(
+                    request=request,
+                    principal=current_user,
+                    event_type="admin.api_key.revoked",
+                    resource_type="api_key",
+                    resource_id=key_id,
+                    payload_json={"key_id": key_id},
+                )
         if not revoked:
             raise HTTPException(status_code=404, detail="API key not found.")
 

@@ -55,24 +55,27 @@ docker compose -f docker-compose.demo.yml up --build
 
 ## Tool Gateway Python SDK
 
-Python agents can call governed tools through the lightweight `ophanix_tool_gateway`
-SDK package. Existing internal imports from `product_platform.tool_gateway` continue
-to work as compatibility exports:
+Python agents can call governed tools through the canonical external
+`ophanix-python-sdk` package. The stable Tool Gateway import path is
+`ophanix_tool_gateway`. Existing internal imports from
+`product_platform.tool_gateway` continue to work as compatibility exports:
+
+```bash
+pip install ophanix-python-sdk
+export OPHANIX_GATEWAY_BASE_URL="https://gateway.example.com"
+export OPHANIX_GATEWAY_TOKEN="replace-with-a-gateway-token"
+```
 
 ```python
 from ophanix_tool_gateway import (
     AsyncOphanixToolGatewayClient,
-    EnvironmentTokenProvider,
     OphanixToolGatewayClient,
     ToolAuthenticationError,
     ToolDeniedError,
     ToolGatewayError,
 )
 
-with OphanixToolGatewayClient(
-    base_url="https://gateway.example.com",
-    token_provider=EnvironmentTokenProvider("OPHANIX_GATEWAY_TOKEN"),
-) as client:
+with OphanixToolGatewayClient.from_env() as client:
     try:
         compatibility = client.check_compatibility()
         if not compatibility.compatible:

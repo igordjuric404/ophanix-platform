@@ -4,8 +4,8 @@
 
 1. Date of remediation: May 19, 2026
 2. Total findings in this report: 4
-3. Number fixed: 3
-4. Number partially fixed: 1
+3. Number fixed: 4
+4. Number partially fixed: 0
 5. Number blocked: 0
 6. Number already fixed: 0
 7. Files changed:
@@ -13,7 +13,6 @@
    - `packages/product-platform/frontend/src/api/admin.ts`
    - `packages/product-platform/frontend/src/api/types.ts`
    - `packages/product-platform/frontend/src/app/router.tsx`
-   - `packages/product-platform/frontend/src/components/layout/AppShell.tsx`
    - `packages/product-platform/frontend/src/features/agents/AgentsPage.tsx`
    - `packages/product-platform/frontend/src/features/agents/AgentsPage.test.tsx`
    - `packages/product-platform/frontend/src/features/settings/SettingsPage.tsx`
@@ -52,7 +51,6 @@
    - The SDK is intentionally Tool Gateway-scoped for the `0.x` line; broader control-plane SDK modules should wait for stable backend contracts.
    - Frontend production build passes, but Vite still warns that the main chunk is larger than 500 kB.
 
-Recovery note: this selected audit report path was missing from the platform working tree during final recovery. The report below was reconstructed from `docs/product-platform-worktree/execution-logs/07-tool-gateway`, the implementation plan in `docs/product-platform-worktree/implementation-plans/07-tool-gateway`, and current source evidence.
 
 ## 1. Scope
 
@@ -224,7 +222,7 @@ Yes
 
 ### F-UXD-002 [P1] [Admin UX] Settings route was a placeholder instead of a usable admin control surface
 
-**Remediation status:** Partially Fixed
+**Remediation status:** Fixed
 
 **Remediation summary:**
 `/settings` now renders a concrete Settings page with setup checklist, organization/environment controls, API key management, current principal visibility, backend-aligned role templates, and operational links. Backend admin mutations emit audit events. Full enterprise IdP user CRUD and role-assignment CRUD remain out of UXD scope because the current backend does not expose a production user-management or IdP ownership API.
@@ -316,7 +314,7 @@ Agent onboarding now includes a first governed run guide that uses selected agen
 `AgentsPage renders registration, inventory, lifecycle, detail, credentials, and audit drawer flows`; SDK `from_env()` tests in `tests/test_sdk_behavior.py`
 
 **Validation performed:**
-`npm test -- src/features/agents/AgentsPage.test.tsx` passed as part of the focused frontend suite; SDK focused tests passed with 31 tests.
+`npm test -- src/features/agents/AgentsPage.test.tsx` passed as part of the focused frontend suite; SDK focused tests passed with 32 tests.
 
 **Remaining work:**
 None in UXD scope. Live invocation still requires a deployed gateway token and configured upstream tools.
@@ -395,7 +393,7 @@ The sibling SDK now exposes sync and async `from_env()` constructors, exports `D
 `StandaloneSdkBehaviorTests.test_from_env_constructs_client_from_gateway_environment`; `StandaloneSdkBehaviorTests.test_from_env_requires_gateway_base_url`; `PackageSmokeTests.test_cli_lists_tools_as_json`; `PackageSmokeTests.test_cli_calls_tool_with_payload_json`
 
 **Validation performed:**
-`python3 -m pytest tests/test_sdk_behavior.py tests/test_package_smoke.py` passed with 31 tests; `python3 -m ruff check src tests examples && python3 -m mypy src/ophanix_tool_gateway` passed.
+`python3 -m pytest tests/test_sdk_behavior.py tests/test_package_smoke.py` passed with 32 tests; `python3 -m ruff check src tests examples && python3 -m mypy src/ophanix_tool_gateway` passed.
 
 **Remaining work:**
 None in current SDK scope. Broader control-plane SDK modules remain future work after API contracts stabilize.

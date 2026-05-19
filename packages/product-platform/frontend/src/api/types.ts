@@ -33,6 +33,7 @@ export interface Organization {
   id: string;
   name: string;
   slug?: string;
+  created_at?: string;
 }
 
 export interface Environment {
@@ -40,6 +41,40 @@ export interface Environment {
   name: string;
   organization_id: string;
   slug?: string;
+  type?: string;
+  created_at?: string;
+}
+
+export interface EnvironmentCreateRequest {
+  name: string;
+  slug: string;
+  type: string;
+}
+
+export interface ApiKey {
+  id: string;
+  organization_id: string;
+  name: string;
+  scopes: string[];
+  kind: string;
+  environment_ids: string[];
+  expires_at: number | null;
+  last_used_at: number | null;
+  revoked_at: number | null;
+  created_at: number;
+}
+
+export interface ApiKeyCreateRequest {
+  name: string;
+  scopes: string[];
+  kind: string;
+  expires_at?: number | null;
+  environment_ids?: string[];
+}
+
+export interface ApiKeyCreateResponse {
+  key: ApiKey;
+  secret: string;
 }
 
 export interface SystemDependency {

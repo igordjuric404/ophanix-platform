@@ -1,29 +1,29 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 from fastapi.testclient import TestClient
 
 from product_platform import create_app
+from product_platform.audit.store import AuditEventQuery, AuditEventRepository
 from product_platform.api.rbac import Permission
 from product_platform.api.settings import Settings
 
 
 class AuthOverallValidationTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.client = TestClient(
-            create_app(
-                Settings(
-                    app_name="Ophanix Test Platform",
-                    environment="test",
-                    build_sha="test-sha",
-                    build_time="2026-04-30T00:00:00Z",
-                    dev_login_allowed_emails=["admin@example.com", "viewer@example.com"],
-                    session_secret="test-secret",
-                )
-            ),
-            raise_server_exceptions=False,
+        self.app = create_app(
+            Settings(
+                app_name="Ophanix Test Platform",
+                environment="test",
+                build_sha="test-sha",
+                build_time="2026-04-30T00:00:00Z",
+                dev_login_allowed_emails=["admin@example.com", "viewer@example.com"],
+                session_secret="test-secret",
+            )
         )
+        self.client = TestClient(self.app, raise_server_exceptions=False)
 
     def _token_for(self, email: str, roles: list[str]) -> str:
         response = self.client.post(
@@ -54,7 +54,32 @@ class AuthOverallValidationTests(unittest.TestCase):
         self.assertEqual(environment.status_code, 201)
         self.assertEqual(environment.json()["slug"], "staging")
         self.assertEqual(api_key.status_code, 201)
-        self.assertTrue(api_key.json()["secret"].startswith("opx_"))
+        created_key = api_key.json()
+        self.assertTrue(created_key["secret"].startswith("opx_"))
+
+        revoke = self.client.delete(
+            f"/api/v1/api-keys/{created_key['key']['id']}",
+            headers=headers,
+        )
+        self.assertEqual(revoke.status_code, 204)
+
+        audit_events = AuditEventRepository(self.app.state.database.connect()).query(
+            AuditEventQuery(
+                organization_id="org_default",
+                source_component="admin-settings",
+                limit=10,
+            )
+        )
+        event_types = {event.event_type for event in audit_events}
+        self.assertIn("admin.environment.created", event_types)
+        self.assertIn("admin.api_key.created", event_types)
+        self.assertIn("admin.api_key.revoked", event_types)
+
+        api_key_created = next(
+            event for event in audit_events if event.event_type == "admin.api_key.created"
+        )
+        self.assertEqual(api_key_created.resource_id, created_key["key"]["id"])
+        self.assertNotIn(created_key["secret"], json.dumps(api_key_created.payload_json))
 
     def test_viewer_can_inspect_but_not_mutate_resources(self) -> None:
         token = self._token_for("viewer@example.com", ["Viewer"])

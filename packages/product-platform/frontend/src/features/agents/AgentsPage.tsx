@@ -26,6 +26,7 @@ import {
   type AgentSummary
 } from "../../api/agents";
 import { useDetailDrawer } from "../../app/drawerContext";
+import { useCurrentUserPrincipal } from "../../app/userContext";
 import { PageHeader } from "../../components/layout/PageHeader";
 import { ActionFeedback, useActionFeedback } from "../../components/shared/ActionFeedback";
 import { EmptyState } from "../../components/shared/EmptyState";
@@ -43,6 +44,7 @@ import {
   canRotateCredential,
   canSuspendAgent
 } from "../../lib/actionAvailability";
+import { permissions, userHasPermission } from "../../lib/rbac";
 import { cn } from "../../lib/utils";
 
 const registrationSteps = [
@@ -71,6 +73,8 @@ export function AgentsPage() {
   const [selectedAgentId, setSelectedAgentId] = useState(() => readAgentIdFromUrl());
   const [activeTab, setActiveTab] = useState("Overview");
   const { feedback, runWithFeedback } = useActionFeedback();
+  const currentUser = useCurrentUserPrincipal();
+  const canWriteAgents = userHasPermission(currentUser, permissions.AGENT_WRITE);
 
   const agentsQuery = useAgents(filters);
   const agents = agentsQuery.data ?? [];
@@ -81,6 +85,7 @@ export function AgentsPage() {
   const credentialsQuery = useAgentCredentials(activeAgentId);
   const expiringQuery = useExpiringCredentials();
   const mutation = useAgentMutation();
+  const selectedAgent = detailQuery.data?.summary ?? agents.find((agent) => agent.id === activeAgentId) ?? null;
 
   function selectAgent(agentId: string) {
     setSelectedAgentId(agentId);
@@ -91,6 +96,9 @@ export function AgentsPage() {
 
   async function handleRegistrationSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!canWriteAgents) {
+      return;
+    }
     const form = new FormData(event.currentTarget);
     const draft = await runWithFeedback<AgentDetail | AgentSummary>(
       () =>
@@ -138,6 +146,9 @@ export function AgentsPage() {
   }
 
   async function runTask(label: string, task: (tenantContext: TenantContext) => Promise<unknown>) {
+    if (!canWriteAgents) {
+      return;
+    }
     await runWithFeedback(() => mutation.mutateAsync(task), {
       errorMessage: `${label} failed`,
       successMessage: label
@@ -162,7 +173,12 @@ export function AgentsPage() {
             { error: expiringQuery.error, isError: expiringQuery.isError, label: "Expiring credentials", onRetry: () => void expiringQuery.refetch() }
           ]}
         />
-        <AgentRegistrationWizard onSubmit={handleRegistrationSubmit} isPending={mutation.isPending} />
+        <AgentRegistrationWizard
+          canWrite={canWriteAgents}
+          onSubmit={handleRegistrationSubmit}
+          isPending={mutation.isPending}
+        />
+        <FirstGovernedRunGuide agent={selectedAgent} />
         <AgentInventory
           agents={agents}
           isLoading={agentsQuery.isLoading}
@@ -174,6 +190,7 @@ export function AgentsPage() {
         <AgentOperations
           activeAgentId={activeAgentId}
           agents={agents}
+          canWrite={canWriteAgents}
           credentials={credentialsQuery.data ?? []}
           detail={detailQuery.data ?? null}
           expiringCredentials={expiringQuery.data ?? []}
@@ -189,10 +206,62 @@ export function AgentsPage() {
   );
 }
 
+function FirstGovernedRunGuide({ agent }: { agent: AgentSummary | null }) {
+  const agentId = agent?.id ?? "select-agent";
+  const agentName = agent?.name ?? "Select an agent";
+  const correlationId = `first-run-${agentId}`;
+  const idempotencyKey = `first-run:${agentId}:claims-lookup`;
+  const decisionHref = `/tool-gateway/decisions?agent_id=${encodeURIComponent(
+    agentId
+  )}&correlation_id=${encodeURIComponent(correlationId)}`;
+  const runtimeHref = `/runtime?agent_id=${encodeURIComponent(agentId)}`;
+  const evidenceHref = `/compliance?agent_id=${encodeURIComponent(agentId)}`;
+  const snippet = `from ophanix_tool_gateway import OphanixToolGatewayClient
+
+client = OphanixToolGatewayClient.from_env()
+result = client.call_tool(
+    "claims.lookup",
+    {"claim_id": "claim_123"},
+    correlation_id="${correlationId}",
+    idempotency_key="${idempotencyKey}",
+)
+print(result.decision)`;
+
+  return (
+    <section className="rounded-lg border bg-card p-5" data-first-governed-run-guide>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold">First Governed Run</h2>
+          <p className="text-sm text-muted-foreground">
+            Run a Tool Gateway call for {agentName}, then inspect the decision and evidence.
+          </p>
+        </div>
+        <Badge tone={agent ? "success" : "warning"}>{agent ? agentId : "No agent selected"}</Badge>
+      </div>
+      <pre className="mt-4 overflow-x-auto rounded-lg border bg-muted/50 p-4 text-xs leading-5">
+        <code>{snippet}</code>
+      </pre>
+      <div className="mt-4 flex flex-wrap gap-3 text-sm">
+        <a className="font-medium text-primary" href={decisionHref}>
+          Tool Gateway decisions
+        </a>
+        <a className="font-medium text-primary" href={runtimeHref}>
+          Runtime state
+        </a>
+        <a className="font-medium text-primary" href={evidenceHref}>
+          Compliance evidence
+        </a>
+      </div>
+    </section>
+  );
+}
+
 function AgentRegistrationWizard({
+  canWrite,
   isPending,
   onSubmit
 }: {
+  canWrite: boolean;
   isPending: boolean;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
@@ -214,31 +283,45 @@ function AgentRegistrationWizard({
         </div>
       </div>
       <form className="mt-5 grid gap-4 md:grid-cols-4" onSubmit={onSubmit}>
-        <Field label="Name" name="name" required defaultValue="Claims Assistant" />
-        <Field label="Owner" name="owner_user_id" required defaultValue="owner_1" />
-        <Field label="Sponsor" name="sponsor_user_id" required defaultValue="sponsor_1" />
+        <Field disabled={!canWrite} label="Name" name="name" required defaultValue="Claims Assistant" />
+        <Field disabled={!canWrite} label="Owner" name="owner_user_id" required defaultValue="owner_1" />
+        <Field disabled={!canWrite} label="Sponsor" name="sponsor_user_id" required defaultValue="sponsor_1" />
         <SelectField
+          disabled={!canWrite}
           label="Framework"
           name="framework"
           options={["langgraph", "crewai", "autogen", "custom"]}
         />
         <SelectField
+          disabled={!canWrite}
           label="Runtime"
           name="runtime_type"
           options={["service", "worker", "workflow", "desktop"]}
         />
-        <Field label="Endpoint" name="endpoint_url" defaultValue="https://agent.example.test" />
-        <Field label="Capability" name="capability_name" defaultValue="claims:read" />
-        <Field label="Resource" name="resource_type" defaultValue="claim" />
-        <Field className="md:col-span-2" label="Policy pack" name="policy_pack" defaultValue="baseline" />
+        <Field
+          disabled={!canWrite}
+          label="Endpoint"
+          name="endpoint_url"
+          defaultValue="https://agent.example.test"
+        />
+        <Field disabled={!canWrite} label="Capability" name="capability_name" defaultValue="claims:read" />
+        <Field disabled={!canWrite} label="Resource" name="resource_type" defaultValue="claim" />
         <Field
           className="md:col-span-2"
+          disabled={!canWrite}
+          label="Policy pack"
+          name="policy_pack"
+          defaultValue="baseline"
+        />
+        <Field
+          className="md:col-span-2"
+          disabled={!canWrite}
           label="Description"
           name="description"
           defaultValue="Governed agent registration draft"
         />
         <div className="flex items-end">
-          <Button disabled={isPending} type="submit">
+          <Button disabled={!canWrite || isPending} type="submit">
             <ShieldCheck className="h-4 w-4" />
             Create draft
           </Button>
@@ -422,6 +505,7 @@ function AgentOperations({
   activeTab,
   agents,
   auditEvents,
+  canWrite,
   credentials,
   detail,
   expiringCredentials,
@@ -434,6 +518,7 @@ function AgentOperations({
   activeTab: string;
   agents: AgentSummary[];
   auditEvents: AgentAuditEvent[];
+  canWrite: boolean;
   credentials: AgentCredential[];
   detail: AgentDetail | null;
   expiringCredentials: AgentCredential[];
@@ -455,8 +540,8 @@ function AgentOperations({
 
   const summary = detail?.summary ?? agents.find((agent) => agent.id === activeAgentId) ?? null;
   const activePanelId = `agent-detail-panel-${tabDomId(activeTab)}`;
-  const approveAvailable = canApproveAgent(summary);
-  const activateAvailable = canActivateAgent(summary);
+  const approveAvailable = canWrite && canApproveAgent(summary);
+  const activateAvailable = canWrite && canActivateAgent(summary);
 
   function moveTabFocus(tab: string) {
     setActiveTab(tab);
@@ -568,6 +653,7 @@ function AgentOperations({
             activeAgentId={activeAgentId}
             activeTab={activeTab}
             auditEvents={auditEvents}
+            canWrite={canWrite}
             credentials={credentials}
             detail={detail}
             expiringCredentials={expiringCredentials}
@@ -589,6 +675,7 @@ function AgentDetailTab({
   activeAgentId,
   activeTab,
   auditEvents,
+  canWrite,
   credentials,
   detail,
   expiringCredentials,
@@ -599,6 +686,7 @@ function AgentDetailTab({
   activeAgentId: string;
   activeTab: string;
   auditEvents: AgentAuditEvent[];
+  canWrite: boolean;
   credentials: AgentCredential[];
   detail: AgentDetail | null;
   expiringCredentials: AgentCredential[];
@@ -614,6 +702,7 @@ function AgentDetailTab({
       <CredentialsTab
         activeAgentId={activeAgentId}
         agent={summary}
+        canWrite={canWrite}
         credentials={credentials}
         expiringCredentials={expiringCredentials}
         onRunTask={onRunTask}
@@ -625,6 +714,7 @@ function AgentDetailTab({
       <LifecycleTab
         activeAgentId={activeAgentId}
         agent={summary}
+        canWrite={canWrite}
         onRunTask={onRunTask}
         timeline={timeline}
       />
@@ -697,15 +787,17 @@ function IdentityTab({ detail }: { detail: AgentDetail | null }) {
 function LifecycleTab({
   activeAgentId,
   agent,
+  canWrite,
   onRunTask,
   timeline
 }: {
   activeAgentId: string;
   agent: AgentSummary | null;
+  canWrite: boolean;
   onRunTask: (label: string, task: (tenantContext: TenantContext) => Promise<unknown>) => Promise<void>;
   timeline: AgentLifecycleEvent[];
 }) {
-  const suspendAvailable = canSuspendAgent(agent);
+  const suspendAvailable = canWrite && canSuspendAgent(agent);
   return (
     <div className="grid gap-4 lg:grid-cols-[22rem_1fr]" data-agent-lifecycle>
       <div className="rounded-lg border p-4">
@@ -736,6 +828,7 @@ function LifecycleTab({
               Suspend
             </Button>
             <Button
+              disabled={!canWrite}
               onClick={() =>
                 onRunTask("Orphan detection queued", (tenantContext) =>
                   runOrphanDetection(tenantContext)
@@ -776,17 +869,19 @@ function LifecycleTab({
 function CredentialsTab({
   activeAgentId,
   agent,
+  canWrite,
   credentials,
   expiringCredentials,
   onRunTask
 }: {
   activeAgentId: string;
   agent: AgentSummary | null;
+  canWrite: boolean;
   credentials: AgentCredential[];
   expiringCredentials: AgentCredential[];
   onRunTask: (label: string, task: (tenantContext: TenantContext) => Promise<unknown>) => Promise<void>;
 }) {
-  const issueAvailable = canIssueAgentCredential(agent);
+  const issueAvailable = canWrite && canIssueAgentCredential(agent);
   return (
     <div className="space-y-4" data-agent-credentials-table>
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -834,8 +929,8 @@ function CredentialsTab({
             </thead>
             <tbody>
               {credentials.map((credential) => {
-                const rotateAvailable = canRotateCredential(credential);
-                const revokeAvailable = canRevokeCredential(credential);
+                const rotateAvailable = canWrite && canRotateCredential(credential);
+                const revokeAvailable = canWrite && canRevokeCredential(credential);
                 return (
                   <tr className="border-b last:border-b-0" key={credential.id}>
                     <td className="py-3 pr-3 font-medium">{credential.id}</td>
@@ -994,11 +1089,13 @@ function Field({
 
 function SelectField({
   compact,
+  disabled,
   label,
   name,
   options
 }: {
   compact?: boolean;
+  disabled?: boolean;
   label: string;
   name: string;
   options: string[];
@@ -1010,6 +1107,7 @@ function SelectField({
       <Label htmlFor={id}>{label}</Label>
       <select
         className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        disabled={disabled}
         id={id}
         name={name}
       >

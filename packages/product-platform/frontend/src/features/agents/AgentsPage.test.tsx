@@ -2,6 +2,7 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DetailDrawerProvider } from "../../app/drawerContext";
+import { CurrentUserProvider } from "../../app/userContext";
 import { renderWithQueryClient } from "../../test/test-utils";
 import { AgentsPage } from "./AgentsPage";
 
@@ -87,11 +88,7 @@ describe("AgentsPage", () => {
   });
 
   it("renders registration, inventory, lifecycle, detail, credentials, and audit drawer flows", async () => {
-    renderWithQueryClient(
-      <DetailDrawerProvider>
-        <AgentsPage />
-      </DetailDrawerProvider>
-    );
+    renderAgentsPage(["Platform Admin"]);
 
     expect((await screen.findAllByText("Claims Assistant")).length).toBeGreaterThan(0);
     for (const step of [
@@ -108,8 +105,28 @@ describe("AgentsPage", () => {
     expect(screen.getAllByText("Orphan Agent").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Suspend").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Decommission").length).toBeGreaterThan(0);
+    expect(screen.getByText("First Governed Run")).toBeInTheDocument();
+    expect(
+      screen.getByText((content) => content.includes("OphanixToolGatewayClient.from_env()"))
+    ).toBeInTheDocument();
+    expect(screen.getByText((content) => content.includes("idempotency_key="))).toBeInTheDocument();
 
     fireEvent.click(within(agentRow("agent_1")).getByRole("button", { name: "Open" }));
+    const guide = screen.getByText("First Governed Run").closest("section");
+    expect(guide).not.toBeNull();
+    expect(within(guide as HTMLElement).getByText("agent_1")).toBeInTheDocument();
+    expect(within(guide as HTMLElement).getByRole("link", { name: "Tool Gateway decisions" })).toHaveAttribute(
+      "href",
+      "/tool-gateway/decisions?agent_id=agent_1&correlation_id=first-run-agent_1"
+    );
+    expect(within(guide as HTMLElement).getByRole("link", { name: "Runtime state" })).toHaveAttribute(
+      "href",
+      "/runtime?agent_id=agent_1"
+    );
+    expect(within(guide as HTMLElement).getByRole("link", { name: "Compliance evidence" })).toHaveAttribute(
+      "href",
+      "/compliance?agent_id=agent_1"
+    );
 
     fireEvent.click(screen.getByRole("tab", { name: "Identity" }));
     expect(await screen.findByText("did:mesh:abc")).toBeInTheDocument();
@@ -128,11 +145,7 @@ describe("AgentsPage", () => {
 
   it("submits registration drafts and applies inventory filters", async () => {
     const calls = mockAgentFetch();
-    renderWithQueryClient(
-      <DetailDrawerProvider>
-        <AgentsPage />
-      </DetailDrawerProvider>
-    );
+    renderAgentsPage(["Platform Admin"]);
 
     expect((await screen.findAllByText("Claims Assistant")).length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: /Create draft/ }));
@@ -147,7 +160,39 @@ describe("AgentsPage", () => {
     );
     expect(calls).toContain("/api/v1/agents/registration-drafts");
   });
+
+  it("disables agent write actions for read-only users", async () => {
+    renderAgentsPage(["Viewer"]);
+
+    expect(await screen.findByRole("button", { name: /Create draft/ })).toBeDisabled();
+    expect(await screen.findByText("Claims Assistant")).toBeInTheDocument();
+    fireEvent.click(within(agentRow("agent_1")).getByRole("button", { name: "Open" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Credentials" }));
+
+    expect(await screen.findByRole("button", { name: "Issue" })).toBeDisabled();
+    for (const button of screen.getAllByRole("button", { name: "Rotate" })) {
+      expect(button).toBeDisabled();
+    }
+    expect(screen.getByRole("button", { name: "Revoke" })).toBeDisabled();
+  });
 });
+
+function renderAgentsPage(roles: string[]) {
+  return renderWithQueryClient(
+    <CurrentUserProvider
+      user={{
+        id: "user_test",
+        email: "user@example.com",
+        display_name: "Test User",
+        roles
+      }}
+    >
+      <DetailDrawerProvider>
+        <AgentsPage />
+      </DetailDrawerProvider>
+    </CurrentUserProvider>
+  );
+}
 
 function mockAgentFetch() {
   const calls: string[] = [];

@@ -23,6 +23,7 @@ import { ObservabilityPage } from "../features/observability/ObservabilityPage";
 import { OverviewPage } from "../features/overview/OverviewPage";
 import { PoliciesPage } from "../features/policies/PoliciesPage";
 import { RuntimePage } from "../features/runtime/RuntimePage";
+import { SettingsPage } from "../features/settings/SettingsPage";
 import { AccessDeniedPage } from "../features/shared/AccessDeniedPage";
 import { FeaturePlaceholderPage } from "../features/shared/FeaturePlaceholderPage";
 import { ToolDecisionsPage } from "../features/tool-gateway/ToolDecisionsPage";
@@ -180,6 +181,12 @@ const demoLabRoute = createRoute({
   component: DemoLabPage
 });
 
+const settingsRoute = createRoute({
+  getParentRoute: () => protectedRoute,
+  path: "/settings",
+  component: SettingsPage
+});
+
 const featureRoutes = routeRegistry
   .filter(
     (route) =>
@@ -197,7 +204,8 @@ const featureRoutes = routeRegistry
       route.path !== "/observability" &&
       route.path !== "/integrations" &&
       route.path !== "/workflows" &&
-      route.path !== "/demo-lab"
+      route.path !== "/demo-lab" &&
+      route.path !== "/settings"
   )
   .map((route) =>
     createRoute({
@@ -232,6 +240,7 @@ const routeTree = rootRoute.addChildren([
     integrationsRoute,
     workflowsRoute,
     demoLabRoute,
+    settingsRoute,
     ...featureRoutes
   ])
 ]);

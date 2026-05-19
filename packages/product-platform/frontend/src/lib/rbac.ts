@@ -14,7 +14,10 @@ export const permissions = {
   JOB_CANCEL: "job:cancel",
   API_KEYS_MANAGE: "api-keys:manage",
   SECURITY_MANAGE: "security:manage",
-  COMPLIANCE_READ: "compliance:read"
+  COMPLIANCE_READ: "compliance:read",
+  COMPLIANCE_WRITE: "compliance:write",
+  OBSERVABILITY_READ: "observability:read",
+  OBSERVABILITY_WRITE: "observability:write"
 } as const;
 
 const viewerPermissions: Set<string> = new Set([
@@ -23,7 +26,8 @@ const viewerPermissions: Set<string> = new Set([
   permissions.POLICY_READ,
   permissions.AGENT_READ,
   permissions.AUDIT_READ,
-  permissions.COMPLIANCE_READ
+  permissions.COMPLIANCE_READ,
+  permissions.OBSERVABILITY_READ
 ]);
 
 export const rolePermissions: Record<string, Set<string>> = {
@@ -40,13 +44,13 @@ export const rolePermissions: Record<string, Set<string>> = {
     permissions.SECURITY_MANAGE,
     permissions.API_KEYS_MANAGE
   ]),
-  "Compliance Admin": new Set([...viewerPermissions, permissions.AUDIT_WRITE]),
+  "Compliance Admin": new Set([...viewerPermissions, permissions.COMPLIANCE_WRITE]),
   "Platform Admin": new Set(Object.values(permissions))
 };
 
-export const routePermissions: Record<string, string> = {
+export const routePermissions: Record<string, string | readonly string[]> = {
   "/overview": permissions.SYSTEM_READ,
-  "/agents": permissions.TENANT_READ,
+  "/agents": permissions.AGENT_READ,
   "/policies": permissions.POLICY_READ,
   "/trust": permissions.COMPLIANCE_READ,
   "/mcp": permissions.AUDIT_READ,
@@ -56,11 +60,11 @@ export const routePermissions: Record<string, string> = {
   "/discovery": permissions.JOB_RUN,
   "/marketplace": permissions.TENANT_READ,
   "/compliance": permissions.COMPLIANCE_READ,
-  "/observability": permissions.AUDIT_READ,
+  "/observability": permissions.OBSERVABILITY_READ,
   "/integrations": permissions.SECURITY_MANAGE,
   "/workflows": permissions.JOB_RUN,
   "/demo-lab": permissions.JOB_RUN,
-  "/settings": permissions.TENANT_MANAGE
+  "/settings": [permissions.TENANT_MANAGE, permissions.API_KEYS_MANAGE]
 };
 
 export function userHasPermission(user: UserPrincipal | null | undefined, permission: string) {
@@ -78,5 +82,11 @@ export function userHasPermission(user: UserPrincipal | null | undefined, permis
 
 export function canAccessRoute(path: string, user: UserPrincipal | null | undefined) {
   const requiredPermission = routePermissions[path];
-  return requiredPermission ? userHasPermission(user, requiredPermission) : true;
+  if (!requiredPermission) {
+    return true;
+  }
+  const acceptedPermissions = Array.isArray(requiredPermission)
+    ? requiredPermission
+    : [requiredPermission];
+  return acceptedPermissions.some((permission) => userHasPermission(user, permission));
 }
