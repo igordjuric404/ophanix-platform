@@ -131,7 +131,7 @@ from product_platform.agents.repository import (
     lifecycle_timeline_event,
 )
 from product_platform.agents.identity import AgentIdentityAdapter
-from product_platform.agents.lifecycle import AgentLifecycleTransitionError
+from product_platform.agents.lifecycle import AgentLifecycleTransitionError, is_agent_operational
 from product_platform.agents.simulation import simulate_registration_action
 from product_platform.db.connection import Database
 from product_platform.db.migrator import is_supported_database_url
@@ -515,6 +515,8 @@ from product_platform.runtime.sagas import (
 )
 from product_platform.trust.models import (
     AgentTrustCardResponse,
+    TrustHandshakeChallengeRequest,
+    TrustHandshakeChallengeResponse,
     TrustHandshakeRequest,
     TrustHandshakeResponse,
     TrustCardIssueRequest,
@@ -529,19 +531,22 @@ from product_platform.trust.models import (
     TrustScoreResponse,
     TrustThresholdCreateRequest,
     TrustThresholdPatchRequest,
+    TrustThresholdResolveRequest,
     TrustThresholdResponse,
 )
 from product_platform.trust.cards import (
+    TrustCardAgentNotOperationalError,
     TrustCardIssuer,
     TrustCardNotFoundError,
     TrustCardRepository,
     trust_card_response,
 )
-from product_platform.trust.handshakes import TrustHandshakeService
+from product_platform.trust.handshakes import TRUST_TIER_RANK, TrustHandshakeService, TrustThresholdResolver
 from product_platform.trust.pipeline import TrustScoreRecalculator
 from product_platform.trust.repository import (
     DuplicateTrustThresholdError,
     TrustAgentNotFoundError,
+    TrustAgentNotOperationalError,
     TrustRepository,
     TrustRuleNotFoundError,
     TrustThresholdNotFoundError,
@@ -2917,6 +2922,7 @@ def create_app(
         card: Any,
         correlation_id: str | None,
         payload_json: dict[str, Any] | None = None,
+        decision: str | None = None,
     ) -> AuditEventEnvelope:
         payload = {
             "trust_card_id": card["id"],
@@ -2936,6 +2942,8 @@ def create_app(
             agent_id=card["agent_id"],
             resource_type="trust_card",
             resource_id=card["id"],
+            decision=decision,
+            severity="warning" if decision == "deny" else "info",
             correlation_id=correlation_id,
             payload_json=payload,
         )
@@ -2965,6 +2973,72 @@ def create_app(
             payload_json=payload,
         )
 
+    def _trust_handshake_blocked_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        body: TrustHandshakeRequest,
+        reason: str,
+        reason_code: str,
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type="trust.handshake.blocked",
+            source_component="trust-handshakes",
+            actor_type="user",
+            actor_id=actor_id,
+            agent_id=body.source_agent_id,
+            resource_type="handshake",
+            resource_id=body.target_agent_id,
+            decision="deny",
+            severity="warning",
+            correlation_id=correlation_id,
+            payload_json={
+                "source_agent_id": body.source_agent_id,
+                "target_agent_id": body.target_agent_id,
+                "purpose": body.purpose,
+                "threshold_type": body.threshold_type,
+                "reason": reason,
+                "reason_code": reason_code,
+            },
+        )
+
+    def _trust_handshake_challenge_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        challenge: TrustHandshakeChallengeResponse,
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type="trust.handshake.challenge_issued",
+            source_component="trust-handshakes",
+            actor_type="user",
+            actor_id=actor_id,
+            agent_id=challenge.source_agent_id,
+            resource_type="handshake_challenge",
+            resource_id=challenge.challenge_id,
+            decision="allow",
+            severity="info",
+            correlation_id=correlation_id,
+            payload_json={
+                "challenge_id": challenge.challenge_id,
+                "source_agent_id": challenge.source_agent_id,
+                "target_agent_id": challenge.target_agent_id,
+                "audience": challenge.audience,
+                "environment_id": challenge.environment_id,
+                "contract_version": challenge.contract_version,
+                "signature_algorithm": challenge.signature_algorithm,
+                "expires_at": challenge.expires_at,
+            },
+        )
+
     def _mesh_message_audit_event(
         *,
         organization_id: str,
@@ -2990,6 +3064,232 @@ def create_app(
             correlation_id=correlation_id,
             payload_json=message.model_dump(),
         )
+
+    def _mesh_handoff_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        handoff: MeshHandoffResponse,
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        status = handoff.status.lower()
+        event_type = "mesh.handoff.escalated" if status in {"requires_approval", "escalated"} else "mesh.handoff.blocked"
+        decision = "allow" if status in {"accepted", "allowed"} else "deny"
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type=event_type,
+            source_component="mesh-message-feed",
+            actor_type="user",
+            actor_id=actor_id,
+            agent_id=handoff.source_agent_id,
+            resource_type="mesh_handoff",
+            resource_id=handoff.id,
+            decision=decision,
+            severity="warning" if decision == "deny" else "info",
+            correlation_id=correlation_id,
+            payload_json=handoff.model_dump(),
+        )
+
+    def _mesh_blocked_attempt_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        event_type: str,
+        source_agent_id: str,
+        target_agent_id: str,
+        resource_type: str,
+        reason: str,
+        correlation_id: str | None,
+        payload_json: dict[str, Any],
+    ) -> AuditEventEnvelope:
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type=event_type,
+            source_component="mesh-message-feed",
+            actor_type="user",
+            actor_id=actor_id,
+            agent_id=source_agent_id,
+            resource_type=resource_type,
+            resource_id=target_agent_id,
+            decision="deny",
+            severity="warning",
+            correlation_id=correlation_id,
+            payload_json={
+                **payload_json,
+                "source_agent_id": source_agent_id,
+                "target_agent_id": target_agent_id,
+                "reason": reason,
+            },
+        )
+
+    def _mesh_trust_snapshot(
+        *,
+        connection: Any,
+        organization_id: str,
+        environment_id: str,
+        agent_id: str,
+    ) -> dict[str, Any]:
+        trust_score = TrustRepository(connection, organization_id, environment_id).get_score(agent_id)
+        if trust_score is not None:
+            return {
+                "agent_id": agent_id,
+                "score": int(trust_score["score"]),
+                "tier": trust_score["tier"],
+                "calculated_at": trust_score["calculated_at"],
+                "source": "trust_scores",
+            }
+        row = connection.execute(
+            """
+            SELECT trust_score, trust_tier
+            FROM agents
+            WHERE id = ?
+              AND organization_id = ?
+              AND environment_id = ?
+              AND deleted_at IS NULL
+            """,
+            (agent_id, organization_id, environment_id),
+        ).fetchone()
+        score = int(row["trust_score"]) if row is not None and row["trust_score"] is not None else 500
+        return {
+            "agent_id": agent_id,
+            "score": score,
+            "tier": row["trust_tier"] if row is not None and row["trust_tier"] else "standard",
+            "calculated_at": None,
+            "source": "agent_snapshot",
+        }
+
+    def _mesh_trust_decision(
+        *,
+        connection: Any,
+        organization_id: str,
+        environment_id: str,
+        source_agent_id: str,
+        target_agent_id: str,
+        threshold_type: str,
+    ) -> dict[str, Any]:
+        repository = TrustRepository(connection, organization_id, environment_id)
+        repository.seed_default_thresholds()
+        resolution = TrustThresholdResolver(repository).resolve(
+            TrustThresholdResolveRequest(
+                threshold_type=threshold_type,
+                target_type="environment",
+                target_id=None,
+            )
+        )
+        source_snapshot = _mesh_trust_snapshot(
+            connection=connection,
+            organization_id=organization_id,
+            environment_id=environment_id,
+            agent_id=source_agent_id,
+        )
+        target_snapshot = _mesh_trust_snapshot(
+            connection=connection,
+            organization_id=organization_id,
+            environment_id=environment_id,
+            agent_id=target_agent_id,
+        )
+        required_rank = TRUST_TIER_RANK[resolution.required_tier]
+        source_rank = TRUST_TIER_RANK[source_snapshot["tier"]]
+        target_rank = TRUST_TIER_RANK[target_snapshot["tier"]]
+        allowed = (
+            not resolution.fail_closed
+            and source_snapshot["score"] >= resolution.min_score
+            and target_snapshot["score"] >= resolution.min_score
+            and source_rank >= required_rank
+            and target_rank >= required_rank
+        )
+        reason = "trust_threshold_satisfied" if allowed else (
+            resolution.reason if resolution.fail_closed else "low_trust"
+        )
+        return {
+            "decision": "allow" if allowed else "deny",
+            "reason": reason,
+            "threshold_resolution": resolution.model_dump(),
+            "source_trust_snapshot": source_snapshot,
+            "target_trust_snapshot": target_snapshot,
+        }
+
+    def _mesh_policy_decision(
+        *,
+        connection: Any,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        source_agent_id: str,
+        target_agent_id: str,
+        action: str,
+        resource_type: str,
+        resource_id: str,
+        context: dict[str, Any],
+        correlation_id: str | None,
+    ) -> PolicyEvaluationResponse:
+        evaluation = PolicyEvaluationAdapter(
+            connection,
+            organization_id,
+            environment_id,
+        ).evaluate(
+            PolicyEvaluationRequest(
+                target_type="environment",
+                target_id=environment_id,
+                agent_id=source_agent_id,
+                action=action,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                context={
+                    **context,
+                    "source_agent_id": source_agent_id,
+                    "target_agent_id": target_agent_id,
+                },
+                mode="live",
+            ),
+            correlation_id=correlation_id,
+        )
+        row = PolicyEvaluationRepository(connection).create(evaluation)
+        persisted = policy_evaluation_response(row)
+        AuditEventRepository(connection).insert(
+            _policy_evaluation_audit_event(
+                evaluation=persisted,
+                actor_id=actor_id,
+            )
+        )
+        return persisted
+
+    def _policy_decision_name(evaluation: PolicyEvaluationResponse) -> str:
+        action = evaluation.policy_action.strip().lower()
+        if evaluation.error or evaluation.decision == "deny" or action == "deny":
+            return "deny"
+        if action in {"approve", "approval", "require_approval", "requires_approval", "escalate", "escalated"}:
+            return "requires_approval"
+        return "allow"
+
+    def _server_mesh_decision_evidence(
+        *,
+        policy: PolicyEvaluationResponse,
+        trust: dict[str, Any],
+        client_supplied: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "policy_evaluation_id": policy.id,
+            "policy_id": policy.policy_id,
+            "policy_version_id": policy.policy_version_id,
+            "binding_id": policy.binding_id,
+            "binding_mode": policy.binding_mode,
+            "policy_decision": policy.decision,
+            "policy_action": policy.policy_action,
+            "matched_rule": policy.matched_rule,
+            "reason": policy.reason,
+            "backend": policy.backend,
+            "trust_decision": trust["decision"],
+            "trust_reason": trust["reason"],
+            "threshold_resolution": trust["threshold_resolution"],
+            "source_trust_snapshot": trust["source_trust_snapshot"],
+            "target_trust_snapshot": trust["target_trust_snapshot"],
+            "client_supplied": client_supplied,
+        }
 
     def _protocol_bridge_route_audit_event(
         *,
@@ -5965,6 +6265,63 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post(
+        "/api/v1/trust/handshakes/challenges",
+        response_model=TrustHandshakeChallengeResponse,
+        status_code=201,
+        tags=["trust"],
+    )
+    async def issue_trust_handshake_challenge(
+        body: TrustHandshakeChallengeRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> TrustHandshakeChallengeResponse:
+        """Issue a canonical server challenge for a signed trust handshake."""
+
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        try:
+            with _audit_database().transaction() as connection:
+                repository = TrustRepository(connection, organization_id, environment_id)
+                challenge = TrustHandshakeService(repository).issue_challenge(body)
+                AuditEventRepository(connection).insert(
+                    _trust_handshake_challenge_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        challenge=challenge,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+                return challenge
+        except TrustAgentNotOperationalError as exc:
+            with _audit_database().transaction() as connection:
+                AuditEventRepository(connection).insert(
+                    _trust_handshake_blocked_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        body=TrustHandshakeRequest(
+                            source_agent_id=body.source_agent_id,
+                            target_agent_id=body.target_agent_id,
+                            purpose=body.purpose,
+                            threshold_type=body.threshold_type,
+                            target_type=body.target_type,
+                            target_id=body.target_id,
+                            metadata=body.metadata,
+                        ),
+                        reason=str(exc),
+                        reason_code=exc.reason_code,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except TrustAgentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
         "/api/v1/trust/handshakes/simulate",
         response_model=TrustHandshakeResponse,
         status_code=201,
@@ -5998,6 +6355,20 @@ def create_app(
                     )
                 )
                 return handshake
+        except TrustAgentNotOperationalError as exc:
+            with _audit_database().transaction() as connection:
+                AuditEventRepository(connection).insert(
+                    _trust_handshake_blocked_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        body=body,
+                        reason=str(exc),
+                        reason_code=exc.reason_code,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except TrustAgentNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -6035,6 +6406,20 @@ def create_app(
                     )
                 )
                 return handshake
+        except TrustAgentNotOperationalError as exc:
+            with _audit_database().transaction() as connection:
+                AuditEventRepository(connection).insert(
+                    _trust_handshake_blocked_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        body=body,
+                        reason=str(exc),
+                        reason_code=exc.reason_code,
+                        correlation_id=context.correlation_id,
+                    )
+                )
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except TrustAgentNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -6085,8 +6470,60 @@ def create_app(
         context = _request_context_from_request(request)
         try:
             with _audit_database().transaction() as connection:
+                policy = _mesh_policy_decision(
+                    connection=connection,
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    actor_id=current_user.id,
+                    source_agent_id=body.source_agent_id,
+                    target_agent_id=body.target_agent_id,
+                    action=body.action,
+                    resource_type="mesh_message",
+                    resource_id=body.target_agent_id,
+                    context={
+                        "protocol": body.protocol,
+                        "latency_ms": body.latency_ms,
+                        "payload_summary": body.payload_summary,
+                    },
+                    correlation_id=context.correlation_id,
+                )
+                threshold_type = "mcp_tool_use" if body.protocol.lower() == "mcp" else "handoff"
+                trust = _mesh_trust_decision(
+                    connection=connection,
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    source_agent_id=body.source_agent_id,
+                    target_agent_id=body.target_agent_id,
+                    threshold_type=threshold_type,
+                )
+                policy_decision = _policy_decision_name(policy)
+                client_decision = body.decision.lower()
+                client_restrictive = client_decision in {"deny", "denied", "blocked"}
+                server_decision = (
+                    "deny"
+                    if policy_decision == "deny"
+                    or trust["decision"] == "deny"
+                    or client_restrictive
+                    else policy_decision
+                )
+                server_body = body.model_copy(
+                    update={
+                        "decision": server_decision,
+                        "payload_summary": {
+                            **body.payload_summary,
+                            "server_decision": _server_mesh_decision_evidence(
+                                policy=policy,
+                                trust=trust,
+                                client_supplied={
+                                    "decision": body.decision,
+                                    "restrictive_signal": client_restrictive,
+                                },
+                            ),
+                        },
+                    }
+                )
                 message = mesh_message_response(
-                    MeshRepository(connection, organization_id, environment_id).create_message(body)
+                    MeshRepository(connection, organization_id, environment_id).create_message(server_body)
                 )
                 if message.decision.lower() in {"deny", "denied", "blocked", "escalate", "escalated"}:
                     AuditEventRepository(connection).insert(
@@ -6100,6 +6537,25 @@ def create_app(
                     )
                 return message
         except MeshAgentNotOperationalError as exc:
+            with _audit_database().transaction() as connection:
+                AuditEventRepository(connection).insert(
+                    _mesh_blocked_attempt_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="mesh.message.blocked",
+                        source_agent_id=body.source_agent_id,
+                        target_agent_id=body.target_agent_id,
+                        resource_type="mesh_message",
+                        reason=str(exc),
+                        correlation_id=context.correlation_id,
+                        payload_json={
+                            "protocol": body.protocol,
+                            "action": body.action,
+                            "client_supplied_decision": body.decision,
+                        },
+                    )
+                )
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except MeshAgentNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -6112,18 +6568,121 @@ def create_app(
     )
     async def ingest_mesh_handoff(
         body: MeshHandoffCreateRequest,
+        request: Request,
         current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
         environment_id: str = Depends(require_environment_context),
     ) -> MeshHandoffResponse:
         """Ingest a mesh handoff attempt from an SDK or adapter."""
 
         organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
         try:
             with _audit_database().transaction() as connection:
-                return mesh_handoff_response(
-                    MeshRepository(connection, organization_id, environment_id).create_handoff(body)
+                policy = _mesh_policy_decision(
+                    connection=connection,
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    actor_id=current_user.id,
+                    source_agent_id=body.source_agent_id,
+                    target_agent_id=body.target_agent_id,
+                    action=body.task_type,
+                    resource_type="mesh_handoff",
+                    resource_id=body.target_agent_id,
+                    context={
+                        "task_type": body.task_type,
+                        "required_capabilities": body.required_capabilities,
+                        "metadata": body.metadata,
+                    },
+                    correlation_id=context.correlation_id,
                 )
+                trust = _mesh_trust_decision(
+                    connection=connection,
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    source_agent_id=body.source_agent_id,
+                    target_agent_id=body.target_agent_id,
+                    threshold_type="handoff",
+                )
+                policy_decision = _policy_decision_name(policy)
+                client_policy_result = body.policy_result.lower()
+                client_status = body.status.lower()
+                client_restrictive = client_policy_result in {"deny", "denied", "blocked"} or client_status in {
+                    "blocked",
+                    "denied",
+                }
+                policy_result = (
+                    "deny"
+                    if policy_decision == "deny" or client_restrictive
+                    else policy_decision
+                )
+                trust_result = "allowed" if trust["decision"] == "allow" else "denied"
+                status = "accepted"
+                reason = "trust_and_policy_satisfied"
+                if policy_result == "deny":
+                    status = "blocked"
+                    reason = policy.reason if policy_decision == "deny" else (body.reason or "client_restrictive_signal")
+                elif trust_result == "denied":
+                    status = "blocked"
+                    reason = trust["reason"]
+                elif policy_result == "requires_approval":
+                    status = "requires_approval"
+                    reason = policy.reason
+                server_body = body.model_copy(
+                    update={
+                        "trust_result": trust_result,
+                        "policy_result": policy_result,
+                        "status": status,
+                        "reason": reason,
+                        "metadata": {
+                            **body.metadata,
+                            "server_decision": _server_mesh_decision_evidence(
+                                policy=policy,
+                                trust=trust,
+                                client_supplied={
+                                    "trust_result": body.trust_result,
+                                    "policy_result": body.policy_result,
+                                    "status": body.status,
+                                    "reason": body.reason,
+                                    "restrictive_signal": client_restrictive,
+                                },
+                            ),
+                        },
+                    }
+                )
+                handoff = mesh_handoff_response(
+                    MeshRepository(connection, organization_id, environment_id).create_handoff(server_body)
+                )
+                if handoff.status.lower() in {"blocked", "denied", "requires_approval", "escalated"}:
+                    AuditEventRepository(connection).insert(
+                        _mesh_handoff_audit_event(
+                            organization_id=organization_id,
+                            environment_id=environment_id,
+                            actor_id=current_user.id,
+                            handoff=handoff,
+                            correlation_id=context.correlation_id,
+                        )
+                    )
+                return handoff
         except MeshAgentNotOperationalError as exc:
+            with _audit_database().transaction() as connection:
+                AuditEventRepository(connection).insert(
+                    _mesh_blocked_attempt_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="mesh.handoff.blocked",
+                        source_agent_id=body.source_agent_id,
+                        target_agent_id=body.target_agent_id,
+                        resource_type="mesh_handoff",
+                        reason=str(exc),
+                        correlation_id=context.correlation_id,
+                        payload_json={
+                            "task_type": body.task_type,
+                            "client_supplied_policy_result": body.policy_result,
+                            "client_supplied_trust_result": body.trust_result,
+                        },
+                    )
+                )
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except MeshAgentNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -7997,6 +8556,8 @@ def create_app(
                     )
                 )
                 return trust_card_response(card)
+        except TrustCardAgentNotOperationalError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except AgentNotFoundError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -10767,6 +11328,17 @@ def create_app(
                     actor_id=current_user.id,
                     reason=reason,
                 )
+                invalidated_cards = []
+                if not is_agent_operational(next_status):
+                    invalidated_cards = TrustCardRepository(
+                        connection,
+                        organization_id,
+                        environment_id,
+                    ).invalidate_agent_cards(
+                        agent_id,
+                        reason=reason,
+                        revoked_by=current_user.id,
+                    )
                 audit = AuditEventRepository(connection)
                 audit.insert(
                     agent_lifecycle_event(
@@ -10792,6 +11364,23 @@ def create_app(
                     correlation_id=context.correlation_id,
                     cascade=cascade,
                 )
+                for card in invalidated_cards:
+                    audit.insert(
+                        _trust_card_audit_event(
+                            organization_id=organization_id,
+                            environment_id=environment_id,
+                            event_type="trust.card.revoked",
+                            actor_id=current_user.id,
+                            card=card,
+                            correlation_id=context.correlation_id,
+                            payload_json={
+                                "reason": reason,
+                                "trigger": "agent_lifecycle",
+                                "lifecycle_state": next_status,
+                            },
+                            decision="deny",
+                        )
+                    )
                 return agent_inventory_summary(repository.get_inventory_summary(agent_id) or row)
         except (AgentLifecycleTransitionError, AgentNotFoundError) as exc:
             raise HTTPException(

@@ -7,7 +7,9 @@
  * Uses Node.js built-in assert — no external test dependencies required.
  */
 import * as assert from "assert";
+import * as fs from "fs";
 import * as http from "http";
+import * as path from "path";
 import express from "express";
 import {
   rateLimit,
@@ -20,7 +22,7 @@ import { requireRegistrationKey } from "../src/middleware/registrationKey";
 import healthRouter from "../src/routes/health";
 import registerRouter from "../src/routes/register";
 import verifyRouter from "../src/routes/verify";
-import handshakeRouter from "../src/routes/handshake";
+import handshakeRouter, { resetHandshakeChallenges } from "../src/routes/handshake";
 import scoreRouter from "../src/routes/score";
 import { resetRegistry } from "../src/services/registry";
 import { resetAuditLog } from "../src/services/audit";
@@ -29,8 +31,18 @@ import {
   registrationPayload,
   sign,
 } from "../src/services/identity";
+import { trustScoreContract } from "../src/services/trust";
 
 const REGISTRATION_KEY = "test-registration-key";
+
+function sharedTrustScoreContract() {
+  return JSON.parse(
+    fs.readFileSync(
+      path.join(__dirname, "../../../../../docs/contracts/trust-score-schema-v1.json"),
+      "utf8",
+    ),
+  );
+}
 
 // ---------- helpers ----------
 
@@ -81,6 +93,27 @@ async function registerDirect(
     agent: registerAgent(signed.request),
     privateKey: signed.privateKey,
   };
+}
+
+async function issueHandshakeChallenge(
+  server: http.Server,
+  agent: { did: string; api_key: string },
+  capabilitiesRequested: string[] = ["read"],
+) {
+  const res = await request(
+    server,
+    "POST",
+    "/api/handshake/challenges",
+    {
+      agent_did: agent.did,
+      audience: "env_default",
+      environment_id: "env_default",
+      capabilities_requested: capabilitiesRequested,
+    },
+    { "x-api-key": agent.api_key },
+  );
+  assert.strictEqual(res.status, 201);
+  return res.body;
 }
 
 function request(
@@ -243,7 +276,7 @@ test("POST /api/handshake succeeds for registered agent", async (server) => {
     "read",
     "write",
   ]);
-  const challenge = "test-challenge-nonce-123";
+  const challenge = await issueHandshakeChallenge(server, agent, ["read", "admin"]);
 
   const res = await request(
     server,
@@ -251,8 +284,15 @@ test("POST /api/handshake succeeds for registered agent", async (server) => {
     "/api/handshake",
     {
       agent_did: agent.did,
-      challenge,
-      signature: sign(challenge, privateKey),
+      challenge_id: challenge.challenge_id,
+      nonce: challenge.nonce,
+      audience: challenge.audience,
+      environment_id: challenge.environment_id,
+      expires_at: challenge.expires_at,
+      contract_version: challenge.contract_version,
+      signature_algorithm: challenge.signature_algorithm,
+      public_key: agent.public_key,
+      signature: sign(challenge.canonical_payload, privateKey),
       capabilities_requested: ["read", "admin"],
     },
     { "x-api-key": agent.api_key },
@@ -265,10 +305,12 @@ test("POST /api/handshake succeeds for registered agent", async (server) => {
   assert.ok(res.body.capabilities_granted.includes("read"));
   assert.ok(!res.body.capabilities_granted.includes("admin"));
   assert.strictEqual(res.body.signature_verified, true);
+  assert.strictEqual(res.body.challenge_id, challenge.challenge_id);
 });
 
 test("POST /api/handshake rejects invalid possession signatures", async (server) => {
   const { agent } = await registerDirect("HandshakeAgent", "hs@example.com", ["read"]);
+  const challenge = await issueHandshakeChallenge(server, agent, ["read"]);
 
   const res = await request(
     server,
@@ -276,7 +318,14 @@ test("POST /api/handshake rejects invalid possession signatures", async (server)
     "/api/handshake",
     {
       agent_did: agent.did,
-      challenge: "test-challenge-nonce-123",
+      challenge_id: challenge.challenge_id,
+      nonce: challenge.nonce,
+      audience: challenge.audience,
+      environment_id: challenge.environment_id,
+      expires_at: challenge.expires_at,
+      contract_version: challenge.contract_version,
+      signature_algorithm: challenge.signature_algorithm,
+      public_key: agent.public_key,
       signature: "invalid-signature",
       capabilities_requested: ["read"],
     },
@@ -303,7 +352,14 @@ test("POST /api/handshake rejects API keys for a different agent", async (server
     "/api/handshake",
     {
       agent_did: target.did,
-      challenge: "cross-agent-challenge",
+      challenge_id: "cross-agent-challenge",
+      nonce: "cross-agent-nonce",
+      audience: "env_default",
+      environment_id: "env_default",
+      expires_at: new Date(Date.now() + 30_000).toISOString(),
+      contract_version: "agentmesh.handshake.v1",
+      signature_algorithm: "ed25519",
+      public_key: target.public_key,
       signature: sign("cross-agent-challenge", privateKey),
       capabilities_requested: ["admin"],
     },
@@ -324,7 +380,14 @@ test("POST /api/handshake rejects unknown DIDs not bound to the API key", async 
     "/api/handshake",
     {
       agent_did: "did:mesh:nonexistent",
-      challenge: "test",
+      challenge_id: "test",
+      nonce: "test",
+      audience: "env_default",
+      environment_id: "env_default",
+      expires_at: new Date(Date.now() + 30_000).toISOString(),
+      contract_version: "agentmesh.handshake.v1",
+      signature_algorithm: "ed25519",
+      public_key: agent.public_key,
       signature: sign("test", privateKey),
       capabilities_requested: [],
     },
@@ -334,21 +397,109 @@ test("POST /api/handshake rejects unknown DIDs not bound to the API key", async 
   assert.strictEqual(res.body.verified, false);
 });
 
+test("POST /api/handshake rejects replayed challenges", async (server) => {
+  const { agent, privateKey } = await registerDirect("ReplayAgent", "replay@example.com", [
+    "read",
+  ]);
+  const challenge = await issueHandshakeChallenge(server, agent, ["read"]);
+  const body = {
+    agent_did: agent.did,
+    challenge_id: challenge.challenge_id,
+    nonce: challenge.nonce,
+    audience: challenge.audience,
+    environment_id: challenge.environment_id,
+    expires_at: challenge.expires_at,
+    contract_version: challenge.contract_version,
+    signature_algorithm: challenge.signature_algorithm,
+    public_key: agent.public_key,
+    signature: sign(challenge.canonical_payload, privateKey),
+    capabilities_requested: ["read"],
+  };
+
+  const first = await request(server, "POST", "/api/handshake", body, {
+    "x-api-key": agent.api_key,
+  });
+  assert.strictEqual(first.status, 200);
+
+  const replay = await request(server, "POST", "/api/handshake", body, {
+    "x-api-key": agent.api_key,
+  });
+  assert.strictEqual(replay.status, 409);
+  assert.strictEqual(replay.body.verified, false);
+});
+
+test("POST /api/handshake rejects wrong audience and environment", async (server) => {
+  const { agent, privateKey } = await registerDirect("AudienceAgent", "aud@example.com", [
+    "read",
+  ]);
+  const audienceChallenge = await issueHandshakeChallenge(server, agent, ["read"]);
+  const wrongAudience = await request(
+    server,
+    "POST",
+    "/api/handshake",
+    {
+      agent_did: agent.did,
+      challenge_id: audienceChallenge.challenge_id,
+      nonce: audienceChallenge.nonce,
+      audience: "other-audience",
+      environment_id: audienceChallenge.environment_id,
+      expires_at: audienceChallenge.expires_at,
+      contract_version: audienceChallenge.contract_version,
+      signature_algorithm: audienceChallenge.signature_algorithm,
+      public_key: agent.public_key,
+      signature: sign(audienceChallenge.canonical_payload, privateKey),
+      capabilities_requested: ["read"],
+    },
+    { "x-api-key": agent.api_key },
+  );
+  assert.strictEqual(wrongAudience.status, 400);
+  assert.strictEqual(wrongAudience.body.verified, false);
+
+  const environmentChallenge = await issueHandshakeChallenge(server, agent, ["read"]);
+  const wrongEnvironment = await request(
+    server,
+    "POST",
+    "/api/handshake",
+    {
+      agent_did: agent.did,
+      challenge_id: environmentChallenge.challenge_id,
+      nonce: environmentChallenge.nonce,
+      audience: environmentChallenge.audience,
+      environment_id: "env_other",
+      expires_at: environmentChallenge.expires_at,
+      contract_version: environmentChallenge.contract_version,
+      signature_algorithm: environmentChallenge.signature_algorithm,
+      public_key: agent.public_key,
+      signature: sign(environmentChallenge.canonical_payload, privateKey),
+      capabilities_requested: ["read"],
+    },
+    { "x-api-key": agent.api_key },
+  );
+  assert.strictEqual(wrongEnvironment.status, 400);
+  assert.strictEqual(wrongEnvironment.body.verified, false);
+});
+
 test("GET /api/score/:agentDid returns trust breakdown", async (server) => {
   const { agent } = await registerDirect("ScoreAgent", "score@example.com", ["read"]);
+  const contract = sharedTrustScoreContract();
 
   const res = await request(server, "GET", `/api/score/${agent.did}`, undefined, {
     "x-api-key": agent.api_key,
   });
   assert.strictEqual(res.status, 200);
-  assert.ok(typeof res.body.total === "number");
-  assert.ok(res.body.dimensions);
-  assert.ok(typeof res.body.dimensions.policy_compliance === "number");
-  assert.ok(typeof res.body.dimensions.interaction_success === "number");
-  assert.ok(typeof res.body.dimensions.verification_depth === "number");
-  assert.ok(typeof res.body.dimensions.community_vouching === "number");
-  assert.ok(typeof res.body.dimensions.uptime_reliability === "number");
-  assert.ok(res.body.tier);
+  assert.deepStrictEqual(trustScoreContract(), contract);
+  assert.strictEqual(res.body.schema_version, contract.schema_version);
+  assert.strictEqual(res.body.score, contract.score_range.baseline);
+  assert.strictEqual(res.body.tier, "standard");
+  assert.deepStrictEqual(
+    Object.keys(res.body.dimensions).sort(),
+    contract.dimensions.map((dimension: { name: string }) => dimension.name).sort(),
+  );
+  assert.strictEqual(res.body.dimensions.policy_compliance.score, 500);
+  assert.strictEqual(res.body.dimensions.policy_compliance.signal_count, 0);
+  assert.strictEqual(res.body.explanation.schema_version, contract.schema_version);
+  assert.strictEqual(res.body.explanation.input_event_count, 0);
+  assert.deepStrictEqual(res.body.explanation.source_event_versions, ["audit_events.v1"]);
   assert.ok(Array.isArray(res.body.history));
   assert.ok(res.body.history.length > 0);
 });
@@ -409,6 +560,7 @@ async function run() {
     resetRegistry();
     resetAuditLog();
     resetRateLimitStore();
+    resetHandshakeChallenges();
     process.env.AGENTMESH_REGISTRATION_KEY = REGISTRATION_KEY;
 
     const app = createApp();

@@ -6,19 +6,20 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-TRUST_DIMENSIONS = {
-    "policy_compliance",
-    "resource_efficiency",
-    "output_quality",
-    "security_posture",
-    "collaboration_health",
-}
-TRUST_TIERS = {"verified_partner", "trusted", "standard", "probationary", "untrusted"}
+from product_platform.trust.schema import (
+    TRUST_SCORE_DIMENSIONS,
+    TRUST_SCORE_SCHEMA_VERSION,
+    TRUST_SCORE_TIER_THRESHOLDS,
+)
+
+TRUST_DIMENSIONS = set(TRUST_SCORE_DIMENSIONS)
+TRUST_TIERS = {name for name, _min_score in TRUST_SCORE_TIER_THRESHOLDS}
 
 
 class TrustScoreResponse(BaseModel):
     """Current trust score for one agent."""
 
+    schema_version: str = TRUST_SCORE_SCHEMA_VERSION
     id: str
     organization_id: str
     environment_id: str
@@ -30,6 +31,7 @@ class TrustScoreResponse(BaseModel):
     created_at: str
     updated_at: str
     agent_name: str | None = None
+    explanation: dict[str, Any] = Field(default_factory=dict)
 
 
 class TrustEventResponse(BaseModel):
@@ -209,6 +211,102 @@ class TrustThresholdResolution(BaseModel):
     reason: str
 
 
+class TrustHandshakeChallengeRequest(BaseModel):
+    """Request a server-issued handshake challenge."""
+
+    source_agent_id: str = Field(min_length=1)
+    target_agent_id: str = Field(min_length=1)
+    purpose: str = Field(default="handoff", min_length=1)
+    threshold_type: str = Field(default="handoff", min_length=1)
+    target_type: str = Field(default="environment", min_length=1)
+    target_id: str | None = None
+    audience: str | None = None
+    expires_in_seconds: int = Field(default=30, ge=5, le=300)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator(
+        "source_agent_id",
+        "target_agent_id",
+        "purpose",
+        "threshold_type",
+        "target_type",
+        "audience",
+    )
+    @classmethod
+    def _strip_required_or_optional(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("field must not be blank.")
+        return stripped
+
+    @field_validator("target_id")
+    @classmethod
+    def _strip_optional(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+
+class TrustHandshakeChallengeResponse(BaseModel):
+    """Server-issued canonical handshake challenge."""
+
+    challenge_id: str
+    organization_id: str
+    environment_id: str
+    source_agent_id: str
+    source_did: str
+    target_agent_id: str
+    target_did: str
+    purpose: str
+    threshold_type: str
+    target_type: str
+    target_id: str | None = None
+    audience: str
+    nonce: str
+    contract_version: str
+    signature_algorithm: str = "ed25519"
+    canonical_payload: str
+    issued_at: str
+    expires_at: str
+    consumed_at: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class TrustHandshakeProof(BaseModel):
+    """Signed response to a server-issued handshake challenge."""
+
+    challenge_id: str = Field(min_length=1)
+    nonce: str = Field(min_length=1)
+    audience: str = Field(min_length=1)
+    environment_id: str = Field(min_length=1)
+    expires_at: str = Field(min_length=1)
+    signature: str = Field(min_length=1)
+    public_key: str = Field(min_length=1)
+    contract_version: str = "agentmesh.handshake.v1"
+    signature_algorithm: str = "ed25519"
+
+    @field_validator(
+        "challenge_id",
+        "nonce",
+        "audience",
+        "environment_id",
+        "expires_at",
+        "signature",
+        "public_key",
+        "contract_version",
+        "signature_algorithm",
+    )
+    @classmethod
+    def _strip_required(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("field must not be blank.")
+        return stripped
+
+
 class TrustHandshakeRequest(BaseModel):
     """Request to simulate or record a trust handshake."""
 
@@ -221,6 +319,7 @@ class TrustHandshakeRequest(BaseModel):
     required_capabilities: list[str] = Field(default_factory=list)
     require_trust_card: bool = False
     require_active_credential: bool = False
+    proof: TrustHandshakeProof | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator(

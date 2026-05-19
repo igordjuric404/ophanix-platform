@@ -13,25 +13,50 @@ export interface AgentRecord {
   last_seen: string;
 }
 
-export interface TrustScore {
-  total: number;
-  dimensions: TrustDimensions;
-  tier: "Untrusted" | "Basic" | "Verified" | "Trusted" | "Highly Trusted";
-  history: TrustEvent[];
+export type TrustTier =
+  | "verified_partner"
+  | "trusted"
+  | "standard"
+  | "probationary"
+  | "untrusted";
+
+export type TrustDimensionName =
+  | "policy_compliance"
+  | "resource_efficiency"
+  | "output_quality"
+  | "security_posture"
+  | "collaboration_health";
+
+export interface TrustDimensionScore {
+  score: number;
+  signal_count: number;
 }
 
-export interface TrustDimensions {
-  policy_compliance: number;
-  interaction_success: number;
-  verification_depth: number;
-  community_vouching: number;
-  uptime_reliability: number;
+export interface TrustScoreExplanation {
+  schema_version: string;
+  source_event_versions: string[];
+  input_event_count: number;
+  dimensions: Record<TrustDimensionName, TrustDimensionScore>;
+}
+
+export interface TrustScore {
+  schema_version: string;
+  score: number;
+  dimensions: Record<TrustDimensionName, TrustDimensionScore>;
+  tier: TrustTier;
+  explanation: TrustScoreExplanation;
+  history: TrustEvent[];
 }
 
 export interface TrustEvent {
   timestamp: string;
   event: string;
-  score_delta: number;
+  dimension: TrustDimensionName;
+  delta: number;
+  score_before: number;
+  score_after: number;
+  reason: string;
+  source_event_version: "audit_events.v1";
 }
 
 export interface AuditEntry {
@@ -69,9 +94,40 @@ export interface VerifyResponse {
 
 export interface HandshakeRequest {
   agent_did: string;
-  challenge: string;
+  challenge_id: string;
+  nonce: string;
+  audience: string;
+  environment_id: string;
+  expires_at: string;
+  contract_version: string;
+  signature_algorithm: "ed25519";
   signature: string;
+  public_key: string;
   capabilities_requested: string[];
+}
+
+export interface HandshakeChallengeRequest {
+  agent_did: string;
+  target_agent_did?: string;
+  audience: string;
+  environment_id: string;
+  purpose?: string;
+  capabilities_requested: string[];
+  expires_in_seconds?: number;
+}
+
+export interface HandshakeChallengeResponse {
+  challenge_id: string;
+  nonce: string;
+  audience: string;
+  environment_id: string;
+  agent_did: string;
+  target_agent_did?: string;
+  purpose: string;
+  contract_version: string;
+  signature_algorithm: "ed25519";
+  expires_at: string;
+  canonical_payload: string;
 }
 
 export interface HandshakeResponse {
@@ -79,11 +135,10 @@ export interface HandshakeResponse {
   trust_score: number;
   capabilities_granted: string[];
   signature_verified: boolean;
+  challenge_id: string;
+  contract_version: string;
+  audience: string;
+  expires_at: string;
 }
 
-export interface ScoreResponse {
-  total: number;
-  dimensions: TrustDimensions;
-  tier: string;
-  history: TrustEvent[];
-}
+export type ScoreResponse = TrustScore;

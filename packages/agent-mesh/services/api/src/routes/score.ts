@@ -24,9 +24,11 @@ router.get("/score/:agentDid", (req: Request, res: Response) => {
   }
 
   const response: ScoreResponse = {
-    total: agent.trust_score.total,
+    schema_version: agent.trust_score.schema_version,
+    score: agent.trust_score.score,
     dimensions: agent.trust_score.dimensions,
     tier: agent.trust_score.tier,
+    explanation: agent.trust_score.explanation,
     history: agent.trust_score.history,
   };
 

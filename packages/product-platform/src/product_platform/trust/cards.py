@@ -15,6 +15,11 @@ from cryptography.hazmat.primitives import serialization
 from agentmesh.identity.agent_id import AgentDID, AgentIdentity
 from agentmesh.trust.cards import CardRegistry, TrustedAgentCard
 
+from product_platform.agents.lifecycle import (
+    agent_non_operational_message,
+    agent_non_operational_reason_code,
+    is_agent_operational,
+)
 from product_platform.agents.repository import AgentRegistryRepository, AgentNotFoundError
 from product_platform.db.ids import generate_id
 from product_platform.db.time import utc_now_iso
@@ -28,6 +33,16 @@ from product_platform.trust.repository import TrustRepository
 
 class TrustCardNotFoundError(ValueError):
     """Raised when a trust card is not visible in tenant scope."""
+
+
+class TrustCardAgentNotOperationalError(ValueError):
+    """Raised when trust-card operations target a non-operational agent."""
+
+    def __init__(self, agent_id: str, status: str) -> None:
+        self.agent_id = agent_id
+        self.status = status
+        self.reason_code = agent_non_operational_reason_code(status)
+        super().__init__(agent_non_operational_message(status))
 
 
 class TrustCardIssuer:
@@ -57,6 +72,8 @@ class TrustCardIssuer:
         agent = agent_repository.get(body.agent_id)
         if agent is None:
             raise AgentNotFoundError("Agent not found.")
+        if not is_agent_operational(agent["status"]):
+            raise TrustCardAgentNotOperationalError(body.agent_id, agent["status"])
         identity = agent_repository.get_identity(body.agent_id)
         if identity is None:
             raise AgentNotFoundError("Agent identity not found.")
@@ -230,6 +247,8 @@ class TrustCardRepository:
         ).fetchone()
 
     def current_card(self, agent_id: str, *, now: str | None = None) -> Row | None:
+        if not self._agent_is_operational(agent_id):
+            return None
         timestamp = now or utc_now_iso()
         return self.connection.execute(
             """
@@ -282,6 +301,28 @@ class TrustCardRepository:
             raise TrustCardNotFoundError("Trust card not found.")
         return updated
 
+    def invalidate_agent_cards(self, agent_id: str, *, reason: str, revoked_by: str) -> list[Row]:
+        """Revoke active trust cards for an agent after restrictive lifecycle transitions."""
+
+        rows = self.connection.execute(
+            """
+            SELECT c.*
+            FROM trust_cards c
+            JOIN agents a ON a.id = c.agent_id
+            WHERE c.organization_id = ?
+              AND c.environment_id = ?
+              AND c.agent_id = ?
+              AND c.status = 'active'
+              AND a.deleted_at IS NULL
+            ORDER BY c.issued_at ASC, c.id ASC
+            """,
+            (self.organization_id, self.environment_id, agent_id),
+        ).fetchall()
+        return [
+            self.revoke_card(row["id"], reason=reason, revoked_by=revoked_by)
+            for row in rows
+        ]
+
     def verify_card(self, card_id: str) -> TrustCardVerifyResponse:
         row = self.get_card(card_id)
         if row is None:
@@ -295,6 +336,25 @@ class TrustCardRepository:
                 reason="revoked",
                 checked_at=utc_now_iso(),
             )
+        agent = self._agent_row(row["agent_id"])
+        if agent is None:
+            return TrustCardVerifyResponse(
+                trust_card_id=row["id"],
+                agent_id=row["agent_id"],
+                status=row["status"],
+                verified=False,
+                reason="agent_not_found",
+                checked_at=utc_now_iso(),
+            )
+        if not is_agent_operational(agent["status"]):
+            return TrustCardVerifyResponse(
+                trust_card_id=row["id"],
+                agent_id=row["agent_id"],
+                status=row["status"],
+                verified=False,
+                reason=agent_non_operational_reason_code(agent["status"]),
+                checked_at=utc_now_iso(),
+            )
         card = TrustedAgentCard.from_dict(json.loads(row["card_json"]))
         registry = CardRegistry()
         verified = registry.register(card)
@@ -306,6 +366,23 @@ class TrustCardRepository:
             reason="signature_valid" if verified else "signature_invalid",
             checked_at=utc_now_iso(),
         )
+
+    def _agent_row(self, agent_id: str) -> Row | None:
+        return self.connection.execute(
+            """
+            SELECT *
+            FROM agents
+            WHERE id = ?
+              AND organization_id = ?
+              AND environment_id = ?
+              AND deleted_at IS NULL
+            """,
+            (agent_id, self.organization_id, self.environment_id),
+        ).fetchone()
+
+    def _agent_is_operational(self, agent_id: str) -> bool:
+        row = self._agent_row(agent_id)
+        return row is not None and is_agent_operational(row["status"])
 
 
 def trust_card_response(row: Row) -> TrustCardResponse:

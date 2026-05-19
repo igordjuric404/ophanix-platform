@@ -1,5 +1,89 @@
 # Feature Audit: AgentMesh and Trust
 
+## Remediation Summary
+
+Date of remediation: 2026-05-19
+
+Total findings in this report: 4
+
+Number fixed: 4
+
+Number partially fixed: 0
+
+Number blocked: 0
+
+Number already fixed: 0
+
+Files changed:
+
+- `packages/agent-mesh/src/agentmesh/trust/handshake.py`
+- `packages/agent-mesh/services/api/src/routes/handshake.ts`
+- `packages/agent-mesh/services/api/src/routes/score.ts`
+- `packages/agent-mesh/services/api/src/services/identity.ts`
+- `packages/agent-mesh/services/api/src/services/trust.ts`
+- `packages/agent-mesh/services/api/src/types.ts`
+- `packages/agent-mesh/services/api/tests/api.test.ts`
+- `packages/product-platform/frontend/src/api/trust.ts`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/trust/cards.py`
+- `packages/product-platform/src/product_platform/trust/handshakes.py`
+- `packages/product-platform/src/product_platform/trust/models.py`
+- `packages/product-platform/src/product_platform/trust/schema.py`
+- `packages/product-platform/src/product_platform/trust/repository.py`
+- `docs/contracts/trust-score-schema-v1.json`
+- `packages/product-platform/src/product_platform/db/migrations/0068_trust_handshake_challenges.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0068_trust_handshake_challenges.down.sql`
+- `packages/product-platform/tests/test_db_phase1.py`
+- `packages/product-platform/tests/test_agentmesh_trust_remediation_phase1.py`
+- `packages/product-platform/tests/test_agentmesh_trust_remediation_phase2.py`
+- `packages/product-platform/tests/test_agentmesh_trust_remediation_phase3.py`
+- `packages/product-platform/tests/test_handshakes_thresholds_phase3.py`
+- `docs/product-platform-worktree/execution-logs/11-agentmesh-trust-remediation/00-execution-index.md`
+- `docs/product-platform-worktree/execution-logs/11-agentmesh-trust-remediation/phase-01-isolation-and-mesh-policy.md`
+- `docs/product-platform-worktree/execution-logs/11-agentmesh-trust-remediation/phase-02-signed-handshake-contract.md`
+- `docs/product-platform-worktree/execution-logs/11-agentmesh-trust-remediation/phase-03-trust-schema-consistency.md`
+
+Tests added or updated:
+
+- `packages/product-platform/tests/test_agentmesh_trust_remediation_phase1.py`
+- `packages/product-platform/tests/test_agentmesh_trust_remediation_phase2.py`
+- `packages/product-platform/tests/test_agentmesh_trust_remediation_phase3.py`
+- `packages/product-platform/tests/test_handshakes_thresholds_phase3.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+- `packages/agent-mesh/services/api/tests/api.test.ts`
+
+Validation commands run:
+
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agentmesh_trust_remediation_phase1.py' -v` - passed
+- `PYTHONPATH=src:../../packages/agent-mesh/src python3 -m unittest discover -s tests -p 'test_agentmesh_trust_remediation_phase2.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agentmesh_trust_remediation_phase3.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mesh_topology*.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_trust_card_management*.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_trust_score_pipeline*.py' -v` - passed
+- `PYTHONPATH=src:../../packages/agent-mesh/src python3 -m unittest discover -s tests -p 'test_handshakes_thresholds*.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agent_identity_registry_remediation_phase2.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_policy_evaluations_phase*.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_policy_bindings_phase*.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` - passed
+- `PYTHONPATH=src:../../packages/agent-mesh/src python3 -m unittest discover -s tests -p 'test_agentmesh_trust_remediation_phase*.py' -v` - passed
+- `PYTHONPATH=src python3 -m pytest tests/test_handshake_security.py tests/test_handshake_e2e.py -q` - passed
+- `npm test` in `packages/agent-mesh/services/api` - passed
+- `npm run build` in `packages/agent-mesh/services/api` - passed
+- `npm run lint` in `packages/product-platform/frontend` - passed
+- `npm run typecheck` in `packages/product-platform/frontend` - passed
+- `npm test -- TrustPage` in `packages/product-platform/frontend` - passed
+- `npm run build` in `packages/product-platform/frontend` - passed with non-failing Vite large chunk warning
+- `python3 -m ruff check src/product_platform/api/app.py src/product_platform/trust/cards.py src/product_platform/trust/handshakes.py src/product_platform/trust/models.py src/product_platform/trust/repository.py src/product_platform/trust/schema.py src/product_platform/trust/pipeline.py tests/test_agentmesh_trust_remediation_phase1.py tests/test_agentmesh_trust_remediation_phase2.py tests/test_agentmesh_trust_remediation_phase3.py tests/test_handshakes_thresholds_phase3.py tests/test_db_phase1.py` - passed
+- `python3 -m ruff check src/product_platform/api/app.py src/product_platform/trust/models.py src/product_platform/trust/repository.py src/product_platform/trust/handshakes.py tests/test_agentmesh_trust_remediation_phase2.py tests/test_handshakes_thresholds_phase3.py tests/test_db_phase1.py` - passed
+- `python3 -m ruff check src/product_platform/trust/schema.py src/product_platform/trust/models.py src/product_platform/trust/repository.py src/product_platform/trust/pipeline.py tests/test_agentmesh_trust_remediation_phase3.py` - passed
+- `python3 -m ruff check src/agentmesh/trust/handshake.py --select I,F,E501` - passed
+- `git diff --check` - passed
+
+Remaining risks:
+
+- None for findings in this selected report after Phase 3 remediation.
+- The audit references top-level `services/api`, but that path is absent in this checkout. The equivalent present TypeScript AgentMesh API under `packages/agent-mesh/services/api` was remediated for F-AMT-001 and F-AMT-004.
+
 ## 1. Scope
 
 This audit covers AgentMesh handshakes, trust cards, trust scoring, mesh messages/handoffs, revocation/quarantine interactions, duplicated TypeScript services, and SDK support. It inspects `product_platform/trust`, `product_platform/mesh`, `packages/agentmesh`, `services/api`, and SDK package surfaces. Relevant benchmarks are Microsoft Agent 365 identity/quarantine, Temporal Nexus service contracts, Google Agent Gateway, AWS AgentCore Identity, and Agent Governance Toolkit runtime policy enforcement. Out of scope: base auth/API key behavior, covered in AUTH.
@@ -23,6 +107,53 @@ Current workflow: agents and mesh entities can be represented, trust cards can b
 ## 4. Findings
 
 ### F-AMT-001 [P1] [Authentication] Signed AgentMesh handshake is split across incompatible MVP paths
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Added a canonical `agentmesh.handshake.v1` contract shared by Product Platform and the AgentMesh Python SDK, added Product Platform server-issued handshake challenges with nonce, audience, environment, source/target identity, expiry, and consumed-state persistence, and made real Product Platform handshake records require signed Ed25519 proof. The Product Platform verifier checks challenge binding, expiry, replay, active source identity, public-key fingerprint, and signature before allowing a record. The TypeScript AgentMesh API now issues challenges and rejects caller-supplied arbitrary challenges, replays, wrong audience, and wrong environment. Simulated Product Platform handshakes remain available only through the explicit `/simulate` endpoint and are marked as simulation metadata.
+
+**Files changed:**
+- `packages/agent-mesh/src/agentmesh/trust/handshake.py`
+- `packages/agent-mesh/services/api/src/routes/handshake.ts`
+- `packages/agent-mesh/services/api/src/services/identity.ts`
+- `packages/agent-mesh/services/api/src/types.ts`
+- `packages/agent-mesh/services/api/tests/api.test.ts`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/trust/handshakes.py`
+- `packages/product-platform/src/product_platform/trust/models.py`
+- `packages/product-platform/src/product_platform/trust/repository.py`
+- `packages/product-platform/src/product_platform/db/migrations/0068_trust_handshake_challenges.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0068_trust_handshake_challenges.down.sql`
+- `packages/product-platform/tests/test_agentmesh_trust_remediation_phase2.py`
+- `packages/product-platform/tests/test_handshakes_thresholds_phase3.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+
+**Tests added or updated:**
+- `packages/product-platform/tests/test_agentmesh_trust_remediation_phase2.py::AgentMeshTrustRemediationPhase2Tests::test_recorded_handshake_replay_is_rejected_and_audited`
+- `packages/product-platform/tests/test_agentmesh_trust_remediation_phase2.py::AgentMeshTrustRemediationPhase2Tests::test_wrong_audience_and_environment_are_rejected`
+- `packages/product-platform/tests/test_agentmesh_trust_remediation_phase2.py::AgentMeshTrustRemediationPhase2Tests::test_product_challenge_uses_sdk_canonical_contract`
+- `packages/product-platform/tests/test_handshakes_thresholds_phase3.py::HandshakesThresholdsPhase3Tests::test_integration_handshake_writes_audit_event`
+- `packages/product-platform/tests/test_db_phase1.py::DatabaseMigrationPhase1Tests::test_migration_applies_to_empty_database`
+- `packages/product-platform/tests/test_db_phase1.py::DatabaseMigrationPhase1Tests::test_migration_can_be_rolled_back`
+- `packages/agent-mesh/services/api/tests/api.test.ts` tests for registered signed handshake, invalid signature, replayed challenge, and wrong audience/environment.
+
+**Validation performed:**
+- `PYTHONPATH=src:../../packages/agent-mesh/src python3 -m unittest discover -s tests -p 'test_agentmesh_trust_remediation_phase2.py' -v` - passed
+- `PYTHONPATH=src:../../packages/agent-mesh/src python3 -m unittest discover -s tests -p 'test_handshakes_thresholds*.py' -v` - passed
+- `PYTHONPATH=src:../../packages/agent-mesh/src python3 -m unittest discover -s tests -p 'test_agentmesh_trust_remediation_phase1.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` - passed
+- `PYTHONPATH=src python3 -m pytest tests/test_handshake_security.py tests/test_handshake_e2e.py -q` - passed
+- `npm test` in `packages/agent-mesh/services/api` - passed
+- `npm run build` in `packages/agent-mesh/services/api` - passed
+- `python3 -m ruff check src/product_platform/api/app.py src/product_platform/trust/models.py src/product_platform/trust/repository.py src/product_platform/trust/handshakes.py tests/test_agentmesh_trust_remediation_phase2.py tests/test_handshakes_thresholds_phase3.py tests/test_db_phase1.py` - passed
+- `python3 -m ruff check src/agentmesh/trust/handshake.py --select I,F,E501` - passed
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Inconsistent
 
@@ -76,6 +207,35 @@ AgentMesh trust can be spoofed or implemented inconsistently by clients.
 
 ### F-AMT-002 [P0] [Authorization] Quarantine and revocation do not consistently block mesh and trust operations
 
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Lifecycle restriction now invalidates active trust cards, blocks trust handshakes for non-operational agents, preserves lifecycle-aware credential rejection, and audits blocked handshake and lifecycle-driven trust-card revocation attempts. Mesh communication already blocked non-operational source/target agents and now also records blocked-attempt audit evidence when lifecycle enforcement rejects a message or handoff.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/trust/cards.py`
+- `packages/product-platform/src/product_platform/trust/handshakes.py`
+- `packages/product-platform/src/product_platform/trust/repository.py`
+- `packages/product-platform/tests/test_agentmesh_trust_remediation_phase1.py`
+
+**Tests added or updated:**
+- `packages/product-platform/tests/test_agentmesh_trust_remediation_phase1.py::AgentMeshTrustRemediationPhase1Tests::test_lifecycle_revocation_invalidates_trust_card_and_audits_revocation`
+- `packages/product-platform/tests/test_agentmesh_trust_remediation_phase1.py::AgentMeshTrustRemediationPhase1Tests::test_quarantined_agent_cannot_record_handshake_and_attempt_is_audited`
+
+**Validation performed:**
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agentmesh_trust_remediation_phase1.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_trust_card_management*.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_handshakes_thresholds*.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agent_identity_registry_remediation_phase2.py' -v` - passed
+- `python3 -m ruff check src/product_platform/api/app.py src/product_platform/trust/cards.py src/product_platform/trust/handshakes.py src/product_platform/trust/repository.py tests/test_agentmesh_trust_remediation_phase1.py` - passed
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
+
 **Status:** Incorrect
 
 **Current implementation:**
@@ -128,6 +288,32 @@ Incident response cannot reliably isolate compromised agents.
 
 ### F-AMT-003 [P0] [Tool Governance] AgentMesh policy-aware communication is caller-supplied rather than enforced
 
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Mesh message and handoff ingestion now performs server-side live policy evaluation and trust-threshold evaluation before persistence. Client-supplied allow fields are retained only as context and cannot bypass server-side deny decisions. Existing client-supplied deny/block signals are preserved as conservative restrictions. Persisted mesh records now include immutable server decision evidence containing policy evaluation IDs, policy version IDs, binding metadata, threshold resolution, trust score snapshots, and client-supplied context, and blocked/escalated results are audited.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/tests/test_agentmesh_trust_remediation_phase1.py`
+
+**Tests added or updated:**
+- `packages/product-platform/tests/test_agentmesh_trust_remediation_phase1.py::AgentMeshTrustRemediationPhase1Tests::test_client_supplied_mesh_message_allow_is_overridden_by_server_policy`
+- `packages/product-platform/tests/test_agentmesh_trust_remediation_phase1.py::AgentMeshTrustRemediationPhase1Tests::test_client_supplied_handoff_allow_is_overridden_by_server_policy`
+
+**Validation performed:**
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agentmesh_trust_remediation_phase1.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mesh_topology*.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_policy_evaluations_phase*.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_policy_bindings_phase*.py' -v` - passed
+- `python3 -m ruff check src/product_platform/api/app.py src/product_platform/trust/cards.py src/product_platform/trust/handshakes.py src/product_platform/trust/repository.py tests/test_agentmesh_trust_remediation_phase1.py` - passed
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
+
 **Status:** Incorrect
 
 **Current implementation:**
@@ -179,6 +365,44 @@ Agent-to-agent communication can bypass governance entirely.
 **Affects stated Ophanix product promise:** Yes
 
 ### F-AMT-004 [P1] [Maintainability] Trust scoring ontology drifts across Product Platform and TypeScript services
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Defined a shared `trust.score.v1` contract in `docs/contracts/trust-score-schema-v1.json` and wired Product Platform plus the present TypeScript AgentMesh API to the same schema version, dimension names, 0-1000 score range, tier thresholds, default protected-action thresholds, and explanation shape. Product trust score serialization now includes `schema_version`, canonical dimensions, and deterministic explanation metadata with input event count and source event version. TypeScript `/api/score/:agentDid` now returns the same canonical score schema instead of the prior `total` plus divergent dimension model. Frontend trust API types were updated to consume the canonical schema.
+
+**Files changed:**
+- `docs/contracts/trust-score-schema-v1.json`
+- `packages/agent-mesh/services/api/src/routes/score.ts`
+- `packages/agent-mesh/services/api/src/services/trust.ts`
+- `packages/agent-mesh/services/api/src/types.ts`
+- `packages/agent-mesh/services/api/tests/api.test.ts`
+- `packages/product-platform/frontend/src/api/trust.ts`
+- `packages/product-platform/src/product_platform/trust/models.py`
+- `packages/product-platform/src/product_platform/trust/repository.py`
+- `packages/product-platform/src/product_platform/trust/schema.py`
+- `packages/product-platform/tests/test_agentmesh_trust_remediation_phase3.py`
+
+**Tests added or updated:**
+- `packages/product-platform/tests/test_agentmesh_trust_remediation_phase3.py::AgentMeshTrustRemediationPhase3Tests::test_product_contract_matches_shared_schema_snapshot`
+- `packages/product-platform/tests/test_agentmesh_trust_remediation_phase3.py::AgentMeshTrustRemediationPhase3Tests::test_default_thresholds_match_canonical_contract`
+- `packages/product-platform/tests/test_agentmesh_trust_remediation_phase3.py::AgentMeshTrustRemediationPhase3Tests::test_recalculated_score_has_canonical_schema_and_explanation`
+- `packages/agent-mesh/services/api/tests/api.test.ts` score-route assertions for shared schema version, canonical dimensions, baseline score, tier, and explanation metadata.
+
+**Validation performed:**
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agentmesh_trust_remediation_phase3.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_trust_score_pipeline*.py' -v` - passed
+- `npm test` in `packages/agent-mesh/services/api` - passed
+- `npm run build` in `packages/agent-mesh/services/api` - passed
+- `npm run typecheck` in `packages/product-platform/frontend` - passed
+- `npm test -- TrustPage` in `packages/product-platform/frontend` - passed
+- `python3 -m ruff check src/product_platform/trust/schema.py src/product_platform/trust/models.py src/product_platform/trust/repository.py src/product_platform/trust/pipeline.py tests/test_agentmesh_trust_remediation_phase3.py` - passed
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Inconsistent
 
@@ -279,4 +503,3 @@ None.
 ## 7. Feature-Level Target State
 
 AgentMesh should be a policy-enforced trust fabric. Handshakes should be signed, replay-safe, audience-bound, and backed by trusted agent identities. Mesh messages and handoffs should be evaluated server-side using identity, lifecycle, trust score, policy, environment, and rate limits. Trust scores should use one versioned schema with explainability. Revocation/quarantine should immediately block mesh operations and invalidate trust cards. SDKs should expose the same trust contracts rather than separate MVP surfaces. Tests should cover replay, revocation, server-side policy decisions, schema consistency, and audit evidence.
-

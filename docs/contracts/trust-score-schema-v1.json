@@ -1,0 +1,87 @@
+{
+  "schema_version": "trust.score.v1",
+  "score_range": {
+    "min": 0,
+    "max": 1000,
+    "baseline": 500
+  },
+  "dimensions": [
+    {
+      "name": "policy_compliance",
+      "label": "Policy Compliance",
+      "default_score": 500
+    },
+    {
+      "name": "resource_efficiency",
+      "label": "Resource Efficiency",
+      "default_score": 500
+    },
+    {
+      "name": "output_quality",
+      "label": "Output Quality",
+      "default_score": 500
+    },
+    {
+      "name": "security_posture",
+      "label": "Security Posture",
+      "default_score": 500
+    },
+    {
+      "name": "collaboration_health",
+      "label": "Collaboration Health",
+      "default_score": 500
+    }
+  ],
+  "tiers": [
+    {
+      "name": "verified_partner",
+      "min_score": 900
+    },
+    {
+      "name": "trusted",
+      "min_score": 700
+    },
+    {
+      "name": "standard",
+      "min_score": 500
+    },
+    {
+      "name": "probationary",
+      "min_score": 300
+    },
+    {
+      "name": "untrusted",
+      "min_score": 0
+    }
+  ],
+  "thresholds": [
+    {
+      "threshold_type": "handoff",
+      "target_type": "environment",
+      "target_id": null,
+      "min_score": 700,
+      "required_tier": "trusted"
+    },
+    {
+      "threshold_type": "mcp_tool_use",
+      "target_type": "environment",
+      "target_id": null,
+      "min_score": 650,
+      "required_tier": "standard"
+    },
+    {
+      "threshold_type": "privileged_runtime_action",
+      "target_type": "environment",
+      "target_id": null,
+      "min_score": 850,
+      "required_tier": "trusted"
+    },
+    {
+      "threshold_type": "marketplace_install",
+      "target_type": "environment",
+      "target_id": null,
+      "min_score": 600,
+      "required_tier": "standard"
+    }
+  ]
+}

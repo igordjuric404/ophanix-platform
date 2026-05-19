@@ -5,7 +5,27 @@ import { scopedQueryKey, useTenantQueryScope } from "./queryScope";
 
 export type TrustParams = Record<string, string | number | boolean | null | undefined>;
 
+export type TrustDimensionName =
+  | "policy_compliance"
+  | "resource_efficiency"
+  | "output_quality"
+  | "security_posture"
+  | "collaboration_health";
+
+export interface TrustDimensionScore {
+  score: number;
+  signal_count: number;
+}
+
+export interface TrustScoreExplanation {
+  schema_version: string;
+  source_event_versions: string[];
+  input_event_count: number;
+  dimensions: Record<TrustDimensionName, TrustDimensionScore>;
+}
+
 export interface TrustScore {
+  schema_version: string;
   id: string;
   organization_id?: string | null;
   environment_id?: string | null;
@@ -13,7 +33,8 @@ export interface TrustScore {
   agent_name?: string | null;
   score: number;
   tier: string;
-  dimensions?: Record<string, { score?: number; signal_count?: number } | unknown>;
+  dimensions: Record<TrustDimensionName, TrustDimensionScore>;
+  explanation: TrustScoreExplanation;
   calculated_at: string;
   created_at?: string | null;
   updated_at?: string | null;

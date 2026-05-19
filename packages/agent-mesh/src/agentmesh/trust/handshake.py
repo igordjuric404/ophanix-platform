@@ -6,20 +6,23 @@ Trust Handshake
 Ed25519 challenge/response handshake with registry-backed identity verification.
 """
 
-from datetime import datetime, timedelta, timezone
-from typing import Any, Optional, Literal
-from pydantic import BaseModel, Field
+import asyncio
+import json
 import logging
 import secrets
-import asyncio
+from datetime import datetime, timedelta, timezone
+from typing import Any, Literal, Optional
+
+from pydantic import BaseModel, Field
+
 from agentmesh.constants import (
     TIER_TRUSTED_THRESHOLD,
     TIER_VERIFIED_PARTNER_THRESHOLD,
     TRUST_SCORE_DEFAULT,
 )
+from agentmesh.exceptions import HandshakeError, HandshakeTimeoutError
 from agentmesh.identity.agent_id import AgentIdentity, IdentityRegistry
 from agentmesh.identity.delegation import UserContext
-from agentmesh.exceptions import HandshakeError, HandshakeTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,58 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+CANONICAL_HANDSHAKE_CONTRACT_VERSION = "agentmesh.handshake.v1"
+
+
+def _contract_timestamp(value: datetime | str) -> str:
+    if isinstance(value, datetime):
+        return _as_utc(value).isoformat()
+    return value
+
+
+def canonical_handshake_payload(
+    *,
+    contract_version: str = CANONICAL_HANDSHAKE_CONTRACT_VERSION,
+    challenge_id: str,
+    nonce: str,
+    audience: str,
+    organization_id: str | None = None,
+    environment_id: str,
+    source_agent_id: str | None = None,
+    source_did: str | None = None,
+    target_agent_id: str | None = None,
+    target_did: str | None = None,
+    purpose: str,
+    threshold_type: str,
+    target_type: str,
+    target_id: str | None,
+    expires_at: datetime | str,
+) -> str:
+    """Return the canonical JSON payload signed for AgentMesh handshakes."""
+
+    return json.dumps(
+        {
+            "audience": audience,
+            "challenge_id": challenge_id,
+            "contract_version": contract_version,
+            "environment_id": environment_id,
+            "expires_at": _contract_timestamp(expires_at),
+            "nonce": nonce,
+            "organization_id": organization_id,
+            "purpose": purpose,
+            "source_agent_id": source_agent_id,
+            "source_did": source_did,
+            "target_agent_id": target_agent_id,
+            "target_did": target_did,
+            "target_id": target_id,
+            "target_type": target_type,
+            "threshold_type": threshold_type,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 class HandshakeChallenge(BaseModel):
     """Challenge issued during a trust handshake."""
 
@@ -41,19 +96,88 @@ class HandshakeChallenge(BaseModel):
     nonce: str
     timestamp: datetime = Field(default_factory=_utc_now)
     expires_in_seconds: int = 30
+    contract_version: str = CANONICAL_HANDSHAKE_CONTRACT_VERSION
+    audience: str = "agentmesh"
+    organization_id: str | None = None
+    environment_id: str = "agentmesh"
+    source_agent_id: str | None = None
+    source_did: str | None = None
+    target_agent_id: str | None = None
+    target_did: str | None = None
+    purpose: str = "handshake"
+    threshold_type: str = "handshake"
+    target_type: str = "agent"
+    target_id: str | None = None
+    expires_at: datetime | None = None
 
     @classmethod
-    def generate(cls) -> "HandshakeChallenge":
+    def generate(
+        cls,
+        *,
+        audience: str = "agentmesh",
+        organization_id: str | None = None,
+        environment_id: str = "agentmesh",
+        source_agent_id: str | None = None,
+        source_did: str | None = None,
+        target_agent_id: str | None = None,
+        target_did: str | None = None,
+        purpose: str = "handshake",
+        threshold_type: str = "handshake",
+        target_type: str = "agent",
+        target_id: str | None = None,
+        expires_in_seconds: int = 30,
+    ) -> "HandshakeChallenge":
         """Generate a new challenge with a random nonce."""
+        issued_at = _utc_now()
         return cls(
             challenge_id=f"challenge_{secrets.token_hex(8)}",
             nonce=secrets.token_hex(32),
+            timestamp=issued_at,
+            expires_in_seconds=expires_in_seconds,
+            audience=audience,
+            organization_id=organization_id,
+            environment_id=environment_id,
+            source_agent_id=source_agent_id,
+            source_did=source_did,
+            target_agent_id=target_agent_id,
+            target_did=target_did,
+            purpose=purpose,
+            threshold_type=threshold_type,
+            target_type=target_type,
+            target_id=target_id,
+            expires_at=issued_at + timedelta(seconds=expires_in_seconds),
         )
 
     def is_expired(self) -> bool:
         """Check if the challenge has exceeded its time-to-live."""
+        if self.expires_at is not None:
+            return _utc_now() > _as_utc(self.expires_at)
         elapsed = (_utc_now() - _as_utc(self.timestamp)).total_seconds()
         return elapsed > self.expires_in_seconds
+
+    def canonical_payload(self, *, signer_did: str) -> str:
+        """Return the canonical payload the peer must sign."""
+
+        expires_at = self.expires_at or (
+            _as_utc(self.timestamp) + timedelta(seconds=self.expires_in_seconds)
+        )
+        return canonical_handshake_payload(
+            contract_version=self.contract_version,
+            challenge_id=self.challenge_id,
+            nonce=self.nonce,
+            audience=self.audience,
+            organization_id=self.organization_id,
+            environment_id=self.environment_id,
+            source_agent_id=self.source_agent_id,
+            source_did=self.source_did,
+            target_agent_id=self.target_agent_id,
+            target_did=self.target_did or signer_did,
+            purpose=self.purpose,
+            threshold_type=self.threshold_type,
+            target_type=self.target_type,
+            target_id=self.target_id,
+            expires_at=expires_at,
+        )
 
 
 class HandshakeResponse(BaseModel):
@@ -93,7 +217,10 @@ class HandshakeResult(BaseModel):
     capabilities: list[str] = Field(default_factory=list)
 
     # User context (propagated from OBO flow)
-    user_context: Optional[UserContext] = Field(None, description="End-user context if acting on behalf of a user")
+    user_context: Optional[UserContext] = Field(
+        None,
+        description="End-user context if acting on behalf of a user",
+    )
 
     # Timing
     handshake_started: datetime = Field(default_factory=_utc_now)
@@ -259,7 +386,13 @@ class TrustHandshake:
 
         try:
             result = await asyncio.wait_for(
-                self._do_initiate(peer_did, required_trust_score, required_capabilities, start),
+                self._do_initiate(
+                    peer_did,
+                    protocol,
+                    required_trust_score,
+                    required_capabilities,
+                    start,
+                ),
                 timeout=self.timeout_seconds,
             )
             return result
@@ -277,6 +410,7 @@ class TrustHandshake:
     async def _do_initiate(
         self,
         peer_did: str,
+        protocol: str,
         required_trust_score: int,
         required_capabilities: Optional[list[str]],
         start: datetime,
@@ -292,7 +426,14 @@ class TrustHandshake:
                 )
 
             # Generate nonce challenge
-            challenge = HandshakeChallenge.generate()
+            challenge = HandshakeChallenge.generate(
+                audience=protocol,
+                environment_id=protocol,
+                source_did=self.agent_did,
+                target_did=peer_did,
+                purpose=protocol,
+                threshold_type=protocol,
+            )
             self._pending_challenges[challenge.challenge_id] = challenge
 
             # Get peer response
@@ -360,7 +501,7 @@ class TrustHandshake:
         response_nonce = secrets.token_hex(16)
 
         # Sign the challenge+response payload with Ed25519
-        payload = f"{challenge.challenge_id}:{challenge.nonce}:{response_nonce}:{self.agent_did}"
+        payload = challenge.canonical_payload(signer_did=self.agent_did)
         signature = agent_identity.sign(payload.encode())
 
         return HandshakeResponse(
@@ -472,7 +613,7 @@ class TrustHandshake:
             raise HandshakeError(f"Agent {response.agent_did} is not trusted in registry")
 
         # Verify Ed25519 signature over the challenge payload
-        payload = f"{response.challenge_id}:{challenge.nonce}:{response.response_nonce}:{response.agent_did}"
+        payload = challenge.canonical_payload(signer_did=response.agent_did)
         if not peer_identity.verify_signature(payload.encode(), response.signature):
             return {"valid": False, "reason": "Ed25519 signature verification failed"}
 

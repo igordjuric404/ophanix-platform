@@ -95,6 +95,7 @@ FEATURE_MIGRATIONS = [
     "0065",
     "0066",
     "0067",
+    "0068",
 ]
 
 ALL_EXPECTED_MIGRATIONS = [*EXPECTED_MIGRATIONS, *FEATURE_MIGRATIONS]
@@ -165,6 +166,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertIn("trust_card_revocations", tables)
             self.assertIn("trust_thresholds", tables)
             self.assertIn("handshake_events", tables)
+            self.assertIn("handshake_challenges", tables)
             self.assertIn("mesh_messages", tables)
             self.assertIn("mesh_handoffs", tables)
             self.assertIn("mesh_topology_snapshots", tables)
@@ -277,6 +279,8 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
                 if migration == "0060":
                     self.assertNotIn("tool_gateway_rate_limit_windows", tables)
                     self.assertNotIn("tool_gateway_circuit_breaker_state", tables)
+                if migration == "0068":
+                    self.assertNotIn("handshake_challenges", tables)
                 if migration == "0051":
                     self.assertNotIn("tool_upstream_targets", tables)
                     self.assertNotIn("tool_upstream_health_checks", tables)

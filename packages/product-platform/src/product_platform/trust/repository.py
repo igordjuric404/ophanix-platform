@@ -9,8 +9,14 @@ from typing import Any
 
 from product_platform.db.ids import generate_id
 from product_platform.db.time import utc_now_iso
+from product_platform.agents.lifecycle import (
+    agent_non_operational_message,
+    agent_non_operational_reason_code,
+    is_agent_operational,
+)
 from product_platform.trust.models import (
     TrustEventResponse,
+    TrustHandshakeChallengeResponse,
     TrustRecalculationRunResponse,
     TrustThresholdCreateRequest,
     TrustThresholdPatchRequest,
@@ -21,10 +27,28 @@ from product_platform.trust.models import (
     TrustRuleResponse,
     TrustScoreResponse,
 )
+from product_platform.trust.schema import (
+    TRUST_SCORE_THRESHOLDS,
+    TRUST_SCORE_TIER_THRESHOLDS,
+    clamp_trust_score,
+    normalize_trust_dimensions,
+    trust_score_explanation,
+)
+from agentmesh.trust.handshake import canonical_handshake_payload
 
 
 class TrustAgentNotFoundError(ValueError):
     """Raised when a trust operation targets an agent outside the tenant scope."""
+
+
+class TrustAgentNotOperationalError(ValueError):
+    """Raised when a trust operation targets a non-operational agent."""
+
+    def __init__(self, agent_id: str, status: str) -> None:
+        self.agent_id = agent_id
+        self.status = status
+        self.reason_code = agent_non_operational_reason_code(status)
+        super().__init__(agent_non_operational_message(status))
 
 
 class TrustRuleNotFoundError(ValueError):
@@ -78,25 +102,24 @@ class DefaultTrustThreshold:
 
 
 DEFAULT_TRUST_THRESHOLDS = [
-    DefaultTrustThreshold("handoff", "environment", 700, "trusted"),
-    DefaultTrustThreshold("mcp_tool_use", "environment", 650, "standard"),
-    DefaultTrustThreshold("privileged_runtime_action", "environment", 850, "trusted"),
-    DefaultTrustThreshold("marketplace_install", "environment", 600, "standard"),
+    DefaultTrustThreshold(
+        str(threshold["threshold_type"]),
+        str(threshold["target_type"]),
+        int(threshold["min_score"]),
+        str(threshold["required_tier"]),
+        threshold["target_id"] or DEFAULT_THRESHOLD_TARGET_ID,
+    )
+    for threshold in TRUST_SCORE_THRESHOLDS
 ]
 
 
 def calculate_trust_tier(score: int | float) -> str:
     """Map a 0-1000 trust score to the AgentMesh tier names."""
 
-    normalized = max(0, min(1000, int(score)))
-    if normalized >= 900:
-        return "verified_partner"
-    if normalized >= 700:
-        return "trusted"
-    if normalized >= 500:
-        return "standard"
-    if normalized >= 300:
-        return "probationary"
+    normalized = clamp_trust_score(score)
+    for tier, min_score in TRUST_SCORE_TIER_THRESHOLDS:
+        if normalized >= min_score:
+            return tier
     return "untrusted"
 
 
@@ -328,8 +351,8 @@ class TrustRepository:
     ) -> Row:
         """Persist a trust handshake outcome."""
 
-        self._require_agent(source_agent_id)
-        self._require_agent(target_agent_id)
+        self.require_operational_agent(source_agent_id)
+        self.require_operational_agent(target_agent_id)
         handshake_id = generate_id("hshake")
         self.connection.execute(
             """
@@ -376,6 +399,108 @@ class TrustRepository:
             raise ValueError("Created handshake event could not be loaded.")
         return row
 
+    def create_handshake_challenge(
+        self,
+        *,
+        source_agent_id: str,
+        source_did: str,
+        target_agent_id: str,
+        target_did: str,
+        purpose: str,
+        threshold_type: str,
+        target_type: str,
+        target_id: str | None,
+        audience: str,
+        nonce: str,
+        contract_version: str,
+        issued_at: str,
+        expires_at: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> Row:
+        """Persist a server-issued handshake challenge."""
+
+        self.require_operational_agent(source_agent_id)
+        self.require_operational_agent(target_agent_id)
+        challenge_id = generate_id("hchal")
+        self.connection.execute(
+            """
+            INSERT INTO handshake_challenges (
+                id, organization_id, environment_id, source_agent_id, source_did,
+                target_agent_id, target_did, purpose, threshold_type, target_type,
+                target_id, audience, nonce, contract_version, issued_at, expires_at,
+                metadata_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                challenge_id,
+                self.organization_id,
+                self.environment_id,
+                source_agent_id,
+                source_did,
+                target_agent_id,
+                target_did,
+                purpose,
+                threshold_type,
+                target_type,
+                _stored_threshold_target_id(target_id),
+                audience,
+                nonce,
+                contract_version,
+                issued_at,
+                expires_at,
+                json.dumps(metadata or {}, sort_keys=True),
+            ),
+        )
+        row = self.get_handshake_challenge(challenge_id)
+        if row is None:
+            raise ValueError("Created handshake challenge could not be loaded.")
+        return row
+
+    def get_handshake_challenge(self, challenge_id: str) -> Row | None:
+        """Load a tenant-scoped handshake challenge."""
+
+        return self.connection.execute(
+            """
+            SELECT *
+            FROM handshake_challenges
+            WHERE id = ?
+              AND organization_id = ?
+              AND environment_id = ?
+            """,
+            (challenge_id, self.organization_id, self.environment_id),
+        ).fetchone()
+
+    def consume_handshake_challenge(self, challenge_id: str) -> bool:
+        """Mark a challenge consumed if it has not already been used."""
+
+        cursor = self.connection.execute(
+            """
+            UPDATE handshake_challenges
+            SET consumed_at = ?
+            WHERE id = ?
+              AND organization_id = ?
+              AND environment_id = ?
+              AND consumed_at IS NULL
+            """,
+            (utc_now_iso(), challenge_id, self.organization_id, self.environment_id),
+        )
+        return cursor.rowcount == 1
+
+    def attach_handshake_challenge_event(self, challenge_id: str, handshake_event_id: str) -> None:
+        """Link a consumed challenge to the resulting handshake event."""
+
+        self.connection.execute(
+            """
+            UPDATE handshake_challenges
+            SET consumed_by_handshake_event_id = ?
+            WHERE id = ?
+              AND organization_id = ?
+              AND environment_id = ?
+            """,
+            (handshake_event_id, challenge_id, self.organization_id, self.environment_id),
+        )
+
     def list_handshake_events(
         self,
         *,
@@ -420,11 +545,11 @@ class TrustRepository:
         """Create or replace the current score for an agent."""
 
         self._require_agent(agent_id)
-        bounded_score = max(0, min(1000, int(score)))
+        bounded_score = clamp_trust_score(score)
         tier = calculate_trust_tier(bounded_score)
         now = utc_now_iso()
         score_id = generate_id("tscore")
-        dimensions_json = json.dumps(dimensions or {}, sort_keys=True)
+        dimensions_json = json.dumps(normalize_trust_dimensions(dimensions), sort_keys=True)
         calculated = calculated_at or now
         self.connection.execute(
             """
@@ -813,10 +938,19 @@ class TrustRepository:
             raise TrustAgentNotFoundError("Agent not found in current environment.")
         return row
 
+    def require_operational_agent(self, agent_id: str) -> Row:
+        """Return an agent row only when lifecycle state allows trust operations."""
+
+        row = self._require_agent(agent_id)
+        if not is_agent_operational(row["status"]):
+            raise TrustAgentNotOperationalError(agent_id, row["status"])
+        return row
+
 
 def trust_score_response(row: Row) -> TrustScoreResponse:
     """Serialize trust score row."""
 
+    dimensions = normalize_trust_dimensions(json.loads(row["dimensions_json"]))
     return TrustScoreResponse(
         id=row["id"],
         organization_id=row["organization_id"],
@@ -824,11 +958,12 @@ def trust_score_response(row: Row) -> TrustScoreResponse:
         agent_id=row["agent_id"],
         score=int(row["score"]),
         tier=row["tier"],
-        dimensions=json.loads(row["dimensions_json"]),
+        dimensions=dimensions,
         calculated_at=row["calculated_at"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         agent_name=row["agent_name"] if "agent_name" in row.keys() else None,
+        explanation=trust_score_explanation(dimensions),
     )
 
 
@@ -917,6 +1052,51 @@ def trust_handshake_response(row: Row) -> TrustHandshakeResponse:
         correlation_id=row["correlation_id"],
         metadata=json.loads(row["metadata_json"]),
         created_at=row["created_at"],
+    )
+
+
+def trust_handshake_challenge_response(row: Row) -> TrustHandshakeChallengeResponse:
+    """Serialize a server-issued handshake challenge."""
+
+    target_id = _public_threshold_target_id(row["target_id"])
+    canonical_payload = canonical_handshake_payload(
+        contract_version=row["contract_version"],
+        challenge_id=row["id"],
+        nonce=row["nonce"],
+        audience=row["audience"],
+        organization_id=row["organization_id"],
+        environment_id=row["environment_id"],
+        source_agent_id=row["source_agent_id"],
+        source_did=row["source_did"],
+        target_agent_id=row["target_agent_id"],
+        target_did=row["target_did"],
+        purpose=row["purpose"],
+        threshold_type=row["threshold_type"],
+        target_type=row["target_type"],
+        target_id=target_id,
+        expires_at=row["expires_at"],
+    )
+    return TrustHandshakeChallengeResponse(
+        challenge_id=row["id"],
+        organization_id=row["organization_id"],
+        environment_id=row["environment_id"],
+        source_agent_id=row["source_agent_id"],
+        source_did=row["source_did"],
+        target_agent_id=row["target_agent_id"],
+        target_did=row["target_did"],
+        purpose=row["purpose"],
+        threshold_type=row["threshold_type"],
+        target_type=row["target_type"],
+        target_id=target_id,
+        audience=row["audience"],
+        nonce=row["nonce"],
+        contract_version=row["contract_version"],
+        signature_algorithm="ed25519",
+        canonical_payload=canonical_payload,
+        issued_at=row["issued_at"],
+        expires_at=row["expires_at"],
+        consumed_at=row["consumed_at"],
+        metadata=json.loads(row["metadata_json"]),
     )
 
 

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import unittest
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
 from fastapi.testclient import TestClient
 
 from product_platform import create_app
@@ -17,9 +21,16 @@ from product_platform.trust.repository import TrustRepository
 class HandshakesThresholdsPhase3Tests(unittest.TestCase):
     def setUp(self) -> None:
         self.database = create_migrated_test_database()
+        self.source_private, self.source_public = self._new_keypair()
         with self.database.transaction() as connection:
             seed_demo_data(connection)
-            self._insert_agent(connection, "source_high", "Source High", 820)
+            self._insert_agent(
+                connection,
+                "source_high",
+                "Source High",
+                820,
+                public_key=self.source_public,
+            )
             self._insert_agent(connection, "source_low", "Source Low", 420)
             self._insert_agent(connection, "target_high", "Target High", 780, ["claims:read"])
             self._insert_agent(connection, "target_no_cap", "Target No Capability", 780)
@@ -59,6 +70,18 @@ class HandshakesThresholdsPhase3Tests(unittest.TestCase):
             "X-Correlation-ID": "corr-handshake",
         }
 
+    def _new_keypair(self) -> tuple[ed25519.Ed25519PrivateKey, str]:
+        private_key = ed25519.Ed25519PrivateKey.generate()
+        public_key = private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        return private_key, base64.b64encode(public_key).decode("ascii")
+
+    def _sign(self, payload: str) -> str:
+        signature = self.source_private.sign(payload.encode("utf-8"))
+        return base64.b64encode(signature).decode("ascii")
+
     def _insert_agent(
         self,
         connection,
@@ -69,6 +92,7 @@ class HandshakesThresholdsPhase3Tests(unittest.TestCase):
         *,
         credential_status: str = "active",
         credential_expires_at: str = "2030-01-01T00:00:00+00:00",
+        public_key: str | None = None,
     ) -> None:
         now = "2026-05-01T00:00:00+00:00"
         connection.execute(
@@ -99,6 +123,11 @@ class HandshakesThresholdsPhase3Tests(unittest.TestCase):
                 now,
             ),
         )
+        fingerprint = (
+            hashlib.sha256(public_key.encode("utf-8")).hexdigest()
+            if public_key is not None
+            else f"fingerprint_{agent_id}"
+        )
         connection.execute(
             """
             INSERT INTO agent_identities (
@@ -111,7 +140,7 @@ class HandshakesThresholdsPhase3Tests(unittest.TestCase):
                 f"ident_{agent_id}",
                 agent_id,
                 f"did:mesh:{agent_id}",
-                f"fingerprint_{agent_id}",
+                fingerprint,
                 "ed25519",
                 "active",
                 None,
@@ -256,10 +285,31 @@ class HandshakesThresholdsPhase3Tests(unittest.TestCase):
         self.assertEqual(response.json()["reason"], "revoked_trust_card")
 
     def test_integration_handshake_writes_audit_event(self) -> None:
+        challenge = self.client.post(
+            "/api/v1/trust/handshakes/challenges",
+            headers=self._headers(),
+            json=self._handshake_payload("source_high", "target_high"),
+        )
+        self.assertEqual(challenge.status_code, 201, challenge.text)
+        challenge_body = challenge.json()
+
+        payload = self._handshake_payload("source_high", "target_high")
+        payload["proof"] = {
+            "contract_version": challenge_body["contract_version"],
+            "signature_algorithm": "ed25519",
+            "challenge_id": challenge_body["challenge_id"],
+            "nonce": challenge_body["nonce"],
+            "audience": challenge_body["audience"],
+            "environment_id": challenge_body["environment_id"],
+            "expires_at": challenge_body["expires_at"],
+            "public_key": self.source_public,
+            "signature": self._sign(challenge_body["canonical_payload"]),
+        }
+
         response = self.client.post(
             "/api/v1/trust/handshakes/record",
             headers=self._headers(),
-            json=self._handshake_payload("source_high", "target_high"),
+            json=payload,
         )
         self.assertEqual(response.status_code, 201)
 
