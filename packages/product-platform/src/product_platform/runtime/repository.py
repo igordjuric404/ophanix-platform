@@ -7,6 +7,7 @@ import fnmatch
 from dataclasses import dataclass
 from product_platform.db.postgres import Connection, Row
 
+from product_platform.agents.lifecycle import is_agent_operational
 from product_platform.db.ids import generate_id
 from product_platform.db.time import utc_now_iso
 from product_platform.runtime.models import (
@@ -63,8 +64,16 @@ class RuntimeRepository:
         """Create an active runtime session for an active agent."""
 
         agent = self.get_agent(body.agent_id)
-        if agent is None or agent["status"] != "active":
+        if agent is None:
             raise RuntimeAgentNotActiveError("Runtime sessions require an active agent.")
+        if not is_agent_operational(agent["status"]):
+            raise RuntimeAgentNotActiveError(
+                f"Runtime sessions require an active agent; current status is {agent['status']}."
+            )
+        if agent["identity_status"] is not None and agent["identity_status"] != "active":
+            raise RuntimeAgentNotActiveError(
+                f"Runtime sessions require an active identity; current identity status is {agent['identity_status']}."
+            )
         session_id = generate_id("rtssn")
         now = utc_now_iso()
         self.connection.execute(
@@ -131,12 +140,13 @@ class RuntimeRepository:
 
         return self.connection.execute(
             """
-            SELECT *
-            FROM agents
-            WHERE id = ?
-              AND organization_id = ?
-              AND environment_id = ?
-              AND deleted_at IS NULL
+            SELECT a.*, i.identity_status
+            FROM agents a
+            LEFT JOIN agent_identities i ON i.agent_id = a.id
+            WHERE a.id = ?
+              AND a.organization_id = ?
+              AND a.environment_id = ?
+              AND a.deleted_at IS NULL
             """,
             (agent_id, self.organization_id, self.environment_id),
         ).fetchone()

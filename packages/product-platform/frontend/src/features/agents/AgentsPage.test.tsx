@@ -36,6 +36,24 @@ const agents = [
     owner_user_id: null,
     sponsor_user_id: "sponsor_3",
     capability_count: 0
+  },
+  {
+    id: "agent_quarantined",
+    name: "Quarantined Agent",
+    status: "quarantined",
+    framework: "custom",
+    owner_user_id: "owner_4",
+    sponsor_user_id: "sponsor_4",
+    capability_count: 1
+  },
+  {
+    id: "agent_revoked",
+    name: "Revoked Agent",
+    status: "revoked",
+    framework: "custom",
+    owner_user_id: "owner_5",
+    sponsor_user_id: "sponsor_5",
+    capability_count: 1
   }
 ];
 
@@ -45,7 +63,13 @@ const detail = {
     did: "did:mesh:abc",
     public_key_fingerprint: "fingerprint_1",
     key_type: "ed25519",
-    identity_status: "active"
+    identity_status: "active",
+    proof_type: "agentmesh-local",
+    issuer: "local-agentmesh",
+    audience: "env_default",
+    trusted_root_id: "local-agentmesh",
+    trusted_root_version: "v1",
+    verified_at: "2026-04-30T10:00:00+00:00"
   },
   capabilities: [{ capability_name: "claims:read", resource_type: "claim", status: "approved" }],
   latest_heartbeat: { observed_at: "2026-04-30T10:00:00+00:00" },
@@ -103,6 +127,10 @@ describe("AgentsPage", () => {
     }
     expect(screen.getAllByText("Pending Agent").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Orphan Agent").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Quarantined Agent").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Revoked Agent").length).toBeGreaterThan(0);
+    expect(screen.getByText("1 quarantined")).toBeInTheDocument();
+    expect(screen.getByText("1 revoked")).toBeInTheDocument();
     expect(screen.getAllByText("Suspend").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Decommission").length).toBeGreaterThan(0);
     expect(screen.getByText("First Governed Run")).toBeInTheDocument();
@@ -131,6 +159,8 @@ describe("AgentsPage", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Identity" }));
     expect(await screen.findByText("did:mesh:abc")).toBeInTheDocument();
     expect(screen.getByText("fingerprint_1")).toBeInTheDocument();
+    expect(screen.getAllByText("local-agentmesh").length).toBeGreaterThan(0);
+    expect(screen.getByText("env_default")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("tab", { name: "Credentials" }));
     expect(await screen.findByText("cred_1")).toBeInTheDocument();
@@ -148,8 +178,8 @@ describe("AgentsPage", () => {
     renderAgentsPage(["Platform Admin"]);
 
     expect((await screen.findAllByText("Claims Assistant")).length).toBeGreaterThan(0);
-    fireEvent.click(screen.getByRole("button", { name: /Create draft/ }));
-    expect(await screen.findByText("Registration draft agent_new created")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Register and activate/ }));
+    expect(await screen.findByText("Agent agent_new activated")).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Status"), { target: { value: "active" } });
     fireEvent.change(screen.getByPlaceholderText("claims:read"), { target: { value: "claims:read" } });
@@ -159,12 +189,46 @@ describe("AgentsPage", () => {
       expect(calls).toContain("/api/v1/agents?status=active&capability=claims%3Aread&sort=-last_heartbeat")
     );
     expect(calls).toContain("/api/v1/agents/registration-drafts");
+    expect(calls).toContain("/api/v1/agents/registration-drafts/agent_new/identity");
+    expect(calls).toContain("/api/v1/agents/registration-drafts/agent_new/submit");
+    expect(calls).toContain("/api/v1/agents/agent_new/approve");
+    expect(calls).toContain("/api/v1/agents/agent_new/activate");
+  });
+
+  it("runs restricted lifecycle actions with a required reason", async () => {
+    const calls = mockAgentFetch();
+    renderAgentsPage(["Platform Admin"]);
+
+    expect((await screen.findAllByText("Claims Assistant")).length).toBeGreaterThan(0);
+    fireEvent.click(within(agentRow("agent_1")).getByRole("button", { name: "Open" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Lifecycle" }));
+
+    const panel = await waitFor(() => {
+      const lifecyclePanel = document.querySelector("[data-agent-lifecycle]");
+      expect(lifecyclePanel).not.toBeNull();
+      return lifecyclePanel as HTMLElement;
+    });
+    expect(within(panel).getByRole("button", { name: "Restrict" })).toBeEnabled();
+    expect(within(panel).getByRole("button", { name: "Quarantine" })).toBeEnabled();
+    expect(within(panel).getByRole("button", { name: "Revoke" })).toBeEnabled();
+    expect(within(panel).getByRole("button", { name: "Archive" })).toBeDisabled();
+
+    fireEvent.click(within(panel).getByRole("button", { name: "Quarantine" }));
+    expect(calls).not.toContain("/api/v1/agents/agent_1/quarantine");
+
+    fireEvent.change(within(panel).getByLabelText("Reason"), {
+      target: { value: "incident response" }
+    });
+    fireEvent.click(within(panel).getByRole("button", { name: "Quarantine" }));
+
+    expect(await screen.findByText("Agent quarantined")).toBeInTheDocument();
+    expect(calls).toContain("/api/v1/agents/agent_1/quarantine");
   });
 
   it("disables agent write actions for read-only users", async () => {
     renderAgentsPage(["Viewer"]);
 
-    expect(await screen.findByRole("button", { name: /Create draft/ })).toBeDisabled();
+    expect(await screen.findByRole("button", { name: /Register and activate/ })).toBeDisabled();
     expect(await screen.findByText("Claims Assistant")).toBeInTheDocument();
     fireEvent.click(within(agentRow("agent_1")).getByRole("button", { name: "Open" }));
     fireEvent.click(screen.getByRole("tab", { name: "Credentials" }));
@@ -206,7 +270,35 @@ function mockAgentFetch() {
       return json(agents);
     }
     if (path === "/api/v1/agents/registration-drafts" && init?.method === "POST") {
-      return json({ id: "agent_new", name: "Claims Assistant", status: "draft" });
+      return json({
+        id: "agent_new",
+        name: "Claims Assistant",
+        status: "draft",
+        capabilities: [{ capability_name: "claims:read", resource_type: "claim", status: "pending" }]
+      });
+    }
+    if (path === "/api/v1/agents/registration-drafts/agent_new/identity" && init?.method === "POST") {
+      return json({
+        identity: {
+          did: "did:mesh:new",
+          public_key_fingerprint: "fingerprint_new",
+          key_type: "ed25519",
+          identity_status: "active",
+          issuer: "local-agentmesh",
+          audience: "env_default",
+          trusted_root_id: "local-agentmesh",
+          trusted_root_version: "v1"
+        }
+      });
+    }
+    if (path === "/api/v1/agents/registration-drafts/agent_new/submit" && init?.method === "POST") {
+      return json({ id: "agent_new", name: "Claims Assistant", status: "pending_approval" });
+    }
+    if (path === "/api/v1/agents/agent_new/approve" && init?.method === "POST") {
+      return json({ id: "agent_new", name: "Claims Assistant", status: "provisioned" });
+    }
+    if (path === "/api/v1/agents/agent_new/activate" && init?.method === "POST") {
+      return json({ id: "agent_new", name: "Claims Assistant", status: "active" });
     }
     if (path === "/api/v1/agents/agent_1") {
       return json(detail);
@@ -219,6 +311,9 @@ function mockAgentFetch() {
     }
     if (path === "/api/v1/agents/agent_1/credentials") {
       return json(credentials);
+    }
+    if (path === "/api/v1/agents/agent_1/quarantine" && init?.method === "POST") {
+      return json({ ...agents[0], status: "quarantined" });
     }
     if (path === "/api/v1/credentials/expiring?threshold_hours=24") {
       return json([{ ...credentials[0], status: "expiring_soon" }]);

@@ -77,7 +77,16 @@ def agent_lifecycle_event(
     agent_id: str,
     lifecycle_state: str,
     actor_id: str,
+    previous_state: str | None = None,
+    reason: str | None = None,
+    decision: str | None = None,
+    correlation_id: str | None = None,
 ) -> AuditEventEnvelope:
+    payload = {"lifecycle_state": lifecycle_state}
+    if previous_state is not None:
+        payload["previous_state"] = previous_state
+    if reason is not None:
+        payload["reason"] = reason
     return AuditEventEnvelope(
         organization_id=organization_id,
         environment_id=environment_id,
@@ -88,7 +97,9 @@ def agent_lifecycle_event(
         agent_id=agent_id,
         resource_type="agent",
         resource_id=agent_id,
-        payload_json={"lifecycle_state": lifecycle_state},
+        decision=decision,
+        correlation_id=correlation_id,
+        payload_json=payload,
     )
 
 
@@ -178,4 +189,3 @@ def workflow_run_event(
         resource_id=workflow_run_id,
         payload_json={"workflow_type": workflow_type, "status": status},
     )
-

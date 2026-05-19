@@ -21,6 +21,8 @@ class AgentRegistrationDraftCreate(BaseModel):
     runtime_type: str = Field(min_length=1)
     description: str = ""
     endpoint_url: str | None = None
+    capabilities: list["AgentCapabilityRequest"] = Field(default_factory=list)
+    policy_selections: list["AgentPolicySelectionRequest"] = Field(default_factory=list)
 
     @field_validator("name", "owner_user_id", "sponsor_user_id", "framework", "runtime_type")
     @classmethod
@@ -110,7 +112,58 @@ class AgentIdentityResponse(BaseModel):
     public_key_fingerprint: str
     key_type: str
     identity_status: str
+    proof_type: str = "agentmesh-local"
+    issuer: str = "local-agentmesh"
+    audience: str | None = None
+    subject: str | None = None
+    environment_binding: str | None = None
+    trusted_root_id: str = "local-agentmesh"
+    trusted_root_version: str = "v1"
+    key_reference: str | None = None
+    certificate_chain: list[str] = Field(default_factory=list)
+    proof_metadata: dict[str, Any] = Field(default_factory=dict)
+    verified_at: str | None = None
+    rotated_at: str | None = None
+    revoked_at: str | None = None
+    rotation_count: int = 0
     created_at: str
+
+
+class AgentIdentityProofRequest(BaseModel):
+    """Workload identity proof metadata supplied during registration or rotation."""
+
+    proof_type: str = Field(default="agentmesh-local", min_length=1)
+    issuer: str = Field(default="local-agentmesh", min_length=1)
+    audience: str | None = None
+    subject: str | None = None
+    trusted_root_id: str = Field(default="local-agentmesh", min_length=1)
+    trusted_root_version: str = Field(default="v1", min_length=1)
+    key_reference: str | None = None
+    certificate_chain: list[str] = Field(default_factory=list)
+    proof_metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator(
+        "proof_type",
+        "issuer",
+        "audience",
+        "subject",
+        "trusted_root_id",
+        "trusted_root_version",
+        "key_reference",
+    )
+    @classmethod
+    def _strip_identity_proof_fields(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            return None
+        return stripped
+
+    @field_validator("certificate_chain")
+    @classmethod
+    def _strip_certificate_chain(cls, value: list[str]) -> list[str]:
+        return [item.strip() for item in value if item.strip()]
 
 
 class AgentBootstrapMaterial(BaseModel):
@@ -127,6 +180,21 @@ class AgentIdentityCreateResponse(BaseModel):
 
     identity: AgentIdentityResponse
     bootstrap: AgentBootstrapMaterial | None = None
+
+
+class AgentIdentityRotationRequest(BaseModel):
+    """Request to rotate an agent workload identity."""
+
+    reason: str = Field(min_length=1)
+    proof: AgentIdentityProofRequest = Field(default_factory=AgentIdentityProofRequest)
+
+    @field_validator("reason")
+    @classmethod
+    def _strip_rotation_reason(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Reason must not be blank.")
+        return stripped
 
 
 class AgentCapabilityRequest(BaseModel):

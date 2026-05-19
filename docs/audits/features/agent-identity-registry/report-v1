@@ -1,5 +1,107 @@
 # Feature Audit: Agent Identity and Registry
 
+## Remediation Summary
+
+Date of remediation: 2026-05-19 (completed)
+
+Total findings in this report: 4
+
+Number fixed: 4
+
+Number partially fixed: 0
+
+Number blocked: 0
+
+Number already fixed: 0
+
+Files changed:
+- `packages/product-platform/src/product_platform/agents/lifecycle.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/audit/events.py`
+- `packages/product-platform/src/product_platform/tool_gateway/auth.py`
+- `packages/product-platform/src/product_platform/runtime/repository.py`
+- `packages/product-platform/src/product_platform/mesh/repository.py`
+- `packages/product-platform/src/product_platform/marketplace/repository.py`
+- `packages/product-platform/src/product_platform/agents/credentials.py`
+- `packages/product-platform/src/product_platform/agents/models.py`
+- `packages/product-platform/src/product_platform/agents/identity.py`
+- `packages/product-platform/src/product_platform/agents/repository.py`
+- `packages/product-platform/src/product_platform/db/migrations/0067_agent_identity_workload_metadata.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0067_agent_identity_workload_metadata.down.sql`
+- `packages/product-platform/frontend/src/api/agents.ts`
+- `packages/product-platform/frontend/src/features/agents/AgentsPage.tsx`
+- `packages/product-platform/frontend/src/lib/actionAvailability.ts`
+- `packages/product-platform/tests/test_agent_identity_registry_remediation_phase1.py`
+- `packages/product-platform/tests/test_agent_identity_registry_remediation_phase2.py`
+- `packages/product-platform/tests/test_agent_identity_registry_remediation_phase3.py`
+- `packages/product-platform/tests/test_agent_identity_registry_remediation_phase4.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+- `packages/product-platform/frontend/src/features/agents/AgentsPage.test.tsx`
+- `packages/product-platform/frontend/src/lib/actionAvailability.test.ts`
+- `docs/audits/features/agent-identity-registry/report-v1`
+- `docs/product-platform-worktree/execution-logs/10-agent-identity-registry-remediation/00-execution-index.md`
+- `docs/product-platform-worktree/execution-logs/10-agent-identity-registry-remediation/phase-01-lifecycle-state-workflows.md`
+- `docs/product-platform-worktree/execution-logs/10-agent-identity-registry-remediation/phase-02-credential-issuance-rotation.md`
+- `docs/product-platform-worktree/execution-logs/10-agent-identity-registry-remediation/phase-03-agent-registration-wizard.md`
+- `docs/product-platform-worktree/execution-logs/10-agent-identity-registry-remediation/phase-04-agent-inventory-and-detail.md`
+
+Tests added or updated:
+- `packages/product-platform/tests/test_agent_identity_registry_remediation_phase1.py`
+- `packages/product-platform/tests/test_agent_identity_registry_remediation_phase2.py`
+- `packages/product-platform/tests/test_agent_identity_registry_remediation_phase3.py`
+- `packages/product-platform/tests/test_agent_identity_registry_remediation_phase4.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+- `packages/product-platform/frontend/src/features/agents/AgentsPage.test.tsx`
+- `packages/product-platform/frontend/src/lib/actionAvailability.test.ts`
+
+Validation commands run:
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agent_identity_registry_remediation_phase1.py' -v` - passed
+- `python3 -m ruff check src/product_platform/agents/lifecycle.py src/product_platform/audit/events.py src/product_platform/tool_gateway/auth.py src/product_platform/runtime/repository.py src/product_platform/mesh/repository.py src/product_platform/marketplace/repository.py src/product_platform/api/app.py tests/test_agent_identity_registry_remediation_phase1.py` - passed
+- `npm test -- AgentsPage.test.tsx actionAvailability.test.ts` - passed after fixing an initial async render assertion in the new test
+- `npm run typecheck` - passed
+- `npm run lint` - passed
+- `npm run build` - passed with the existing Vite chunk-size warning
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agent_identity_registry_remediation_phase2.py' -v` - passed after implementing the cascade
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_credential_phase1.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_credential_phase2.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_credential_phase3.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_credential_phase4.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_credential_overall.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_lifecycle_workflows.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_auth_phase2.py' -v` - passed
+- `python3 -m ruff check src/product_platform/agents/credentials.py src/product_platform/api/app.py src/product_platform/tool_gateway/auth.py tests/test_agent_identity_registry_remediation_phase2.py` - passed
+- `python3 -m mypy src/product_platform/tool_gateway` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agent_identity_registry_remediation_phase3.py' -v` - passed after implementing identity/onboarding work
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agent_registration_phase1.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agent_registration_phase2.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agent_registration_phase3.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agent_registration_phase4.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agent_registration_overall.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_runtime_sessions_and_rings_phase1.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_runtime_sessions_and_rings_phase2.py' -v` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` - passed
+- `python3 -m ruff check src/product_platform/agents/models.py src/product_platform/agents/identity.py src/product_platform/agents/repository.py src/product_platform/api/app.py src/product_platform/runtime/repository.py tests/test_agent_identity_registry_remediation_phase3.py tests/test_db_phase1.py` - passed
+- `npm test -- AgentsPage.test.tsx actionAvailability.test.ts` - passed
+- `npm run typecheck` - passed after fixing draft response ID extraction
+- `npm run lint` - passed
+- `npm run build` - passed with the existing Vite chunk-size warning
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agent_identity_registry_remediation_phase4.py' -v` - passed, 1 test
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agent_identity_registry_remediation_phase*.py' -v` - passed, 14 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agent_registration_overall.py' -v` - passed, 1 test
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_credential_overall.py' -v` - passed, 1 test
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_runtime_sessions_and_rings_phase1.py' -v` - passed, 4 tests
+- `python3 -m ruff check src/product_platform/agents/lifecycle.py src/product_platform/agents/credentials.py src/product_platform/agents/models.py src/product_platform/agents/identity.py src/product_platform/agents/repository.py src/product_platform/audit/events.py src/product_platform/tool_gateway/auth.py src/product_platform/runtime/repository.py src/product_platform/mesh/repository.py src/product_platform/marketplace/repository.py src/product_platform/api/app.py tests/test_agent_identity_registry_remediation_phase1.py tests/test_agent_identity_registry_remediation_phase2.py tests/test_agent_identity_registry_remediation_phase3.py tests/test_agent_identity_registry_remediation_phase4.py tests/test_db_phase1.py` - passed
+- `python3 -m mypy src/product_platform/tool_gateway` - passed
+- `npm test` - passed, 32 files and 121 tests
+- `npm run typecheck` - passed
+- `npm run lint` - passed
+- `npm run build` - passed with the existing Vite chunk-size warning
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` - passed, 5 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -v` - failed outside selected report scope: ran 893 tests with 9 failures and 39 errors in unrelated Tool Gateway upstream/forwarding/response suites that reject `.internal.example` upstream URLs as unsafe
+
+Remaining risks:
+- Broad backend regression remains red because unrelated Tool Gateway upstream/forwarding/response tests use `.internal.example` upstream URLs that current URL-safety validation rejects as private/unsafe. Selected report remediation suites, related registration/credential/runtime/database suites, frontend tests, typecheck, lint, build, targeted ruff, and Tool Gateway mypy pass.
+
 ## 1. Scope
 
 This audit covers the agent registry, identity records, lifecycle states, credentials, agent onboarding UI, discovery-to-registration flow, and Python SDK support. It inspects `ophanix-platform/packages/product-platform/src/product_platform/agents`, agent-related migrations, routes in `product_platform/api/app.py`, frontend agent pages, and the standalone `ophanix-python-sdk`. Relevant benchmarks are Microsoft Agent 365 agent registry/quarantine, AWS AgentCore Identity, Google Agent Registry, and enterprise admin visibility patterns. Out of scope: full API key authentication details, which are covered in AUTH.
@@ -25,6 +127,48 @@ Current workflow: operators can create drafts, register agents with identity/cap
 ## 4. Findings
 
 ### F-AIR-001 [P1] [Admin UX] UI onboarding cannot complete the advertised registration workflow
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Updated the registration workflow so capabilities can be persisted at draft creation, identity proof is collected and verified, the UI drives draft creation through identity creation, submission, approval, and activation, and activation audit evidence is emitted through existing lifecycle audit paths. The registration form now captures identity issuer, audience, proof type, trust root, trust root version, subject, and key reference, and surfaces the final activated agent.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/agents/models.py`
+- `packages/product-platform/src/product_platform/agents/repository.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/frontend/src/api/agents.ts`
+- `packages/product-platform/frontend/src/features/agents/AgentsPage.tsx`
+
+**Tests added or updated:**
+- `packages/product-platform/tests/test_agent_identity_registry_remediation_phase3.py`
+  - `test_api_registration_can_complete_from_draft_to_active`
+- `packages/product-platform/frontend/src/features/agents/AgentsPage.test.tsx`
+  - `submits registration drafts and applies inventory filters`
+- Existing registration suites re-run:
+  - `test_agent_registration_phase1.py`
+  - `test_agent_registration_phase2.py`
+  - `test_agent_registration_phase3.py`
+  - `test_agent_registration_phase4.py`
+  - `test_agent_registration_overall.py`
+
+**Validation performed:**
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agent_identity_registry_remediation_phase3.py' -v` - passed, 4 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agent_registration_phase1.py' -v` - passed, 4 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agent_registration_phase2.py' -v` - passed, 3 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agent_registration_phase3.py' -v` - passed, 4 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agent_registration_phase4.py' -v` - passed, 4 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agent_registration_overall.py' -v` - passed, 1 test
+- `npm test -- AgentsPage.test.tsx actionAvailability.test.ts` - passed, 8 tests
+- `npm run typecheck` - passed
+- `npm run lint` - passed
+- `npm run build` - passed with the existing Vite chunk-size warning
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Partially Implemented
 
@@ -78,6 +222,51 @@ Agent inventory remains incomplete and operators may bypass governance controls 
 
 ### F-AIR-002 [P0] [Agent Lifecycle] Agent lifecycle lacks quarantine and revocation states with enforcement consequences
 
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Added canonical lifecycle states for restricted, quarantined, revoked, and archived agents; added server-side lifecycle endpoints for restrict, quarantine, revoke, and archive; emitted lifecycle audit events with previous state, reason, decision, and correlation ID; enforced non-operational lifecycle states at Tool Gateway authentication, runtime sessions, mesh communication, and agent-scoped plugin installation; and exposed lifecycle risk status and quarantine/revocation actions in the admin UI.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/agents/lifecycle.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/audit/events.py`
+- `packages/product-platform/src/product_platform/tool_gateway/auth.py`
+- `packages/product-platform/src/product_platform/runtime/repository.py`
+- `packages/product-platform/src/product_platform/mesh/repository.py`
+- `packages/product-platform/src/product_platform/marketplace/repository.py`
+- `packages/product-platform/frontend/src/api/agents.ts`
+- `packages/product-platform/frontend/src/features/agents/AgentsPage.tsx`
+- `packages/product-platform/frontend/src/lib/actionAvailability.ts`
+
+**Tests added or updated:**
+- `packages/product-platform/tests/test_agent_identity_registry_remediation_phase1.py`
+  - `test_lifecycle_state_machine_supports_quarantine_and_revocation`
+  - `test_quarantine_and_revoke_routes_persist_lifecycle_and_audit_events`
+  - `test_gateway_rejects_quarantined_and_revoked_agents_with_specific_reason`
+  - `test_mesh_handoff_rejects_quarantined_target_agent`
+  - `test_runtime_session_rejects_quarantined_and_revoked_agents`
+  - `test_marketplace_installation_rejects_revoked_target_agent`
+- `packages/product-platform/frontend/src/features/agents/AgentsPage.test.tsx`
+  - `renders registration, inventory, lifecycle, detail, credentials, and audit drawer flows`
+  - `runs restricted lifecycle actions with a required reason`
+- `packages/product-platform/frontend/src/lib/actionAvailability.test.ts`
+  - `matches backend agent lifecycle transitions`
+
+**Validation performed:**
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agent_identity_registry_remediation_phase1.py' -v` - passed, 6 tests
+- `python3 -m ruff check src/product_platform/agents/lifecycle.py src/product_platform/audit/events.py src/product_platform/tool_gateway/auth.py src/product_platform/runtime/repository.py src/product_platform/mesh/repository.py src/product_platform/marketplace/repository.py src/product_platform/api/app.py tests/test_agent_identity_registry_remediation_phase1.py` - passed
+- `npm test -- AgentsPage.test.tsx actionAvailability.test.ts` - passed, 8 tests
+- `npm run typecheck` - passed
+- `npm run lint` - passed
+- `npm run build` - passed with the existing Vite chunk-size warning
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
+
 **Status:** Missing
 
 **Current implementation:**
@@ -130,6 +319,42 @@ Agent identity becomes inventory-only and cannot support incident response.
 
 ### F-AIR-003 [P0] [Credential Lifecycle] Suspending or decommissioning an agent does not revoke credentials or identities
 
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Added lifecycle-driven credential cascade behavior so suspended, restricted, quarantined, revoked, decommissioning, and decommissioned agents revoke active or expiring credentials immediately. Agent identities are marked non-active for restrictive lifecycle states and re-enabled only when allowed lifecycle recovery returns an agent to active. Credential verification now rechecks the latest agent lifecycle and identity status before accepting an otherwise valid token. Tool Gateway token verification now also rejects inactive identities. Lifecycle transitions emit audit events linking lifecycle state changes to credential revocation and revocation publication.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/agents/credentials.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/tool_gateway/auth.py`
+- `packages/product-platform/tests/test_agent_identity_registry_remediation_phase2.py`
+
+**Tests added or updated:**
+- `packages/product-platform/tests/test_agent_identity_registry_remediation_phase2.py`
+  - `test_suspend_cascades_to_credentials_identity_and_audit`
+  - `test_quarantine_revoke_and_decommission_cascade_credentials_and_identity`
+  - `test_token_verification_rechecks_latest_agent_lifecycle`
+
+**Validation performed:**
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agent_identity_registry_remediation_phase2.py' -v` - passed, 3 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_credential_phase1.py' -v` - passed, 6 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_credential_phase2.py' -v` - passed, 4 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_credential_phase3.py' -v` - passed, 6 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_credential_phase4.py' -v` - passed, 3 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_credential_overall.py' -v` - passed, 1 test
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_lifecycle_workflows.py' -v` - passed, 8 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_auth_phase2.py' -v` - passed, 5 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agent_identity_registry_remediation_phase1.py' -v` - passed, 6 tests
+- `python3 -m ruff check src/product_platform/agents/credentials.py src/product_platform/api/app.py src/product_platform/tool_gateway/auth.py tests/test_agent_identity_registry_remediation_phase2.py` - passed
+- `python3 -m mypy src/product_platform/tool_gateway` - passed
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
+
 **Status:** Incorrect
 
 **Current implementation:**
@@ -181,6 +406,53 @@ Incident response and access control reports will be misleading.
 **Affects stated Ophanix product promise:** Yes
 
 ### F-AIR-004 [P1] [Agent Identity] Identity records are too thin for enterprise workload identity
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Extended agent identity persistence and API responses with workload identity proof metadata: proof type, issuer, audience, subject, environment binding, trusted root ID/version, key reference, certificate chain, proof metadata, verification time, rotation time, revocation time, and rotation count. Added deterministic trust-root validation for identity creation/rotation, rejected untrusted issuers/audiences, added identity rotation with lifecycle and audit evidence preserving previous identity metadata, and enforced identity status during runtime session creation and Tool Gateway/credential verification.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/db/migrations/0067_agent_identity_workload_metadata.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0067_agent_identity_workload_metadata.down.sql`
+- `packages/product-platform/src/product_platform/agents/models.py`
+- `packages/product-platform/src/product_platform/agents/identity.py`
+- `packages/product-platform/src/product_platform/agents/repository.py`
+- `packages/product-platform/src/product_platform/agents/credentials.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/runtime/repository.py`
+- `packages/product-platform/src/product_platform/tool_gateway/auth.py`
+- `packages/product-platform/frontend/src/api/agents.ts`
+- `packages/product-platform/frontend/src/features/agents/AgentsPage.tsx`
+- `packages/product-platform/tests/test_db_phase1.py`
+
+**Tests added or updated:**
+- `packages/product-platform/tests/test_agent_identity_registry_remediation_phase3.py`
+  - `test_identity_proof_is_verified_against_trusted_root`
+  - `test_identity_rotation_records_historical_evidence`
+  - `test_runtime_session_rejects_non_active_identity`
+- `packages/product-platform/tests/test_db_phase1.py`
+  - migration list and identity metadata column assertions
+- `packages/product-platform/frontend/src/features/agents/AgentsPage.test.tsx`
+  - `renders registration, inventory, lifecycle, detail, credentials, and audit drawer flows`
+
+**Validation performed:**
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_agent_identity_registry_remediation_phase3.py' -v` - passed, 4 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_runtime_sessions_and_rings_phase1.py' -v` - passed, 4 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_runtime_sessions_and_rings_phase2.py' -v` - passed, 3 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` - passed, 5 tests
+- `python3 -m ruff check src/product_platform/agents/models.py src/product_platform/agents/identity.py src/product_platform/agents/repository.py src/product_platform/api/app.py src/product_platform/runtime/repository.py tests/test_agent_identity_registry_remediation_phase3.py tests/test_db_phase1.py` - passed
+- `python3 -m mypy src/product_platform/tool_gateway` - passed
+- `npm test -- AgentsPage.test.tsx actionAvailability.test.ts` - passed, 8 tests
+- `npm run typecheck` - passed
+- `npm run lint` - passed
+- `npm run build` - passed with the existing Vite chunk-size warning
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Partially Implemented
 
@@ -281,4 +553,3 @@ None.
 ## 7. Feature-Level Target State
 
 Agent identity should become an enforceable registry, not just metadata. The data model should add enterprise lifecycle states, trust-root-backed workload identity, revocation evidence, credential cascade metadata, and policy bindings. APIs should provide explicit registration, review, activation, quarantine, revocation, rotation, and decommission routes. Services should centralize lifecycle transitions and reuse them across Tool Gateway, runtime sessions, mesh, and plugin governance. UI should support complete onboarding and incident-response workflows. Audit and observability should connect agent identity events to tool calls, sessions, credentials, and trust decisions. Tests should prove that identity state changes have immediate enforcement consequences.
-

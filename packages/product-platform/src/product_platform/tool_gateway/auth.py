@@ -9,6 +9,11 @@ from product_platform.db.postgres import Connection, Row
 from pydantic import BaseModel, Field
 
 from product_platform.agents.credentials import credential_token_hash_candidates, hash_credential_token
+from product_platform.agents.lifecycle import (
+    agent_non_operational_message,
+    agent_non_operational_reason_code,
+    is_agent_operational,
+)
 from product_platform.db.time import utc_now_iso
 
 MAX_GATEWAY_TOKEN_LENGTH = 4096
@@ -160,8 +165,18 @@ class GatewayTokenVerifier:
                 ("expired", row["credential_id"]),
             )
             raise self._credential_error(row, "credential_expired", "Gateway credential is expired.")
-        if row["agent_status"] != "active":
-            raise self._credential_error(row, "agent_inactive", "Agent is not active.")
+        if not is_agent_operational(row["agent_status"]):
+            raise self._credential_error(
+                row,
+                agent_non_operational_reason_code(row["agent_status"]),
+                agent_non_operational_message(row["agent_status"]),
+            )
+        if row["identity_status"] is not None and row["identity_status"] != "active":
+            raise self._credential_error(
+                row,
+                "agent_identity_inactive",
+                f"Agent identity is {row['identity_status']}.",
+            )
 
         verified_at = utc_now_iso()
         self.connection.execute(
@@ -193,9 +208,11 @@ class GatewayTokenVerifier:
                 c.expires_at,
                 a.organization_id,
                 a.environment_id,
-                a.status AS agent_status
+                a.status AS agent_status,
+                i.identity_status
             FROM agent_credentials c
             JOIN agents a ON a.id = c.agent_id
+            LEFT JOIN agent_identities i ON i.agent_id = a.id
             WHERE c.token_hash IN ({placeholders})
               AND a.deleted_at IS NULL
             """,

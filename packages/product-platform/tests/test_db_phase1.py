@@ -94,6 +94,7 @@ FEATURE_MIGRATIONS = [
     "0064",
     "0065",
     "0066",
+    "0067",
 ]
 
 ALL_EXPECTED_MIGRATIONS = [*EXPECTED_MIGRATIONS, *FEATURE_MIGRATIONS]
@@ -133,6 +134,11 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertIn("audit_events", tables)
             self.assertIn("agents", tables)
             self.assertIn("agent_lifecycle_events", tables)
+            identity_columns = column_names(connection, "agent_identities")
+            self.assertIn("issuer", identity_columns)
+            self.assertIn("audience", identity_columns)
+            self.assertIn("trusted_root_id", identity_columns)
+            self.assertIn("proof_metadata_json", identity_columns)
             self.assertIn("agent_credentials", tables)
             self.assertIn("credential_scopes", tables)
             self.assertIn("credential_rotations", tables)

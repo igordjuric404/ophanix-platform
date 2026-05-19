@@ -1,16 +1,18 @@
-import { KeyRound, Play, RotateCcw, Search, ShieldCheck, UserCheck } from "lucide-react";
+import { Archive, Ban, KeyRound, Play, RotateCcw, Search, ShieldAlert, ShieldCheck, UserCheck } from "lucide-react";
 import { useId, useState, type FormEvent, type InputHTMLAttributes, type KeyboardEvent } from "react";
 
 import type { TenantContext } from "../../api/client";
 import {
   activateAgent,
   approveAgent,
+  createAgentIdentity,
   createAgentRegistrationDraft,
   issueAgentCredential,
   rotateCredential,
   runLifecycleAction,
   runOrphanDetection,
   revokeCredential,
+  submitAgentRegistrationDraft,
   useAgentAudit,
   useAgentCredentials,
   useAgentDetail,
@@ -39,7 +41,11 @@ import { Label } from "../../components/ui/label";
 import {
   canActivateAgent,
   canApproveAgent,
+  canArchiveAgent,
   canIssueAgentCredential,
+  canQuarantineAgent,
+  canRestrictAgent,
+  canRevokeAgent,
   canRevokeCredential,
   canRotateCredential,
   canSuspendAgent
@@ -66,6 +72,23 @@ const detailTabs = [
   "Policies",
   "Trust",
   "Integrations"
+];
+
+const agentLifecycleStatusOptions = [
+  { value: "", label: "All statuses" },
+  "draft",
+  "pending_approval",
+  "provisioned",
+  "active",
+  "restricted",
+  "quarantined",
+  "suspended",
+  "revoked",
+  "decommissioning",
+  "decommissioned",
+  "archived",
+  "orphaned",
+  "rejected"
 ];
 
 export function AgentsPage() {
@@ -100,38 +123,58 @@ export function AgentsPage() {
       return;
     }
     const form = new FormData(event.currentTarget);
-    const draft = await runWithFeedback<AgentDetail | AgentSummary>(
+    const activated = await runWithFeedback<AgentSummary>(
       () =>
-        mutation.mutateAsync((tenantContext) =>
-          createAgentRegistrationDraft({
-            name: formString(form, "name"),
-            description: formString(form, "description"),
-            framework: formString(form, "framework"),
-            runtime_type: formString(form, "runtime_type"),
-            endpoint_url: formString(form, "endpoint_url"),
-            owner_user_id: formString(form, "owner_user_id"),
-            sponsor_user_id: formString(form, "sponsor_user_id"),
-            capabilities: [
-              {
-                capability_name: formString(form, "capability_name"),
-                resource_type: formString(form, "resource_type")
-              }
-            ].filter((capability) => capability.capability_name),
-            policy_selections: formString(form, "policy_pack")
-              ? [{ policy_pack: formString(form, "policy_pack") }]
-              : []
-          }, tenantContext)
-        ) as Promise<AgentDetail | AgentSummary>,
+        mutation.mutateAsync(async (tenantContext) => {
+          const draft = await createAgentRegistrationDraft(
+            {
+              name: formString(form, "name"),
+              description: formString(form, "description"),
+              framework: formString(form, "framework"),
+              runtime_type: formString(form, "runtime_type"),
+              endpoint_url: formString(form, "endpoint_url"),
+              owner_user_id: formString(form, "owner_user_id"),
+              sponsor_user_id: formString(form, "sponsor_user_id"),
+              capabilities: [
+                {
+                  capability_name: formString(form, "capability_name"),
+                  resource_type: formString(form, "resource_type")
+                }
+              ].filter((capability) => capability.capability_name),
+              policy_selections: formString(form, "policy_id")
+                ? [{ policy_id: formString(form, "policy_id"), selection_type: "policy_binding" }]
+                : []
+            },
+            tenantContext
+          );
+          const draftId = agentResponseId(draft);
+          await createAgentIdentity(
+            draftId,
+            {
+              proof_type: formString(form, "proof_type"),
+              issuer: formString(form, "issuer"),
+              audience: formString(form, "audience"),
+              subject: formString(form, "subject"),
+              trusted_root_id: formString(form, "trusted_root_id"),
+              trusted_root_version: formString(form, "trusted_root_version"),
+              key_reference: formString(form, "key_reference"),
+              proof_metadata: { source: "agent-registration-wizard" }
+            },
+            tenantContext
+          );
+          await submitAgentRegistrationDraft(draftId, tenantContext);
+          await approveAgent(draftId, { reason: "registration approved from wizard" }, tenantContext);
+          return activateAgent(draftId, { reason: "registration activated from wizard" }, tenantContext);
+        }) as Promise<AgentSummary>,
       {
-        errorMessage: "Registration draft failed",
-        successMessage: (result) => `Registration draft ${"id" in result ? String(result.id) : "draft"} created`
+        errorMessage: "Registration failed",
+        successMessage: (result) => `Agent ${"id" in result ? String(result.id) : "draft"} activated`
       }
     );
-    if (!draft) {
+    if (!activated) {
       return;
     }
-    const id = "id" in draft ? String(draft.id) : "draft";
-    setSelectedAgentId(id);
+    setSelectedAgentId(activated.id);
   }
 
   function applyFilters(event: FormEvent<HTMLFormElement>) {
@@ -306,13 +349,19 @@ function AgentRegistrationWizard({
         />
         <Field disabled={!canWrite} label="Capability" name="capability_name" defaultValue="claims:read" />
         <Field disabled={!canWrite} label="Resource" name="resource_type" defaultValue="claim" />
-        <Field
-          className="md:col-span-2"
+        <Field disabled={!canWrite} label="Identity issuer" name="issuer" required defaultValue="local-agentmesh" />
+        <Field disabled={!canWrite} label="Audience" name="audience" required defaultValue="env_default" />
+        <Field disabled={!canWrite} label="Trust root" name="trusted_root_id" required defaultValue="local-agentmesh" />
+        <Field disabled={!canWrite} label="Root version" name="trusted_root_version" required defaultValue="v1" />
+        <SelectField
           disabled={!canWrite}
-          label="Policy pack"
-          name="policy_pack"
-          defaultValue="baseline"
+          label="Proof type"
+          name="proof_type"
+          options={["agentmesh-local", "spiffe", "jwt", "x509", "kms"]}
         />
+        <Field disabled={!canWrite} label="Subject" name="subject" defaultValue="spiffe://ophanix/env_default/claims" />
+        <Field disabled={!canWrite} label="Key reference" name="key_reference" defaultValue="kms://ophanix/env_default/claims" />
+        <Field disabled={!canWrite} label="Policy ID" name="policy_id" placeholder="Optional policy" />
         <Field
           className="md:col-span-2"
           disabled={!canWrite}
@@ -323,7 +372,7 @@ function AgentRegistrationWizard({
         <div className="flex items-end">
           <Button disabled={!canWrite || isPending} type="submit">
             <ShieldCheck className="h-4 w-4" />
-            Create draft
+            Register and activate
           </Button>
         </div>
       </form>
@@ -340,6 +389,9 @@ function LifecycleOverview({
 }) {
   const pending = agents.filter((agent) => agent.status === "pending_approval");
   const active = agents.filter((agent) => agent.status === "active");
+  const restricted = agents.filter((agent) => agent.status === "restricted");
+  const quarantined = agents.filter((agent) => agent.status === "quarantined");
+  const revoked = agents.filter((agent) => agent.status === "revoked");
   const orphanCandidates = agents.filter((agent) => agent.status.includes("orphan"));
 
   return (
@@ -354,6 +406,9 @@ function LifecycleOverview({
         <div className="flex flex-wrap gap-2" data-lifecycle-funnel>
           <Badge tone="warning">{pending.length} pending</Badge>
           <Badge tone="success">{active.length} active</Badge>
+          <Badge tone="warning">{restricted.length} restricted</Badge>
+          <Badge tone="danger">{quarantined.length} quarantined</Badge>
+          <Badge tone="danger">{revoked.length} revoked</Badge>
           <Badge tone="danger">{orphanCandidates.length} orphan</Badge>
         </div>
       </div>
@@ -420,7 +475,7 @@ function AgentInventory({
           </p>
         </div>
         <form className="flex flex-wrap items-end gap-3" onSubmit={onFilter}>
-          <Field compact label="Status" name="status" placeholder="active" />
+          <SelectField compact label="Status" name="status" options={agentLifecycleStatusOptions} />
           <Field compact label="Capability" name="capability" placeholder="claims:read" />
           <SelectField compact label="Sort" name="sort" options={["-last_heartbeat", "name", "status"]} />
           <Button type="submit" variant="outline">
@@ -780,6 +835,12 @@ function IdentityTab({ detail }: { detail: AgentDetail | null }) {
       <Metric label="Public key fingerprint" value={identity?.public_key_fingerprint ?? "n/a"} />
       <Metric label="Key type" value={identity?.key_type ?? "n/a"} />
       <Metric label="Identity status" value={identity?.identity_status ?? "n/a"} />
+      <Metric label="Issuer" value={identity?.issuer ?? "n/a"} />
+      <Metric label="Audience" value={identity?.audience ?? "n/a"} />
+      <Metric label="Trust root" value={identity?.trusted_root_id ?? "n/a"} />
+      <Metric label="Root version" value={identity?.trusted_root_version ?? "n/a"} />
+      <Metric label="Proof type" value={identity?.proof_type ?? "n/a"} />
+      <Metric label="Verified at" value={identity?.verified_at ?? "n/a"} />
     </div>
   );
 }
@@ -798,6 +859,43 @@ function LifecycleTab({
   timeline: AgentLifecycleEvent[];
 }) {
   const suspendAvailable = canWrite && canSuspendAgent(agent);
+  const lifecycleActions = [
+    {
+      action: "suspend",
+      available: suspendAvailable,
+      icon: ShieldAlert,
+      label: "Suspend",
+      successMessage: "Agent suspended"
+    },
+    {
+      action: "restrict",
+      available: canWrite && canRestrictAgent(agent),
+      icon: ShieldCheck,
+      label: "Restrict",
+      successMessage: "Agent restricted"
+    },
+    {
+      action: "quarantine",
+      available: canWrite && canQuarantineAgent(agent),
+      icon: Ban,
+      label: "Quarantine",
+      successMessage: "Agent quarantined"
+    },
+    {
+      action: "revoke",
+      available: canWrite && canRevokeAgent(agent),
+      icon: Ban,
+      label: "Revoke",
+      successMessage: "Agent revoked"
+    },
+    {
+      action: "archive",
+      available: canWrite && canArchiveAgent(agent),
+      icon: Archive,
+      label: "Archive",
+      successMessage: "Agent archived"
+    }
+  ] as const;
   return (
     <div className="grid gap-4 lg:grid-cols-[22rem_1fr]" data-agent-lifecycle>
       <div className="rounded-lg border p-4">
@@ -806,12 +904,15 @@ function LifecycleTab({
           className="mt-4 space-y-3"
           onSubmit={(event) => {
             event.preventDefault();
-            if (!suspendAvailable) {
+            const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null;
+            const action = submitter?.value;
+            const lifecycleAction = lifecycleActions.find((candidate) => candidate.action === action);
+            const reason = formString(new FormData(event.currentTarget), "reason");
+            if (!lifecycleAction?.available || !reason) {
               return;
             }
-            const reason = formString(new FormData(event.currentTarget), "reason");
-            void onRunTask("Agent suspended", (tenantContext) =>
-              runLifecycleAction(activeAgentId, "suspend", { reason }, tenantContext)
+            void onRunTask(lifecycleAction.successMessage, (tenantContext) =>
+              runLifecycleAction(activeAgentId, lifecycleAction.action, { reason }, tenantContext)
             );
           }}
         >
@@ -824,9 +925,22 @@ function LifecycleTab({
             placeholder="Change request"
           />
           <div className="flex flex-wrap gap-2">
-            <Button disabled={!suspendAvailable} type="submit" variant="outline">
-              Suspend
-            </Button>
+            {lifecycleActions.map((action) => {
+              const Icon = action.icon;
+              return (
+                <Button
+                  disabled={!action.available}
+                  key={action.action}
+                  name="action"
+                  type="submit"
+                  value={action.action}
+                  variant="outline"
+                >
+                  <Icon className="h-4 w-4" />
+                  {action.label}
+                </Button>
+              );
+            })}
             <Button
               disabled={!canWrite}
               onClick={() =>
@@ -1087,6 +1201,8 @@ function Field({
   );
 }
 
+type SelectOption = string | { label: string; value: string };
+
 function SelectField({
   compact,
   disabled,
@@ -1098,7 +1214,7 @@ function SelectField({
   disabled?: boolean;
   label: string;
   name: string;
-  options: string[];
+  options: SelectOption[];
 }) {
   const reactId = useId();
   const id = `${reactId}-${name}`;
@@ -1112,8 +1228,8 @@ function SelectField({
         name={name}
       >
         {options.map((option) => (
-          <option key={option} value={option}>
-            {option}
+          <option key={selectOptionValue(option)} value={selectOptionValue(option)}>
+            {selectOptionLabel(option)}
           </option>
         ))}
       </select>
@@ -1121,8 +1237,20 @@ function SelectField({
   );
 }
 
+function selectOptionValue(option: SelectOption) {
+  return typeof option === "string" ? option : option.value;
+}
+
+function selectOptionLabel(option: SelectOption) {
+  return typeof option === "string" ? option : option.label;
+}
+
 function formString(form: FormData, key: string) {
   return String(form.get(key) ?? "").trim();
+}
+
+function agentResponseId(agent: AgentDetail | AgentSummary) {
+  return "id" in agent ? String(agent.id) : agent.summary.id;
 }
 
 function readAgentIdFromUrl() {

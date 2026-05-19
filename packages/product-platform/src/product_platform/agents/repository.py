@@ -248,9 +248,12 @@ class AgentRegistryRepository:
             INSERT INTO agent_identities (
                 id, agent_id, did, public_key_fingerprint, key_type,
                 identity_status, bootstrap_material_json, bootstrap_retrieved_at,
-                created_at
+                proof_type, issuer, audience, subject, environment_binding,
+                trusted_root_id, trusted_root_version, key_reference,
+                certificate_chain_json, proof_metadata_json, verified_at,
+                rotated_at, revoked_at, rotation_count, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 identity_id,
@@ -261,12 +264,128 @@ class AgentRegistryRepository:
                 "active",
                 None,
                 now,
+                created.proof.proof_type,
+                created.proof.issuer,
+                created.proof.audience,
+                created.proof.subject,
+                created.proof.environment_binding,
+                created.proof.trusted_root_id,
+                created.proof.trusted_root_version,
+                created.proof.key_reference,
+                json.dumps(created.proof.certificate_chain, sort_keys=True),
+                json.dumps(created.proof.proof_metadata, sort_keys=True),
+                created.proof.verified_at,
+                None,
+                None,
+                0,
                 now,
             ),
         )
         row = self.get_identity(agent_id)
         if row is None:
             raise AgentNotFoundError("Created identity could not be loaded.")
+        return row
+
+    def rotate_identity(
+        self,
+        agent_id: str,
+        created: CreatedAgentIdentity,
+        *,
+        actor_id: str,
+        reason: str,
+    ) -> Row:
+        """Rotate an agent identity and preserve historical evidence."""
+
+        agent = self.get(agent_id)
+        if agent is None:
+            raise AgentNotFoundError("Agent not found.")
+        existing = self.get_identity(agent_id)
+        if existing is None:
+            raise AgentNotFoundError("Agent identity not found.")
+        now = utc_now_iso()
+        rotation_count = int(existing["rotation_count"] or 0) + 1
+        self.connection.execute(
+            """
+            UPDATE agent_identities
+            SET did = ?,
+                public_key_fingerprint = ?,
+                key_type = ?,
+                identity_status = ?,
+                bootstrap_material_json = ?,
+                bootstrap_retrieved_at = ?,
+                proof_type = ?,
+                issuer = ?,
+                audience = ?,
+                subject = ?,
+                environment_binding = ?,
+                trusted_root_id = ?,
+                trusted_root_version = ?,
+                key_reference = ?,
+                certificate_chain_json = ?,
+                proof_metadata_json = ?,
+                verified_at = ?,
+                rotated_at = ?,
+                revoked_at = ?,
+                rotation_count = ?
+            WHERE agent_id = ?
+            """,
+            (
+                created.did,
+                created.public_key_fingerprint,
+                created.key_type,
+                "active",
+                None,
+                now,
+                created.proof.proof_type,
+                created.proof.issuer,
+                created.proof.audience,
+                created.proof.subject,
+                created.proof.environment_binding,
+                created.proof.trusted_root_id,
+                created.proof.trusted_root_version,
+                created.proof.key_reference,
+                json.dumps(created.proof.certificate_chain, sort_keys=True),
+                json.dumps(created.proof.proof_metadata, sort_keys=True),
+                created.proof.verified_at,
+                now,
+                None,
+                rotation_count,
+                agent_id,
+            ),
+        )
+        self.connection.execute(
+            """
+            INSERT INTO agent_lifecycle_events (
+                id, agent_id, previous_state, next_state, actor_id, reason,
+                metadata_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                generate_id("life"),
+                agent_id,
+                agent["status"],
+                agent["status"],
+                actor_id,
+                "identity rotated",
+                json.dumps(
+                    {
+                        "previous_did": existing["did"],
+                        "previous_public_key_fingerprint": existing["public_key_fingerprint"],
+                        "new_did": created.did,
+                        "new_public_key_fingerprint": created.public_key_fingerprint,
+                        "reason": reason,
+                        "trusted_root_id": created.proof.trusted_root_id,
+                        "trusted_root_version": created.proof.trusted_root_version,
+                    },
+                    sort_keys=True,
+                ),
+                now,
+            ),
+        )
+        row = self.get_identity(agent_id)
+        if row is None:
+            raise AgentNotFoundError("Rotated identity could not be loaded.")
         return row
 
     def transition_status(
@@ -763,6 +882,20 @@ def agent_identity_response(row: Row) -> AgentIdentityResponse:
         public_key_fingerprint=row["public_key_fingerprint"],
         key_type=row["key_type"],
         identity_status=row["identity_status"],
+        proof_type=row["proof_type"],
+        issuer=row["issuer"],
+        audience=row["audience"],
+        subject=row["subject"],
+        environment_binding=row["environment_binding"],
+        trusted_root_id=row["trusted_root_id"],
+        trusted_root_version=row["trusted_root_version"],
+        key_reference=row["key_reference"],
+        certificate_chain=json.loads(row["certificate_chain_json"]),
+        proof_metadata=json.loads(row["proof_metadata_json"]),
+        verified_at=row["verified_at"],
+        rotated_at=row["rotated_at"],
+        revoked_at=row["revoked_at"],
+        rotation_count=int(row["rotation_count"] or 0),
         created_at=row["created_at"],
     )
 

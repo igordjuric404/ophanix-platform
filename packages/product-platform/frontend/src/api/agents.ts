@@ -25,6 +25,20 @@ export interface AgentIdentity {
   public_key_fingerprint?: string | null;
   key_type?: string | null;
   identity_status?: string | null;
+  proof_type?: string | null;
+  issuer?: string | null;
+  audience?: string | null;
+  subject?: string | null;
+  environment_binding?: string | null;
+  trusted_root_id?: string | null;
+  trusted_root_version?: string | null;
+  key_reference?: string | null;
+  certificate_chain?: string[];
+  proof_metadata?: Record<string, unknown>;
+  verified_at?: string | null;
+  rotated_at?: string | null;
+  revoked_at?: string | null;
+  rotation_count?: number | null;
 }
 
 export interface AgentCapability {
@@ -144,10 +158,14 @@ export function updateAgentRegistrationDraft(
   );
 }
 
-export function createAgentIdentity(draftId: string, tenantContext?: TenantContext) {
+export function createAgentIdentity(
+  draftId: string,
+  body: Record<string, unknown> = {},
+  tenantContext?: TenantContext
+) {
   return apiClient.request<Record<string, unknown>>(
     `/agents/registration-drafts/${encodeURIComponent(draftId)}/identity`,
-    { method: "POST", tenantContext }
+    { method: "POST", body, tenantContext }
   );
 }
 
@@ -191,7 +209,17 @@ export function activateAgent(
 
 export function runLifecycleAction(
   agentId: string,
-  action: "reject" | "suspend" | "resume" | "change-owner" | "decommission" | "heartbeat",
+  action:
+    | "reject"
+    | "restrict"
+    | "quarantine"
+    | "revoke"
+    | "archive"
+    | "suspend"
+    | "resume"
+    | "change-owner"
+    | "decommission"
+    | "heartbeat",
   body: Record<string, unknown> = {},
   tenantContext?: TenantContext
 ) {

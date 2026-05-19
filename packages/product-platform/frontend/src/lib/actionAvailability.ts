@@ -39,6 +39,37 @@ export function canSuspendAgent(agent: StatusLike | null | undefined) {
   return normalizedStatus(agent?.status) === "active";
 }
 
+export function canRestrictAgent(agent: StatusLike | null | undefined) {
+  return ["provisioned", "active", "quarantined", "suspended", "orphaned"].includes(
+    normalizedStatus(agent?.status)
+  );
+}
+
+export function canQuarantineAgent(agent: StatusLike | null | undefined) {
+  return ["pending_approval", "provisioned", "active", "restricted", "suspended", "orphaned"].includes(
+    normalizedStatus(agent?.status)
+  );
+}
+
+export function canRevokeAgent(agent: StatusLike | null | undefined) {
+  return [
+    "pending_approval",
+    "provisioned",
+    "active",
+    "restricted",
+    "quarantined",
+    "suspended",
+    "orphaned",
+    "decommissioning"
+  ].includes(normalizedStatus(agent?.status));
+}
+
+export function canArchiveAgent(agent: StatusLike | null | undefined) {
+  return ["draft", "pending_approval", "rejected", "decommissioned", "revoked"].includes(
+    normalizedStatus(agent?.status)
+  );
+}
+
 export function canIssueAgentCredential(agent: StatusLike | null | undefined) {
   return normalizedStatus(agent?.status) === "active";
 }

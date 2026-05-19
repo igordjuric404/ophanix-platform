@@ -6,6 +6,7 @@ import json
 from product_platform.db.postgres import Connection, IntegrityError, Row
 from typing import Any
 
+from product_platform.agents.lifecycle import agent_non_operational_message, is_agent_operational
 from product_platform.db.ids import generate_id
 from product_platform.db.time import utc_now_iso
 from product_platform.marketplace.models import (
@@ -913,7 +914,7 @@ class MarketplaceCatalogRepository:
     def _require_agent(self, agent_id: str, environment_id: str) -> None:
         row = self.connection.execute(
             """
-            SELECT id
+            SELECT id, status
             FROM agents
             WHERE id = ?
               AND organization_id = ?
@@ -924,6 +925,8 @@ class MarketplaceCatalogRepository:
         ).fetchone()
         if row is None:
             raise PluginNotFoundError("Target agent not found.")
+        if not is_agent_operational(row["status"]):
+            raise PluginInstallationBlockedError(agent_non_operational_message(row["status"]))
 
     def _active_installation(
         self,

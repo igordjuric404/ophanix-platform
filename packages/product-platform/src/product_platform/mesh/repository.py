@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from product_platform.db.postgres import Connection, Row
 
+from product_platform.agents.lifecycle import agent_non_operational_message, is_agent_operational
 from product_platform.db.ids import generate_id
 from product_platform.db.time import utc_now_iso
 from product_platform.mesh.models import (
@@ -23,6 +24,10 @@ from product_platform.mesh.models import (
 
 class MeshAgentNotFoundError(ValueError):
     """Raised when a mesh message references an agent outside tenant scope."""
+
+
+class MeshAgentNotOperationalError(ValueError):
+    """Raised when a mesh message references a non-operational agent."""
 
 
 class ProtocolBridgeNotFoundError(ValueError):
@@ -581,6 +586,8 @@ class MeshRepository:
         ).fetchone()
         if row is None:
             raise MeshAgentNotFoundError("Agent not found in current environment.")
+        if not is_agent_operational(row["status"]):
+            raise MeshAgentNotOperationalError(agent_non_operational_message(row["status"]))
         return row
 
     def _require_policy_binding(self, binding_id: str) -> Row:

@@ -4,10 +4,14 @@ import {
   canActivateAgent,
   canAddRuntimeSagaStep,
   canAdvanceRollout,
+  canArchiveAgent,
   canApproveAgent,
   canCancelRuntimeSaga,
   canEndRuntimeSession,
   canExecuteRuntimeSaga,
+  canQuarantineAgent,
+  canRestrictAgent,
+  canRevokeAgent,
   canRevokeCredential,
   canRevokeTrustCard,
   canRollbackRollout,
@@ -23,6 +27,14 @@ describe("action availability", () => {
     expect(canActivateAgent({ status: "pending_approval" })).toBe(false);
     expect(canSuspendAgent({ status: "active" })).toBe(true);
     expect(canSuspendAgent({ status: "suspended" })).toBe(false);
+    expect(canRestrictAgent({ status: "active" })).toBe(true);
+    expect(canRestrictAgent({ status: "revoked" })).toBe(false);
+    expect(canQuarantineAgent({ status: "restricted" })).toBe(true);
+    expect(canQuarantineAgent({ status: "revoked" })).toBe(false);
+    expect(canRevokeAgent({ status: "quarantined" })).toBe(true);
+    expect(canRevokeAgent({ status: "archived" })).toBe(false);
+    expect(canArchiveAgent({ status: "revoked" })).toBe(true);
+    expect(canArchiveAgent({ status: "active" })).toBe(false);
   });
 
   it("blocks non-actionable credential and trust-card operations", () => {

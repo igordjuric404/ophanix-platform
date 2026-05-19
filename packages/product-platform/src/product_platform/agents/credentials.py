@@ -15,6 +15,7 @@ from typing import Any
 from agentmesh.identity.credentials import CredentialManager
 
 from product_platform.audit.events import AuditEventEnvelope
+from product_platform.agents.lifecycle import agent_non_operational_message, is_agent_operational
 from product_platform.agents.models import (
     AgentCredentialResponse,
     CredentialScopeRequest,
@@ -38,6 +39,21 @@ SENSITIVE_METADATA_TEXT_RE = re.compile(
     r"(?i)\b(bearer\s+[A-Za-z0-9._~+/=-]{8,}|"
     r"(?:api[-_\s]?key|authorization|password|secret|token)\s*[:=]\s*['\"]?[^,'\"\s]{8,})"
 )
+LIFECYCLE_CREDENTIAL_REVOKE_STATUSES = frozenset(
+    {"restricted", "quarantined", "suspended", "revoked", "decommissioning", "decommissioned"}
+)
+LIFECYCLE_IDENTITY_DISABLED_STATUSES = frozenset(
+    {
+        "restricted",
+        "quarantined",
+        "suspended",
+        "revoked",
+        "decommissioning",
+        "decommissioned",
+        "archived",
+    }
+)
+LIFECYCLE_IDENTITY_REACTIVATABLE_STATUSES = frozenset({"restricted", "quarantined", "suspended", "orphaned"})
 
 
 def hash_credential_token(token: str) -> str:
@@ -138,6 +154,14 @@ class CredentialExpiryMonitorResult:
 
     processed_count: int
     credential_ids: list[str]
+
+
+@dataclass(frozen=True)
+class AgentLifecycleCredentialCascadeResult:
+    """Credential and identity changes caused by an agent lifecycle transition."""
+
+    credential_ids: list[str]
+    identity_status: str | None
 
 
 class AgentCredentialIssuer:
@@ -379,6 +403,64 @@ class AgentCredentialRepository:
         if updated is None:
             raise CredentialNotFoundError("Credential not found.")
         return updated
+
+    def cascade_agent_lifecycle_status(
+        self,
+        *,
+        agent_id: str,
+        next_status: str,
+        actor_id: str,
+        reason: str,
+    ) -> AgentLifecycleCredentialCascadeResult:
+        """Invalidate credentials and identity state after restrictive lifecycle transitions."""
+
+        if not self.agent_exists(agent_id):
+            raise AgentNotFoundError("Agent not found.")
+        revoked_credential_ids: list[str] = []
+        now = utc_now_iso()
+        if next_status in LIFECYCLE_CREDENTIAL_REVOKE_STATUSES:
+            rows = self.connection.execute(
+                """
+                SELECT *
+                FROM agent_credentials
+                WHERE agent_id = ?
+                  AND status IN ('active', 'expiring_soon')
+                ORDER BY issued_at ASC, id ASC
+                """,
+                (agent_id,),
+            ).fetchall()
+            for row in rows:
+                metadata = json.loads(row["metadata_json"])
+                metadata["revocation"] = {
+                    "reason": reason,
+                    "requested_by": actor_id,
+                    "published_at": now,
+                    "publication_type": "lifecycle_transition",
+                    "trigger": "agent_lifecycle",
+                    "lifecycle_state": next_status,
+                }
+                self.connection.execute(
+                    """
+                    UPDATE agent_credentials
+                    SET status = ?, revoked_at = ?, metadata_json = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        "revoked",
+                        now,
+                        json.dumps(metadata, sort_keys=True),
+                        row["id"],
+                    ),
+                )
+                revoked_credential_ids.append(str(row["id"]))
+            if revoked_credential_ids:
+                self._refresh_agent_credential_status(agent_id)
+
+        identity_status = self._cascade_identity_status(agent_id, next_status)
+        return AgentLifecycleCredentialCascadeResult(
+            credential_ids=revoked_credential_ids,
+            identity_status=identity_status,
+        )
 
     def record_rotation(
         self,
@@ -632,6 +714,28 @@ class AgentCredentialRepository:
                 "reason": "Token does not match credential.",
                 "verified_at": verified_at,
             }
+        agent_context = self._agent_auth_context(row["agent_id"])
+        if agent_context is None:
+            raise AgentNotFoundError("Agent not found.")
+        if not is_agent_operational(agent_context["status"]):
+            return {
+                "credential_id": credential_id,
+                "agent_id": row["agent_id"],
+                "valid": False,
+                "status": status,
+                "reason": agent_non_operational_message(agent_context["status"]),
+                "verified_at": verified_at,
+            }
+        identity_status = agent_context["identity_status"]
+        if identity_status is not None and identity_status != "active":
+            return {
+                "credential_id": credential_id,
+                "agent_id": row["agent_id"],
+                "valid": False,
+                "status": status,
+                "reason": f"Agent identity is {identity_status}.",
+                "verified_at": verified_at,
+            }
         self.connection.execute(
             """
             UPDATE agent_credentials
@@ -656,11 +760,10 @@ class AgentCredentialRepository:
             raise AgentNotFoundError("Agent not found.")
         row = self.connection.execute(
             """
-            SELECT i.did
+            SELECT i.did, i.identity_status, a.status AS agent_status
             FROM agent_identities i
             JOIN agents a ON a.id = i.agent_id
             WHERE i.agent_id = ?
-              AND i.identity_status = 'active'
               AND a.organization_id = ?
               AND a.environment_id = ?
               AND a.deleted_at IS NULL
@@ -669,6 +772,10 @@ class AgentCredentialRepository:
         ).fetchone()
         if row is None:
             raise ValueError("Agent identity is required before issuing credentials.")
+        if not is_agent_operational(row["agent_status"]):
+            raise ValueError(agent_non_operational_message(row["agent_status"]))
+        if row["identity_status"] != "active":
+            raise ValueError(f"Agent identity is {row['identity_status']}.")
         return str(row["did"])
 
     def validate_scopes(self, agent_id: str, scopes: list[CredentialScopeRequest]) -> None:
@@ -769,6 +876,55 @@ class AgentCredentialRepository:
             (agent_id, self.organization_id, self.environment_id),
         ).fetchone()
         return row is not None
+
+    def _cascade_identity_status(self, agent_id: str, next_status: str) -> str | None:
+        target_status: str | None = None
+        if next_status in LIFECYCLE_IDENTITY_DISABLED_STATUSES:
+            target_status = next_status
+        elif next_status == "active":
+            row = self.connection.execute(
+                """
+                SELECT identity_status
+                FROM agent_identities
+                WHERE agent_id = ?
+                """,
+                (agent_id,),
+            ).fetchone()
+            if row is not None and row["identity_status"] in LIFECYCLE_IDENTITY_REACTIVATABLE_STATUSES:
+                target_status = "active"
+        if target_status is None:
+            row = self.connection.execute(
+                """
+                SELECT identity_status
+                FROM agent_identities
+                WHERE agent_id = ?
+                """,
+                (agent_id,),
+            ).fetchone()
+            return str(row["identity_status"]) if row is not None else None
+        self.connection.execute(
+            """
+            UPDATE agent_identities
+            SET identity_status = ?
+            WHERE agent_id = ?
+            """,
+            (target_status, agent_id),
+        )
+        return target_status
+
+    def _agent_auth_context(self, agent_id: str) -> Row | None:
+        return self.connection.execute(
+            """
+            SELECT a.status, i.identity_status
+            FROM agents a
+            LEFT JOIN agent_identities i ON i.agent_id = a.id
+            WHERE a.id = ?
+              AND a.organization_id = ?
+              AND a.environment_id = ?
+              AND a.deleted_at IS NULL
+            """,
+            (agent_id, self.organization_id, self.environment_id),
+        ).fetchone()
 
     def _ensure_secret_absent(self, raw_token: str, metadata: dict[str, Any]) -> None:
         encoded = json.dumps(metadata, sort_keys=True)
