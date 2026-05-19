@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from typing import Any
+
 from product_platform.db.postgres import Connection, Row
 
 from product_platform.audit.events import AuditEventEnvelope
 from product_platform.audit.hash_chain import (
+    CHECKPOINT_SIGNATURE_ALGORITHM,
     HASH_ALGORITHM,
     AuditVerificationResult,
     calculate_event_hash,
+    sign_checkpoint_proof,
 )
+from product_platform.db.ids import generate_id
 from product_platform.db.time import utc_now_iso
 
 
@@ -245,10 +250,16 @@ class AuditEventRepository:
             values,
         ).fetchall()
         previous_hash_by_environment: dict[str | None, str | None] = {}
+        current_hash_by_event_id: dict[str, str] = {}
+        ordinal_by_event_id: dict[str, int] = {}
+        first_hash_by_environment: dict[str | None, str] = {}
+        ordinal_by_environment: dict[str | None, int] = {}
         checked_count = 0
         for row in rows:
             checked_count += 1
             event = _row_to_event(row)
+            ordinal = ordinal_by_environment.get(event.environment_id, 0) + 1
+            ordinal_by_environment[event.environment_id] = ordinal
             previous_hash = previous_hash_by_environment.get(event.environment_id)
             if row["current_hash"] is None:
                 return AuditVerificationResult(
@@ -274,7 +285,205 @@ class AuditEventRepository:
                 )
             previous_hash = row["current_hash"]
             previous_hash_by_environment[event.environment_id] = previous_hash
+            current_hash_by_event_id[event.id] = previous_hash
+            ordinal_by_event_id[event.id] = ordinal
+            first_hash_by_environment.setdefault(event.environment_id, previous_hash)
+        for checkpoint in self._latest_checkpoints(organization_id, environment_id):
+            checkpoint_count = int(checkpoint["event_count"])
+            if checkpoint_count == 0:
+                continue
+            checkpoint_event_id = checkpoint["end_event_id"]
+            checkpoint_environment_id = checkpoint["environment_id"]
+            if checkpoint_event_id not in current_hash_by_event_id:
+                return AuditVerificationResult(
+                    valid=False,
+                    checked_count=checked_count,
+                    failed_event_id=checkpoint_event_id,
+                    reason="checkpoint_event_missing",
+                    checkpoint_id=checkpoint["id"],
+                )
+            if ordinal_by_event_id[checkpoint_event_id] != checkpoint_count:
+                return AuditVerificationResult(
+                    valid=False,
+                    checked_count=checked_count,
+                    failed_event_id=checkpoint_event_id,
+                    reason="checkpoint_count_mismatch",
+                    checkpoint_id=checkpoint["id"],
+                )
+            if current_hash_by_event_id[checkpoint_event_id] != checkpoint["last_hash"]:
+                return AuditVerificationResult(
+                    valid=False,
+                    checked_count=checked_count,
+                    failed_event_id=checkpoint_event_id,
+                    reason="checkpoint_hash_mismatch",
+                    checkpoint_id=checkpoint["id"],
+                )
+            if (
+                checkpoint["first_hash"] is not None
+                and first_hash_by_environment.get(checkpoint_environment_id) != checkpoint["first_hash"]
+            ):
+                return AuditVerificationResult(
+                    valid=False,
+                    checked_count=checked_count,
+                    failed_event_id=checkpoint["start_event_id"],
+                    reason="checkpoint_first_hash_mismatch",
+                    checkpoint_id=checkpoint["id"],
+                )
         return AuditVerificationResult(valid=True, checked_count=checked_count)
+
+    def create_checkpoint(
+        self,
+        organization_id: str,
+        *,
+        environment_id: str | None = None,
+        created_by: str = "system",
+        scope: dict[str, Any] | None = None,
+        signing_key: str | None = None,
+    ) -> Row:
+        """Persist a signed checkpoint for the current audit hash chain."""
+
+        verification = self.verify_range(organization_id, environment_id=environment_id)
+        if not verification.valid:
+            raise ValueError(f"Cannot checkpoint invalid audit hash chain: {verification.reason}.")
+
+        rows = self._hash_rows_for_scope(organization_id, environment_id=environment_id)
+        checkpoint_id = generate_id("audchk")
+        now = utc_now_iso()
+        event_count = len(rows)
+        first_row = rows[0] if rows else None
+        last_row = rows[-1] if rows else None
+        proof: dict[str, Any] = {
+            "algorithm": HASH_ALGORITHM,
+            "checkpoint_id": checkpoint_id,
+            "created_at": now,
+            "event_count": event_count,
+            "environment_id": environment_id,
+            "first_hash": first_row["current_hash"] if first_row is not None else None,
+            "last_hash": last_row["current_hash"] if last_row is not None else None,
+            "organization_id": organization_id,
+            "signature_algorithm": CHECKPOINT_SIGNATURE_ALGORITHM,
+            "scope": scope or {},
+            "start_event_id": first_row["id"] if first_row is not None else None,
+            "end_event_id": last_row["id"] if last_row is not None else None,
+        }
+        signature = sign_checkpoint_proof(proof, signing_key=signing_key)
+        self.connection.execute(
+            """
+            INSERT INTO audit_hash_checkpoints (
+                id, organization_id, environment_id, start_event_id, end_event_id,
+                event_count, first_hash, last_hash, algorithm, scope_json, proof_json,
+                signature, created_by, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                checkpoint_id,
+                organization_id,
+                environment_id,
+                proof["start_event_id"],
+                proof["end_event_id"],
+                event_count,
+                proof["first_hash"],
+                proof["last_hash"],
+                HASH_ALGORITHM,
+                json.dumps(scope or {}, sort_keys=True),
+                json.dumps(proof, sort_keys=True),
+                signature,
+                created_by,
+                now,
+            ),
+        )
+        row = self.connection.execute(
+            "SELECT * FROM audit_hash_checkpoints WHERE id = ?",
+            (checkpoint_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("Created audit hash checkpoint could not be loaded.")
+        return row
+
+    def latest_checkpoint(
+        self,
+        organization_id: str,
+        *,
+        environment_id: str | None = None,
+    ) -> Row | None:
+        """Return the latest signed checkpoint for an audit hash-chain scope."""
+
+        return self._latest_checkpoint(organization_id, environment_id)
+
+    def hash_metadata_for_events(self, event_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Return hash-chain metadata for a set of event ids."""
+
+        if not event_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in event_ids)
+        rows = self.connection.execute(
+            f"""
+            SELECT event_id, previous_hash, current_hash, algorithm, created_at
+            FROM audit_event_hashes
+            WHERE event_id IN ({placeholders})
+            """,
+            event_ids,
+        ).fetchall()
+        return {
+            row["event_id"]: {
+                "event_id": row["event_id"],
+                "previous_hash": row["previous_hash"],
+                "current_hash": row["current_hash"],
+                "algorithm": row["algorithm"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        }
+
+    def export_chain_proof(
+        self,
+        *,
+        organization_id: str,
+        environment_id: str,
+        event_ids: list[str],
+        checkpoint: Row | None = None,
+    ) -> dict[str, Any]:
+        """Build exportable chain proof metadata for selected audit events."""
+
+        selected_hashes = self.hash_metadata_for_events(event_ids)
+        selected_events = [
+            selected_hashes[event_id] for event_id in event_ids if event_id in selected_hashes
+        ]
+        checkpoint_row = checkpoint or self.latest_checkpoint(
+            organization_id,
+            environment_id=environment_id,
+        )
+        checkpoint_payload: dict[str, Any] | None = None
+        if checkpoint_row is not None:
+            checkpoint_payload = {
+                "id": checkpoint_row["id"],
+                "organization_id": checkpoint_row["organization_id"],
+                "environment_id": checkpoint_row["environment_id"],
+                "start_event_id": checkpoint_row["start_event_id"],
+                "end_event_id": checkpoint_row["end_event_id"],
+                "event_count": checkpoint_row["event_count"],
+                "first_hash": checkpoint_row["first_hash"],
+                "last_hash": checkpoint_row["last_hash"],
+                "algorithm": checkpoint_row["algorithm"],
+                "scope": json.loads(checkpoint_row["scope_json"] or "{}"),
+                "proof": json.loads(checkpoint_row["proof_json"] or "{}"),
+                "signature": checkpoint_row["signature"],
+                "created_by": checkpoint_row["created_by"],
+                "created_at": checkpoint_row["created_at"],
+            }
+        return {
+            "algorithm": HASH_ALGORITHM,
+            "organization_id": organization_id,
+            "environment_id": environment_id,
+            "selected_event_count": len(event_ids),
+            "selected_events": selected_events,
+            "range_verification": self.verify_range(
+                organization_id,
+                environment_id=environment_id,
+            ).model_dump(mode="json"),
+            "checkpoint": checkpoint_payload,
+        }
 
     def _latest_hash(self, organization_id: str, environment_id: str | None) -> str | None:
         clauses = ["e.organization_id = ?"]
@@ -296,6 +505,71 @@ class AuditEventRepository:
             values,
         ).fetchone()
         return row["current_hash"] if row else None
+
+    def _hash_rows_for_scope(
+        self,
+        organization_id: str,
+        *,
+        environment_id: str | None,
+    ) -> list[Row]:
+        clauses = ["e.organization_id = ?"]
+        values: list[object] = [organization_id]
+        if environment_id is None:
+            clauses.append("e.environment_id IS NULL")
+        else:
+            clauses.append("e.environment_id = ?")
+            values.append(environment_id)
+        return self.connection.execute(
+            f"""
+            SELECT e.id, e.environment_id, e.created_at, h.previous_hash, h.current_hash, h.algorithm
+            FROM audit_events e
+            JOIN audit_event_hashes h ON h.event_id = e.id
+            WHERE {' AND '.join(clauses)}
+            ORDER BY e.created_at ASC, e.id ASC
+            """,
+            values,
+        ).fetchall()
+
+    def _latest_checkpoint(
+        self,
+        organization_id: str,
+        environment_id: str | None,
+    ) -> Row | None:
+        clauses = ["organization_id = ?"]
+        values: list[object] = [organization_id]
+        if environment_id is None:
+            clauses.append("environment_id IS NULL")
+        else:
+            clauses.append("environment_id = ?")
+            values.append(environment_id)
+        return self.connection.execute(
+            f"""
+            SELECT *
+            FROM audit_hash_checkpoints
+            WHERE {' AND '.join(clauses)}
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            values,
+        ).fetchone()
+
+    def _latest_checkpoints(
+        self,
+        organization_id: str,
+        environment_id: str | None,
+    ) -> list[Row]:
+        if environment_id is not None:
+            row = self._latest_checkpoint(organization_id, environment_id)
+            return [row] if row is not None else []
+        return self.connection.execute(
+            """
+            SELECT DISTINCT ON (environment_id) *
+            FROM audit_hash_checkpoints
+            WHERE organization_id = ?
+            ORDER BY environment_id ASC, created_at DESC, id DESC
+            """,
+            (organization_id,),
+        ).fetchall()
 
 
 def _row_to_event(row: Row) -> AuditEventEnvelope:

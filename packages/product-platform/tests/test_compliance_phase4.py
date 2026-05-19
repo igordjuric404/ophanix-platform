@@ -10,6 +10,10 @@ from product_platform.audit.events import AuditEventEnvelope
 from product_platform.audit.store import AuditEventQuery, AuditEventRepository
 from product_platform.db.seed import seed_demo_data
 from product_platform.db.testing import create_migrated_test_database
+from product_platform.tool_gateway.runtime_audit import (
+    ToolRuntimeActionCreate,
+    ToolRuntimeActionRepository,
+)
 
 
 class CompliancePhase4ReportTests(unittest.TestCase):
@@ -43,6 +47,13 @@ class CompliancePhase4ReportTests(unittest.TestCase):
         response = self.client.get("/api/v1/compliance/frameworks", headers=self._headers())
         self.assertEqual(response.status_code, 200, response.text)
         return next(framework["id"] for framework in response.json() if framework["name"] == "SOC 2")
+
+    def _eu_ai_framework_id(self) -> str:
+        response = self.client.get("/api/v1/compliance/frameworks", headers=self._headers())
+        self.assertEqual(response.status_code, 200, response.text)
+        return next(
+            framework["id"] for framework in response.json() if framework["name"] == "EU AI Act"
+        )
 
     def _insert_policy_denial_and_recompute(self) -> None:
         with self.database.transaction() as connection:
@@ -132,6 +143,61 @@ class CompliancePhase4ReportTests(unittest.TestCase):
         self.assertIn("policy_decision evidence", payload["rendered_markdown"])
         self.assertIn("## Open Violations", payload["rendered_markdown"])
         self.assertIn("Audit hash status:", payload["rendered_markdown"])
+        self.assertIn("## Verification Manifest", payload["rendered_markdown"])
+        self.assertIn("hash=", payload["rendered_markdown"])
+        self.assertTrue(payload["summary"]["complete"])
+        self.assertTrue(payload["summary"]["verification_manifest"]["audit_range_verification"]["valid"])
+        self.assertGreaterEqual(
+            len(payload["summary"]["verification_manifest"]["source_event_hashes"]),
+            1,
+        )
+
+    def test_generate_report_contains_runtime_action_links(self) -> None:
+        with self.database.transaction() as connection:
+            action = ToolRuntimeActionRepository(
+                connection,
+                "org_default",
+                "env_default",
+            ).create_action(
+                ToolRuntimeActionCreate(
+                    request_id="req-report-runtime",
+                    correlation_id="corr-report-runtime",
+                    action_status="denied",
+                    reason_code="tool_policy_denied",
+                    payload_summary={"tool_name": "danger.delete"},
+                    error_code="tool_call_denied",
+                ),
+                created_at="2026-05-01T00:00:00+00:00",
+            )
+        recompute = self.client.post(
+            "/api/v1/compliance/evidence/recompute",
+            headers=self._headers(),
+        )
+        self.assertEqual(recompute.status_code, 201, recompute.text)
+        response = self.client.post(
+            "/api/v1/compliance/reports",
+            headers=self._headers(),
+            json={
+                "framework_id": self._eu_ai_framework_id(),
+                "name": "EU AI Evidence Report",
+                "date_from": "2020-01-01",
+                "date_to": "2030-01-01",
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+
+        generated = self.client.post(
+            f"/api/v1/compliance/reports/{response.json()['id']}/generate",
+            headers=self._headers(),
+        )
+
+        self.assertEqual(generated.status_code, 200, generated.text)
+        payload = generated.json()
+        self.assertIn(
+            action["id"],
+            payload["summary"]["verification_manifest"]["linked_runtime_action_ids"],
+        )
+        self.assertIn(f"runtime_action={action['id']}", payload["rendered_markdown"])
 
     def test_generate_report_excludes_violations_outside_period(self) -> None:
         self._insert_policy_denial_and_recompute()

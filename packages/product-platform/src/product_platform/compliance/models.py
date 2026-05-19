@@ -37,6 +37,10 @@ class AuditExportResponse(BaseModel):
     format: str
     status: str
     artifact_uri: str
+    event_count: int = 0
+    complete: bool = True
+    completeness_reason: str | None = None
+    chain_proof: dict[str, Any] = Field(default_factory=dict)
     created_by: str
     created_at: str
 
@@ -98,15 +102,35 @@ class EvidenceItemResponse(BaseModel):
     source_id: str
     title: str
     summary: str
+    source_event_hash: str | None = None
+    source_event_previous_hash: str | None = None
+    source_event_hash_algorithm: str | None = None
+    source_event_created_at: str | None = None
+    control_mapping_id: str | None = None
+    control_mapping_version: str | None = None
+    predicate_snapshot: dict[str, Any] = Field(default_factory=dict)
+    source_manifest: dict[str, Any] = Field(default_factory=dict)
+    trace_id: str | None = None
+    run_id: str | None = None
+    tool_id: str | None = None
+    policy_id: str | None = None
+    policy_version_id: str | None = None
+    artifact_checksum: str | None = None
+    chain_proof: dict[str, Any] = Field(default_factory=dict)
     freshness_at: str
     status: str
     created_at: str
 
 
 class EvidenceRecomputeResponse(BaseModel):
+    run_id: str | None = None
     scanned_event_count: int
     evidence_count: int
     refreshed_count: int
+    runtime_action_count: int = 0
+    complete: bool = True
+    cursor: dict[str, Any] = Field(default_factory=dict)
+    source_range: dict[str, Any] = Field(default_factory=dict)
 
 
 class ComplianceViolationPatchRequest(BaseModel):

@@ -165,8 +165,9 @@ from product_platform.compliance.repository import (
     ComplianceViolationStateError,
     DuplicateComplianceResourceError,
     audit_export_content,
-    audit_export_query,
+    audit_export_runtime_links,
     audit_export_response,
+    collect_audit_export_events,
     control_mapping_response,
     control_response,
     evidence_response,
@@ -4952,22 +4953,54 @@ def create_app(
 
         organization_id = _require_organization_id(current_user)
         with _audit_database().transaction() as connection:
-            row = AuditExportRepository(connection, organization_id, environment_id).create(
-                body,
-                actor_id=current_user.id,
-            )
-            response = audit_export_response(row)
             try:
-                events = AuditEventRepository(connection).query(
-                    audit_export_query(
-                        organization_id=organization_id,
-                        environment_id=environment_id,
-                        filters=response.filters,
-                    )
+                audit_repository = AuditEventRepository(connection)
+                event_set = collect_audit_export_events(
+                    audit_repository=audit_repository,
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    filters=body.filters,
                 )
-                content_type, content = audit_export_content(response=response, events=events)
+                checkpoint = audit_repository.create_checkpoint(
+                    organization_id,
+                    environment_id=environment_id,
+                    created_by=current_user.id,
+                    scope={
+                        "purpose": "audit_export",
+                        "filters": event_set.filters,
+                        "complete": event_set.complete,
+                    },
+                    signing_key=settings.session_secret,
+                )
+                chain_proof = audit_repository.export_chain_proof(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    event_ids=[event.id for event in event_set.events],
+                    checkpoint=checkpoint,
+                )
+                chain_proof["linked_runtime_actions"] = audit_export_runtime_links(
+                    connection=connection,
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    events=event_set.events,
+                )
+                row = AuditExportRepository(connection, organization_id, environment_id).create(
+                    AuditExportRequest(format=body.format, filters=event_set.filters),
+                    actor_id=current_user.id,
+                    event_count=len(event_set.events),
+                    complete=event_set.complete,
+                    completeness_reason=event_set.completeness_reason,
+                    chain_proof=chain_proof,
+                )
+                response = audit_export_response(row)
+                content_type, content = audit_export_content(
+                    response=response,
+                    events=event_set.events,
+                )
             except AuditExportValidationError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
             _create_generated_artifact(
                 connection=connection,
                 organization_id=organization_id,

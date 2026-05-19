@@ -9,6 +9,10 @@ export interface AuditExport {
   format?: string;
   artifact_uri?: string | null;
   status?: string | null;
+  event_count?: number | null;
+  complete?: boolean | null;
+  completeness_reason?: string | null;
+  chain_proof?: Record<string, unknown> | null;
   filters?: Record<string, unknown> | null;
 }
 
@@ -43,6 +47,15 @@ export interface ComplianceEvidence {
   source_id: string;
   title: string;
   summary?: string | null;
+  source_event_hash?: string | null;
+  control_mapping_version?: string | null;
+  source_manifest?: Record<string, unknown> | null;
+  chain_proof?: Record<string, unknown> | null;
+  trace_id?: string | null;
+  run_id?: string | null;
+  tool_id?: string | null;
+  policy_id?: string | null;
+  policy_version_id?: string | null;
   freshness_at?: string | null;
   status: string;
   created_at?: string | null;
@@ -53,6 +66,9 @@ export interface ComplianceEvidenceRecompute {
   evidence_count?: number;
   refreshed_count?: number;
   violation_count?: number;
+  runtime_action_count?: number;
+  complete?: boolean;
+  completeness_reason?: string | null;
 }
 
 export interface ComplianceViolation {

@@ -10,6 +10,10 @@ from product_platform.audit.events import AuditEventEnvelope
 from product_platform.audit.store import AuditEventRepository
 from product_platform.db.seed import seed_demo_data
 from product_platform.db.testing import create_migrated_test_database
+from product_platform.tool_gateway.runtime_audit import (
+    ToolRuntimeActionCreate,
+    ToolRuntimeActionRepository,
+)
 
 
 class CompliancePhase2ControlEvidenceTests(unittest.TestCase):
@@ -196,6 +200,173 @@ class CompliancePhase2ControlEvidenceTests(unittest.TestCase):
         self.assertEqual(second.json()["evidence_count"], 2)
         self.assertEqual(second.json()["refreshed_count"], 2)
         self.assertEqual(len(evidence_after_first.json()), len(evidence_after_second.json()))
+
+    def test_recompute_paginates_more_than_500_matching_events(self) -> None:
+        with self.database.transaction() as connection:
+            audit = AuditEventRepository(connection)
+            for index in range(505):
+                audit.insert(
+                    AuditEventEnvelope(
+                        organization_id="org_default",
+                        environment_id="env_default",
+                        event_type="policy.decision",
+                        source_component="policy-engine",
+                        actor_type="system",
+                        actor_id=f"bulk_{index}",
+                        resource_type="policy",
+                        resource_id=f"policy_{index}",
+                        decision="allow",
+                        severity="info",
+                        policy_id=f"policy_{index}",
+                        payload_json={"matched_rule": "bulk_allow", "index": index},
+                        created_at=(
+                            f"2026-05-01T{(index // 3600) % 24:02d}:"
+                            f"{(index // 60) % 60:02d}:{index % 60:02d}+00:00"
+                        ),
+                    )
+                )
+
+        recompute = self.client.post(
+            "/api/v1/compliance/evidence/recompute",
+            headers=self._headers(),
+        )
+
+        self.assertEqual(recompute.status_code, 201, recompute.text)
+        payload = recompute.json()
+        self.assertTrue(payload["complete"])
+        self.assertEqual(payload["scanned_event_count"], 1010)
+        self.assertEqual(payload["evidence_count"], 1010)
+        self.assertEqual(payload["cursor"]["page_size"], 500)
+
+    def test_violation_refresh_paginates_more_than_500_matching_events(self) -> None:
+        denied_event_id = ""
+        with self.database.transaction() as connection:
+            audit = AuditEventRepository(connection)
+            for index in range(501):
+                event = audit.insert(
+                    AuditEventEnvelope(
+                        organization_id="org_default",
+                        environment_id="env_default",
+                        event_type="policy.decision",
+                        source_component="policy-engine",
+                        actor_type="system",
+                        actor_id=f"bulk_violation_{index}",
+                        resource_type="policy",
+                        resource_id=f"policy_violation_{index}",
+                        decision="deny" if index == 0 else "allow",
+                        severity="warning" if index == 0 else "info",
+                        policy_id=f"policy_violation_{index}",
+                        payload_json={
+                            "matched_rule": "oldest_deny" if index == 0 else "bulk_allow",
+                            "reason": "oldest denied event",
+                        },
+                        created_at=(
+                            f"2026-05-01T{(index // 3600) % 24:02d}:"
+                            f"{(index // 60) % 60:02d}:{index % 60:02d}+00:00"
+                        ),
+                    )
+                )
+                if index == 0:
+                    denied_event_id = event.id
+
+        recompute = self.client.post(
+            "/api/v1/compliance/evidence/recompute",
+            headers=self._headers(),
+        )
+        violations = self.client.get(
+            "/api/v1/compliance/violations",
+            headers=self._headers(),
+            params={"status": "open"},
+        )
+
+        self.assertEqual(recompute.status_code, 201, recompute.text)
+        source_ids = {violation["source_event_id"] for violation in violations.json()}
+        self.assertIn(denied_event_id, source_ids)
+
+    def test_evidence_contains_source_hashes_and_mapping_snapshot(self) -> None:
+        event_id = self._insert_audit_event(
+            AuditEventEnvelope(
+                organization_id="org_default",
+                environment_id="env_default",
+                event_type="policy.decision",
+                source_component="policy-engine",
+                actor_type="user",
+                actor_id="user_policy",
+                agent_id="agent_compliance",
+                resource_type="policy",
+                resource_id="policy_hash",
+                decision="allow",
+                severity="info",
+                correlation_id="corr-hash",
+                trace_id="trace-hash",
+                policy_id="policy_hash",
+                policy_version_id="pv_hash",
+                payload_json={"matched_rule": "allow_hash", "run_id": "run_hash"},
+            )
+        )
+
+        recompute = self.client.post(
+            "/api/v1/compliance/evidence/recompute",
+            headers=self._headers(),
+        )
+        evidence = self.client.get(
+            "/api/v1/compliance/evidence",
+            headers=self._headers(),
+            params={"status": "fresh"},
+        )
+
+        self.assertEqual(recompute.status_code, 201, recompute.text)
+        item = next(item for item in evidence.json() if item["source_id"] == event_id)
+        self.assertIsNotNone(item["source_event_hash"])
+        self.assertEqual("sha256", item["source_event_hash_algorithm"])
+        self.assertEqual("trace-hash", item["trace_id"])
+        self.assertEqual("run_hash", item["run_id"])
+        self.assertEqual("policy_hash", item["policy_id"])
+        self.assertEqual("pv_hash", item["policy_version_id"])
+        self.assertEqual("v1", item["control_mapping_version"])
+        self.assertEqual({}, item["predicate_snapshot"])
+        self.assertEqual(event_id, item["source_manifest"]["source_id"])
+        self.assertEqual(item["source_event_hash"], item["chain_proof"]["hash_chain"]["current_hash"])
+
+    def test_tool_runtime_action_appears_in_compliance_evidence(self) -> None:
+        with self.database.transaction() as connection:
+            action = ToolRuntimeActionRepository(
+                connection,
+                "org_default",
+                "env_default",
+            ).create_action(
+                ToolRuntimeActionCreate(
+                    request_id="req-runtime-evidence",
+                    correlation_id="corr-runtime-evidence",
+                    action_status="denied",
+                    reason_code="policy_denied",
+                    payload_summary={"tool_name": "danger.delete"},
+                    error_code="tool_call_denied",
+                ),
+                created_at="2026-05-01T00:00:00+00:00",
+            )
+
+        recompute = self.client.post(
+            "/api/v1/compliance/evidence/recompute",
+            headers=self._headers(),
+        )
+        evidence = self.client.get(
+            "/api/v1/compliance/evidence",
+            headers=self._headers(),
+        )
+
+        self.assertEqual(recompute.status_code, 201, recompute.text)
+        runtime_items = [
+            item for item in evidence.json() if item["source_type"] == "tool_runtime_action"
+        ]
+        self.assertEqual(1, len(runtime_items))
+        self.assertEqual(action["id"], runtime_items[0]["source_id"])
+        self.assertEqual("LOG-1", runtime_items[0]["control_code"])
+        self.assertEqual("tool-runtime-action-v1", runtime_items[0]["control_mapping_version"])
+        self.assertEqual(
+            "req-runtime-evidence",
+            runtime_items[0]["source_manifest"]["request_id"],
+        )
 
     def test_custom_mapping_predicate_matches_payload_fields(self) -> None:
         controls = self.client.get("/api/v1/compliance/controls", headers=self._headers())

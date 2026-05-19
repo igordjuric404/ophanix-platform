@@ -1,5 +1,96 @@
 # Feature Audit: Audit Logs and Compliance Evidence
 
+## Remediation Summary
+
+Date of remediation: 2026-05-19
+
+Total findings in this report: 4
+
+Number fixed: 4
+
+Number partially fixed: 0
+
+Number blocked: 0
+
+Number already fixed: 0
+
+Files changed:
+- `docs/audits/features/audit-compliance-evidence/report-v1`
+- `packages/product-platform/src/product_platform/db/migrations/0069_audit_immutability_checkpoints.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0069_audit_immutability_checkpoints.down.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0070_audit_export_integrity_metadata.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0070_audit_export_integrity_metadata.down.sql`
+- `packages/product-platform/src/product_platform/audit/hash_chain.py`
+- `packages/product-platform/src/product_platform/audit/store.py`
+- `packages/product-platform/src/product_platform/compliance/models.py`
+- `packages/product-platform/src/product_platform/compliance/repository.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/tests/test_audit_phase3.py`
+- `packages/product-platform/tests/test_compliance_phase1.py`
+- `packages/product-platform/src/product_platform/db/migrations/0071_evidence_source_verification.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0071_evidence_source_verification.down.sql`
+- `packages/product-platform/tests/test_compliance_phase2.py`
+- `packages/product-platform/tests/test_compliance_phase3.py`
+- `packages/product-platform/tests/test_compliance_phase4.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+- `packages/product-platform/frontend/src/api/compliance.ts`
+- `packages/product-platform/frontend/src/features/compliance/CompliancePage.tsx`
+- `packages/product-platform/frontend/src/features/compliance/CompliancePage.test.tsx`
+- `packages/product-platform/src/ophanix_tool_gateway/sdk.py`
+- `packages/product-platform/tests/test_tool_gateway_sdk_phase2.py`
+- `packages/ophanix-tool-gateway-sdk/src/ophanix_tool_gateway/sdk.py`
+- `packages/ophanix-tool-gateway-sdk/tests/test_sdk_behavior.py`
+- `docs/product-platform-worktree/execution-logs/audit-compliance-evidence-report-v1/00-execution-index.md`
+- `docs/product-platform-worktree/execution-logs/audit-compliance-evidence-report-v1/phase-01-audit-explorer-export.md`
+- `docs/product-platform-worktree/execution-logs/audit-compliance-evidence-report-v1/phase-02-control-map-evidence-recompute.md`
+- `docs/product-platform-worktree/execution-logs/audit-compliance-evidence-report-v1/phase-03-violations.md`
+- `docs/product-platform-worktree/execution-logs/audit-compliance-evidence-report-v1/phase-04-report-builder.md`
+
+Tests added or updated:
+- `tests/test_audit_phase3.py::AuditPhase3Tests::test_audit_event_and_hash_rows_are_append_only`
+- `tests/test_audit_phase3.py::AuditPhase3Tests::test_checkpoint_detects_missing_audit_row`
+- `tests/test_compliance_phase1.py::CompliancePhase1AuditExplorerTests::test_audit_export_paginates_and_marks_limited_outputs`
+- Updated `tests/test_compliance_phase1.py::CompliancePhase1AuditExplorerTests::test_audit_export_stores_requested_filters`
+- `tests/test_compliance_phase2.py::CompliancePhase2ControlEvidenceTests::test_recompute_paginates_more_than_500_matching_events`
+- `tests/test_compliance_phase2.py::CompliancePhase2ControlEvidenceTests::test_violation_refresh_paginates_more_than_500_matching_events`
+- `tests/test_compliance_phase2.py::CompliancePhase2ControlEvidenceTests::test_evidence_contains_source_hashes_and_mapping_snapshot`
+- `tests/test_compliance_phase2.py::CompliancePhase2ControlEvidenceTests::test_tool_runtime_action_appears_in_compliance_evidence`
+- `tests/test_compliance_phase3.py::CompliancePhase3ViolationTests::test_tool_runtime_denial_creates_open_violation`
+- `tests/test_compliance_phase4.py::CompliancePhase4ReportTests::test_generate_report_selects_evidence_and_open_violations`
+- `tests/test_compliance_phase4.py::CompliancePhase4ReportTests::test_generate_report_contains_runtime_action_links`
+- `tests/test_db_phase1.py::DatabaseMigrationPhase1Tests::test_migration_applies_to_empty_database`
+- `tests/test_db_phase1.py::DatabaseMigrationPhase1Tests::test_migration_can_be_rolled_back`
+- `frontend/src/features/compliance/CompliancePage.test.tsx`
+- `tests/test_tool_gateway_sdk_phase2.py::ToolGatewaySdkPhase2Tests::test_error_event_hook_includes_gateway_request_and_correlation_ids`
+- `tests/test_sdk_behavior.py::StandaloneSdkBehaviorTests::test_error_event_hook_includes_response_request_and_correlation_ids`
+- `tests/test_sdk_behavior.py::StandaloneSdkBehaviorTests::test_denied_event_hook_includes_response_request_and_correlation_ids`
+
+Validation commands run:
+- `PYTHONPATH=src python3 -m pytest tests/test_audit_phase3.py`
+- `PYTHONPATH=src python3 -m pytest tests/test_compliance_phase1.py`
+- `PYTHONPATH=src python3 -m pytest tests/test_compliance_phase2.py`
+- `PYTHONPATH=src python3 -m pytest tests/test_compliance_phase3.py`
+- `PYTHONPATH=src python3 -m pytest tests/test_tool_gateway_sdk_phase2.py`
+- `PYTHONPATH=src python3 -m pytest tests/test_tool_gateway_runtime_audit_phase1.py tests/test_tool_gateway_runtime_audit_phase2.py tests/test_tool_gateway_runtime_audit_phase3.py`
+- `PYTHONPATH=src python3 -m pytest tests/test_sdk_behavior.py`
+- `PYTHONPATH=src python3 -m pytest tests/test_audit_phase3.py tests/test_compliance_phase1.py tests/test_compliance_phase2.py tests/test_compliance_phase3.py tests/test_compliance_phase4.py tests/test_tool_gateway_sdk_phase2.py tests/test_tool_gateway_runtime_audit_phase1.py tests/test_tool_gateway_runtime_audit_phase2.py tests/test_tool_gateway_runtime_audit_phase3.py`
+- `PYTHONPATH=src python3 -m pytest tests/test_db_phase1.py::DatabaseMigrationPhase1Tests::test_migration_applies_to_empty_database tests/test_db_phase1.py::DatabaseMigrationPhase1Tests::test_migration_can_be_rolled_back`
+- `npm test -- src/features/compliance/CompliancePage.test.tsx`
+- `python3 -m ruff check src tests` in `packages/product-platform`
+- `python3 -m ruff check src tests` in `packages/ophanix-tool-gateway-sdk`
+- `python3 -m mypy` in `packages/product-platform`
+- `python3 -m mypy` in `packages/ophanix-tool-gateway-sdk`
+- `python3 -m build --wheel --outdir /tmp/ophanix-product-platform-build`
+- `python3 -m build --wheel --outdir /tmp/ophanix-tool-gateway-sdk-build`
+- `npm run lint`
+- `npm run typecheck`
+- `npm run build`
+
+Remaining risks:
+- None for the selected audit findings.
+- Future scalability follow-up: worker-backed async exports may still be useful for environments that need exports beyond the current synchronous ceiling; current exports are no longer silently truncated and are explicitly marked complete or partial.
+- Frontend build warning: Vite reported chunks larger than 500 kB after minification; this is outside the selected audit scope.
+
 ## 1. Scope
 
 This audit covers audit event persistence, hash chaining, compliance evidence recomputation, exports, reports, evidence packs, runtime/tool audit integration, streaming/export readiness, and UI download behavior. It inspects `product_platform/audit`, `product_platform/compliance`, compliance migrations, artifact repositories, audit/compliance routes in `api/app.py`, and frontend compliance pages. Relevant benchmarks are Microsoft admin/security visibility, LangSmith/Galileo trace/evidence workflows, AWS auditability, JFrog artifact evidence, and enterprise SIEM/export expectations. Out of scope: trace-level observability, covered in OBS.
@@ -23,6 +114,40 @@ Current workflow: the system writes audit events, computes some compliance evide
 ## 4. Findings
 
 ### F-AUD-001 [P0] [Security] Audit hash chain is tamper-evident but not immutable or externally anchored
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Added PostgreSQL append-only triggers for `audit_events`, `audit_event_hashes`, and audit hash checkpoints. Added signed audit hash checkpoints, checkpoint-aware range verification, exportable chain proof metadata, and audit export artifacts containing selected event hash metadata and checkpoint signatures.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/db/migrations/0069_audit_immutability_checkpoints.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0069_audit_immutability_checkpoints.down.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0070_audit_export_integrity_metadata.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0070_audit_export_integrity_metadata.down.sql`
+- `packages/product-platform/src/product_platform/audit/hash_chain.py`
+- `packages/product-platform/src/product_platform/audit/store.py`
+- `packages/product-platform/src/product_platform/compliance/models.py`
+- `packages/product-platform/src/product_platform/compliance/repository.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/tests/test_audit_phase3.py`
+- `packages/product-platform/tests/test_compliance_phase1.py`
+
+**Tests added or updated:**
+- `tests/test_audit_phase3.py::AuditPhase3Tests::test_audit_event_and_hash_rows_are_append_only`
+- `tests/test_audit_phase3.py::AuditPhase3Tests::test_checkpoint_detects_missing_audit_row`
+- `tests/test_compliance_phase1.py::CompliancePhase1AuditExplorerTests::test_audit_export_stores_requested_filters`
+
+**Validation performed:**
+- `PYTHONPATH=src python3 -m pytest tests/test_audit_phase3.py` - passed, 8 tests.
+- `PYTHONPATH=src python3 -m pytest tests/test_compliance_phase1.py` - passed, 6 tests.
+- `PYTHONPATH=src python3 -m pytest tests/test_audit_phase3.py tests/test_compliance_phase1.py` - passed, 14 tests.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Risky
 
@@ -76,6 +201,51 @@ Audit trails may not satisfy security or compliance buyers after an incident.
 
 ### F-AUD-002 [P0] [Scalability] Compliance recomputation and exports silently miss events at scale
 
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Audit exports now paginate matching events, persist event counts, include explicit completeness metadata, include chain proof metadata, and link matching Tool Gateway runtime actions. Compliance evidence recompute and violation refresh now page through all matching audit events rather than silently stopping at 500. Recompute runs are persisted with cursor/source-range metadata, evidence rows include source hashes and manifests, generated reports include verification/completeness manifests, and the UI warns on partial/capped audit exports.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/db/migrations/0070_audit_export_integrity_metadata.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0070_audit_export_integrity_metadata.down.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0071_evidence_source_verification.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0071_evidence_source_verification.down.sql`
+- `packages/product-platform/src/product_platform/compliance/models.py`
+- `packages/product-platform/src/product_platform/compliance/repository.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/frontend/src/api/compliance.ts`
+- `packages/product-platform/frontend/src/features/compliance/CompliancePage.tsx`
+- `packages/product-platform/frontend/src/features/compliance/CompliancePage.test.tsx`
+- `packages/product-platform/tests/test_compliance_phase1.py`
+- `packages/product-platform/tests/test_compliance_phase2.py`
+- `packages/product-platform/tests/test_compliance_phase4.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+
+**Tests added or updated:**
+- `tests/test_compliance_phase1.py::CompliancePhase1AuditExplorerTests::test_audit_export_paginates_and_marks_limited_outputs`
+- `tests/test_compliance_phase1.py::CompliancePhase1AuditExplorerTests::test_audit_export_stores_requested_filters`
+- `tests/test_compliance_phase2.py::CompliancePhase2ControlEvidenceTests::test_recompute_paginates_more_than_500_matching_events`
+- `tests/test_compliance_phase2.py::CompliancePhase2ControlEvidenceTests::test_violation_refresh_paginates_more_than_500_matching_events`
+- `tests/test_compliance_phase4.py::CompliancePhase4ReportTests::test_generate_report_selects_evidence_and_open_violations`
+- `frontend/src/features/compliance/CompliancePage.test.tsx`
+- `tests/test_db_phase1.py::DatabaseMigrationPhase1Tests::test_migration_applies_to_empty_database`
+- `tests/test_db_phase1.py::DatabaseMigrationPhase1Tests::test_migration_can_be_rolled_back`
+
+**Validation performed:**
+- `PYTHONPATH=src python3 -m pytest tests/test_compliance_phase1.py` - passed, 6 tests.
+- `PYTHONPATH=src python3 -m pytest tests/test_compliance_phase2.py` - passed, 9 tests.
+- `PYTHONPATH=src python3 -m pytest tests/test_compliance_phase1.py tests/test_compliance_phase4.py` - passed, 12 tests.
+- `PYTHONPATH=src python3 -m pytest tests/test_audit_phase3.py tests/test_compliance_phase1.py tests/test_compliance_phase2.py tests/test_compliance_phase3.py tests/test_compliance_phase4.py tests/test_tool_gateway_sdk_phase2.py tests/test_tool_gateway_runtime_audit_phase1.py tests/test_tool_gateway_runtime_audit_phase2.py tests/test_tool_gateway_runtime_audit_phase3.py` - passed, 84 tests.
+- `PYTHONPATH=src python3 -m pytest tests/test_db_phase1.py::DatabaseMigrationPhase1Tests::test_migration_applies_to_empty_database tests/test_db_phase1.py::DatabaseMigrationPhase1Tests::test_migration_can_be_rolled_back` - passed, 2 tests.
+- `npm test -- src/features/compliance/CompliancePage.test.tsx` - passed, 1 test file / 2 tests.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
+
 **Status:** Incorrect
 
 **Current implementation:**
@@ -128,6 +298,45 @@ Compliance reports may be materially false in larger deployments.
 
 ### F-AUD-003 [P1] [Compliance] Evidence packs are summaries, not auditor-verifiable evidence objects
 
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Added auditor-verifiable evidence metadata to evidence items, including source event hash fields, control mapping ID/version, predicate snapshot, source manifest, trace/run/tool/policy identifiers, artifact checksum, and chain proof JSON. Compliance recompute persists deterministic source manifests and source hash data. Report JSON and Markdown now include a verification manifest, evidence source hashes, mapping versions, runtime action IDs, policy IDs, audit range verification, and checkpoint metadata. The compliance UI surfaces evidence hashes/mapping versions and report verification status.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/db/migrations/0071_evidence_source_verification.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0071_evidence_source_verification.down.sql`
+- `packages/product-platform/src/product_platform/compliance/models.py`
+- `packages/product-platform/src/product_platform/compliance/repository.py`
+- `packages/product-platform/frontend/src/api/compliance.ts`
+- `packages/product-platform/frontend/src/features/compliance/CompliancePage.tsx`
+- `packages/product-platform/frontend/src/features/compliance/CompliancePage.test.tsx`
+- `packages/product-platform/tests/test_compliance_phase2.py`
+- `packages/product-platform/tests/test_compliance_phase4.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+
+**Tests added or updated:**
+- `tests/test_compliance_phase2.py::CompliancePhase2ControlEvidenceTests::test_evidence_contains_source_hashes_and_mapping_snapshot`
+- `tests/test_compliance_phase2.py::CompliancePhase2ControlEvidenceTests::test_recompute_refreshes_existing_evidence_without_duplicates`
+- `tests/test_compliance_phase4.py::CompliancePhase4ReportTests::test_generate_report_selects_evidence_and_open_violations`
+- `tests/test_compliance_phase4.py::CompliancePhase4ReportTests::test_generate_report_contains_runtime_action_links`
+- `frontend/src/features/compliance/CompliancePage.test.tsx`
+- `tests/test_db_phase1.py::DatabaseMigrationPhase1Tests::test_migration_applies_to_empty_database`
+- `tests/test_db_phase1.py::DatabaseMigrationPhase1Tests::test_migration_can_be_rolled_back`
+
+**Validation performed:**
+- `PYTHONPATH=src python3 -m pytest tests/test_compliance_phase2.py` - passed, 9 tests.
+- `PYTHONPATH=src python3 -m pytest tests/test_compliance_phase1.py tests/test_compliance_phase4.py` - passed, 12 tests.
+- `PYTHONPATH=src python3 -m pytest tests/test_audit_phase3.py tests/test_compliance_phase1.py tests/test_compliance_phase2.py tests/test_compliance_phase3.py tests/test_compliance_phase4.py tests/test_tool_gateway_sdk_phase2.py tests/test_tool_gateway_runtime_audit_phase1.py tests/test_tool_gateway_runtime_audit_phase2.py tests/test_tool_gateway_runtime_audit_phase3.py` - passed, 84 tests.
+- `PYTHONPATH=src python3 -m pytest tests/test_db_phase1.py::DatabaseMigrationPhase1Tests::test_migration_applies_to_empty_database tests/test_db_phase1.py::DatabaseMigrationPhase1Tests::test_migration_can_be_rolled_back` - passed, 2 tests.
+- `npm test -- src/features/compliance/CompliancePage.test.tsx` - passed, 1 test file / 2 tests.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
+
 **Status:** Partially Implemented
 
 **Current implementation:**
@@ -179,6 +388,55 @@ Evidence may be persuasive in UI but weak in formal audits.
 **Affects stated Ophanix product promise:** Yes
 
 ### F-AUD-004 [P1] [Observability] Tool Gateway runtime audit is not unified with compliance and export flows
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Tool Gateway runtime actions now appear as compliance evidence under the LOG-1 control, denied/high-risk runtime action rows create compliance violations, and SDK error/denied telemetry preserves gateway request and correlation IDs in emitted telemetry events. Audit exports include linked runtime action metadata when exported audit events share correlation IDs, and generated reports include linked runtime action IDs, policy IDs, and policy version IDs in their verification manifest, JSON evidence rows, Markdown output, and UI preview.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/db/migrations/0071_evidence_source_verification.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0071_evidence_source_verification.down.sql`
+- `packages/product-platform/src/product_platform/compliance/models.py`
+- `packages/product-platform/src/product_platform/compliance/repository.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/frontend/src/api/compliance.ts`
+- `packages/product-platform/frontend/src/features/compliance/CompliancePage.tsx`
+- `packages/product-platform/frontend/src/features/compliance/CompliancePage.test.tsx`
+- `packages/product-platform/tests/test_compliance_phase1.py`
+- `packages/product-platform/tests/test_compliance_phase2.py`
+- `packages/product-platform/tests/test_compliance_phase3.py`
+- `packages/product-platform/tests/test_compliance_phase4.py`
+- `packages/product-platform/src/ophanix_tool_gateway/sdk.py`
+- `packages/product-platform/tests/test_tool_gateway_sdk_phase2.py`
+- `packages/ophanix-tool-gateway-sdk/src/ophanix_tool_gateway/sdk.py`
+- `packages/ophanix-tool-gateway-sdk/tests/test_sdk_behavior.py`
+
+**Tests added or updated:**
+- `tests/test_compliance_phase1.py::CompliancePhase1AuditExplorerTests::test_audit_export_stores_requested_filters`
+- `tests/test_compliance_phase2.py::CompliancePhase2ControlEvidenceTests::test_tool_runtime_action_appears_in_compliance_evidence`
+- `tests/test_compliance_phase3.py::CompliancePhase3ViolationTests::test_tool_runtime_denial_creates_open_violation`
+- `tests/test_compliance_phase4.py::CompliancePhase4ReportTests::test_generate_report_contains_runtime_action_links`
+- `frontend/src/features/compliance/CompliancePage.test.tsx`
+- `tests/test_tool_gateway_sdk_phase2.py::ToolGatewaySdkPhase2Tests::test_error_event_hook_includes_gateway_request_and_correlation_ids`
+- `tests/test_sdk_behavior.py::StandaloneSdkBehaviorTests::test_error_event_hook_includes_response_request_and_correlation_ids`
+- `tests/test_sdk_behavior.py::StandaloneSdkBehaviorTests::test_denied_event_hook_includes_response_request_and_correlation_ids`
+
+**Validation performed:**
+- `PYTHONPATH=src python3 -m pytest tests/test_compliance_phase2.py` - passed, 9 tests.
+- `PYTHONPATH=src python3 -m pytest tests/test_compliance_phase3.py` - passed, 5 tests.
+- `PYTHONPATH=src python3 -m pytest tests/test_compliance_phase1.py tests/test_compliance_phase4.py` - passed, 12 tests.
+- `PYTHONPATH=src python3 -m pytest tests/test_tool_gateway_sdk_phase2.py` - passed, 35 tests.
+- `PYTHONPATH=src python3 -m pytest tests/test_tool_gateway_runtime_audit_phase1.py tests/test_tool_gateway_runtime_audit_phase2.py tests/test_tool_gateway_runtime_audit_phase3.py` - passed, 15 tests.
+- `PYTHONPATH=src python3 -m pytest tests/test_sdk_behavior.py` in `packages/ophanix-tool-gateway-sdk` - passed, 44 tests.
+- `PYTHONPATH=src python3 -m pytest tests/test_audit_phase3.py tests/test_compliance_phase1.py tests/test_compliance_phase2.py tests/test_compliance_phase3.py tests/test_compliance_phase4.py tests/test_tool_gateway_sdk_phase2.py tests/test_tool_gateway_runtime_audit_phase1.py tests/test_tool_gateway_runtime_audit_phase2.py tests/test_tool_gateway_runtime_audit_phase3.py` - passed, 84 tests.
+- `npm test -- src/features/compliance/CompliancePage.test.tsx` - passed, 1 test file / 2 tests.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Partially Implemented
 
@@ -279,4 +537,3 @@ None.
 ## 7. Feature-Level Target State
 
 Audit and compliance should form a verifiable evidence graph. Audit events should be append-only, hash-chained, externally anchored, and exportable with proofs. Evidence recomputation should be complete, asynchronous at scale, and tied to source event hashes, policy/control versions, traces, runtime actions, artifacts, and signatures. Tool calls, MCP calls, plugin installs, credential access, and runtime sessions should feed the same evidence model. UI should clearly show export completeness and verification status. Tests should prove tamper detection, pagination, evidence reproducibility, and runtime/tool inclusion.
-

@@ -804,6 +804,52 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
         self.assertIsInstance(success["elapsed_ms"], float)
         self.assertEqual(success["schema_version"], "tool-gateway-sdk.telemetry.v1")
 
+    def test_error_event_hook_includes_response_request_and_correlation_ids(self) -> None:
+        events: list[Mapping[str, Any]] = []
+        client = _client(
+            lambda _request: httpx.Response(
+                502,
+                json={
+                    "request_id": "req-error-event",
+                    "correlation_id": "corr-error-event",
+                    "error": {"code": "upstream_error"},
+                },
+            ),
+            event_hook=events.append,
+        )
+
+        with self.assertRaises(ToolGatewayError):
+            client.call_tool("claims.lookup", {"claim_id": "claim_123"})
+
+        error = [event for event in events if event["event"] == "tool_call.error"][0]
+        self.assertEqual("req-error-event", error["request_id"])
+        self.assertEqual("corr-error-event", error["correlation_id"])
+
+    def test_denied_event_hook_includes_response_request_and_correlation_ids(self) -> None:
+        events: list[Mapping[str, Any]] = []
+        client = _client(
+            lambda _request: httpx.Response(
+                403,
+                json={
+                    "request_id": "req-denied-event",
+                    "correlation_id": "corr-denied-event",
+                    "reason_code": "tool_policy_denied",
+                    "error": {
+                        "code": "tool_call_denied",
+                        "message": "Tool call denied.",
+                    },
+                },
+            ),
+            event_hook=events.append,
+        )
+
+        with self.assertRaises(ToolDeniedError):
+            client.call_tool("claims.lookup", {"claim_id": "claim_123"})
+
+        denied = [event for event in events if event["event"] == "tool_call.denied"][0]
+        self.assertEqual("req-denied-event", denied["request_id"])
+        self.assertEqual("corr-denied-event", denied["correlation_id"])
+
     def test_allow_insecure_http_for_non_local_gateway_warns(self) -> None:
         with self.assertWarns(RuntimeWarning):
             _client(

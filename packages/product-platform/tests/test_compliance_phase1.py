@@ -10,8 +10,13 @@ from product_platform import create_app
 from product_platform.api.settings import Settings
 from product_platform.audit.events import AuditEventEnvelope
 from product_platform.audit.store import AuditEventRepository
+from product_platform.compliance.repository import collect_audit_export_events
 from product_platform.db.seed import seed_demo_data
 from product_platform.db.testing import create_migrated_test_database
+from product_platform.tool_gateway.runtime_audit import (
+    ToolRuntimeActionCreate,
+    ToolRuntimeActionRepository,
+)
 
 
 class CompliancePhase1AuditExplorerTests(unittest.TestCase):
@@ -100,6 +105,22 @@ class CompliancePhase1AuditExplorerTests(unittest.TestCase):
         self.assertEqual(events[0]["resource_id"], "peval_1")
 
     def test_audit_export_stores_requested_filters(self) -> None:
+        with self.database.transaction() as connection:
+            ToolRuntimeActionRepository(
+                connection,
+                "org_default",
+                "env_default",
+            ).create_action(
+                ToolRuntimeActionCreate(
+                    request_id="req-export-runtime",
+                    correlation_id="corr-compliance",
+                    action_status="denied",
+                    reason_code="tool_policy_denied",
+                    payload_summary={"tool_name": "danger.delete"},
+                    error_code="tool_call_denied",
+                ),
+                created_at="2026-05-01T00:00:00+00:00",
+            )
         response = self.client.post(
             "/api/v1/audit/export",
             headers=self._headers(),
@@ -119,6 +140,11 @@ class CompliancePhase1AuditExplorerTests(unittest.TestCase):
         self.assertEqual(payload["organization_id"], "org_default")
         self.assertEqual(payload["format"], "json")
         self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["event_count"], 1)
+        self.assertTrue(payload["complete"])
+        self.assertIsNone(payload["completeness_reason"])
+        self.assertTrue(payload["chain_proof"]["range_verification"]["valid"])
+        self.assertIsNotNone(payload["chain_proof"]["checkpoint"]["signature"])
         self.assertTrue(payload["artifact_uri"].startswith("audit-export://"))
         self.assertNotIn("empty", payload["filters"])
         self.assertEqual(
@@ -140,8 +166,57 @@ class CompliancePhase1AuditExplorerTests(unittest.TestCase):
         self.assertEqual(download.status_code, 200, download.text)
         content = json.loads(base64.b64decode(download.json()["content_base64"]))
         self.assertEqual(content["event_count"], 1)
+        self.assertTrue(content["complete"])
+        self.assertTrue(content["integrity"]["chain_proof"]["range_verification"]["valid"])
+        self.assertEqual(
+            "req-export-runtime",
+            content["integrity"]["chain_proof"]["linked_runtime_actions"][0]["request_id"],
+        )
+        self.assertIn("hash_chain", content["events"][0])
         self.assertEqual(content["events"][0]["event_type"], "policy.decision")
         self.assertEqual(content["events"][0]["actor_id"], "user_policy")
+
+    def test_audit_export_paginates_and_marks_limited_outputs(self) -> None:
+        with self.database.transaction() as connection:
+            audit = AuditEventRepository(connection)
+            for index in range(5):
+                audit.insert(
+                    AuditEventEnvelope(
+                        organization_id="org_default",
+                        environment_id="env_default",
+                        event_type="policy.decision",
+                        source_component="policy-engine",
+                        actor_type="system",
+                        actor_id=f"system_{index}",
+                        decision="allow",
+                        severity="info",
+                        payload_json={"index": index},
+                        created_at=f"2026-05-01T00:00:0{index}+00:00",
+                    )
+                )
+            complete = collect_audit_export_events(
+                audit_repository=audit,
+                organization_id="org_default",
+                environment_id="env_default",
+                filters={"event_type": "policy.decision"},
+                page_size=2,
+                max_events=10,
+            )
+            limited = collect_audit_export_events(
+                audit_repository=audit,
+                organization_id="org_default",
+                environment_id="env_default",
+                filters={"event_type": "policy.decision", "limit": 3},
+                page_size=2,
+                max_events=10,
+            )
+
+        self.assertGreater(len(complete.events), 3)
+        self.assertTrue(complete.complete)
+        self.assertIsNone(complete.completeness_reason)
+        self.assertEqual(len(limited.events), 3)
+        self.assertFalse(limited.complete)
+        self.assertEqual(limited.completeness_reason, "requested_limit_reached")
 
     def test_audit_export_rejects_unknown_filters(self) -> None:
         response = self.client.post(

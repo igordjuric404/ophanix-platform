@@ -10,6 +10,10 @@ from product_platform.audit.events import AuditEventEnvelope
 from product_platform.audit.store import AuditEventQuery, AuditEventRepository
 from product_platform.db.seed import seed_demo_data
 from product_platform.db.testing import create_migrated_test_database
+from product_platform.tool_gateway.runtime_audit import (
+    ToolRuntimeActionCreate,
+    ToolRuntimeActionRepository,
+)
 
 
 class CompliancePhase3ViolationTests(unittest.TestCase):
@@ -85,6 +89,70 @@ class CompliancePhase3ViolationTests(unittest.TestCase):
         self.assertEqual("open", violation["status"])
         self.assertEqual("audit_event", violation["source_type"])
         self.assertIn("blocked by runtime policy", violation["reason"])
+
+    def test_tool_runtime_denial_creates_open_violation(self) -> None:
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO agents (
+                    id, organization_id, environment_id, name, description, framework,
+                    runtime_type, owner_user_id, sponsor_user_id, status, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "agent_runtime",
+                    "org_default",
+                    "env_default",
+                    "Runtime Test Agent",
+                    "Runtime violation fixture.",
+                    "custom",
+                    "http",
+                    "user_admin",
+                    "user_admin",
+                    "active",
+                    "2026-05-01T00:00:00+00:00",
+                    "2026-05-01T00:00:00+00:00",
+                ),
+            )
+            action = ToolRuntimeActionRepository(
+                connection,
+                "org_default",
+                "env_default",
+            ).create_action(
+                ToolRuntimeActionCreate(
+                    request_id="req-runtime-denied",
+                    correlation_id="corr-runtime-denied",
+                    agent_id="agent_runtime",
+                    action_status="denied",
+                    reason_code="tool_policy_denied",
+                    payload_summary={"tool_name": "danger.delete"},
+                    error_code="tool_call_denied",
+                ),
+                created_at="2026-05-01T00:00:00+00:00",
+            )
+
+        recompute = self.client.post(
+            "/api/v1/compliance/evidence/recompute",
+            headers=self._headers(),
+        )
+        listed = self.client.get(
+            "/api/v1/compliance/violations",
+            headers=self._headers(),
+            params={"status": "open"},
+        )
+
+        self.assertEqual(recompute.status_code, 201, recompute.text)
+        runtime_violations = [
+            violation
+            for violation in listed.json()
+            if violation["source_type"] == "tool_runtime_action"
+            and violation["source_id"] == action["id"]
+        ]
+        self.assertEqual(1, len(runtime_violations))
+        self.assertEqual("LOG-1", runtime_violations[0]["control_code"])
+        self.assertEqual("agent_runtime", runtime_violations[0]["agent_id"])
+        self.assertIn("tool_policy_denied", runtime_violations[0]["reason"])
 
     def test_lists_open_violations_including_missing_controls(self) -> None:
         self._create_runtime_denial_violation()

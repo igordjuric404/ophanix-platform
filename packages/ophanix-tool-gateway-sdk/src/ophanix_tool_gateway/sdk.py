@@ -656,6 +656,7 @@ class OphanixToolGatewayClient:
                         "event": "tool_call.error",
                         "tool_name": normalized_tool_name,
                         "code": "transport_error",
+                        "correlation_id": normalized_correlation_id,
                         "elapsed_ms": _elapsed_ms(started_at),
                     }
                 )
@@ -666,6 +667,7 @@ class OphanixToolGatewayClient:
                         "event": "tool_call.error",
                         "tool_name": normalized_tool_name,
                         "code": "transport_error",
+                        "correlation_id": normalized_correlation_id,
                         "elapsed_ms": _elapsed_ms(started_at),
                     }
                 )
@@ -692,6 +694,9 @@ class OphanixToolGatewayClient:
                     "event": "tool_call.denied",
                     "tool_name": normalized_tool_name,
                     "status_code": response.status_code,
+                    "request_id": _optional_string(response_body.get("request_id")),
+                    "correlation_id": _optional_string(response_body.get("correlation_id"))
+                    or normalized_correlation_id,
                     "elapsed_ms": _elapsed_ms(started_at),
                 }
             )
@@ -702,6 +707,9 @@ class OphanixToolGatewayClient:
                     "event": "tool_call.error",
                     "tool_name": normalized_tool_name,
                     "status_code": response.status_code,
+                    "request_id": _optional_string(response_body.get("request_id")),
+                    "correlation_id": _optional_string(response_body.get("correlation_id"))
+                    or normalized_correlation_id,
                     "elapsed_ms": _elapsed_ms(started_at),
                 }
             )
@@ -1401,6 +1409,7 @@ class AsyncOphanixToolGatewayClient:
                         "event": "tool_call.error",
                         "tool_name": normalized_tool_name,
                         "code": "transport_error",
+                        "correlation_id": normalized_correlation_id,
                         "elapsed_ms": _elapsed_ms(started_at),
                     }
                 )
@@ -1411,6 +1420,7 @@ class AsyncOphanixToolGatewayClient:
                         "event": "tool_call.error",
                         "tool_name": normalized_tool_name,
                         "code": "transport_error",
+                        "correlation_id": normalized_correlation_id,
                         "elapsed_ms": _elapsed_ms(started_at),
                     }
                 )
@@ -1437,6 +1447,9 @@ class AsyncOphanixToolGatewayClient:
                     "event": "tool_call.denied",
                     "tool_name": normalized_tool_name,
                     "status_code": response.status_code,
+                    "request_id": _optional_string(response_body.get("request_id")),
+                    "correlation_id": _optional_string(response_body.get("correlation_id"))
+                    or normalized_correlation_id,
                     "elapsed_ms": _elapsed_ms(started_at),
                 }
             )
@@ -1447,6 +1460,9 @@ class AsyncOphanixToolGatewayClient:
                     "event": "tool_call.error",
                     "tool_name": normalized_tool_name,
                     "status_code": response.status_code,
+                    "request_id": _optional_string(response_body.get("request_id")),
+                    "correlation_id": _optional_string(response_body.get("correlation_id"))
+                    or normalized_correlation_id,
                     "elapsed_ms": _elapsed_ms(started_at),
                 }
             )

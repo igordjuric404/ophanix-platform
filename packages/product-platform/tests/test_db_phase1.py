@@ -96,6 +96,9 @@ FEATURE_MIGRATIONS = [
     "0066",
     "0067",
     "0068",
+    "0069",
+    "0070",
+    "0071",
 ]
 
 ALL_EXPECTED_MIGRATIONS = [*EXPECTED_MIGRATIONS, *FEATURE_MIGRATIONS]
@@ -133,6 +136,7 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertIn("environments", tables)
             self.assertIn("api_keys", tables)
             self.assertIn("audit_events", tables)
+            self.assertIn("audit_hash_checkpoints", tables)
             self.assertIn("agents", tables)
             self.assertIn("agent_lifecycle_events", tables)
             identity_columns = column_names(connection, "agent_identities")
@@ -222,14 +226,36 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertIn("demo_reset_runs", tables)
             self.assertIn("policy_evaluations", tables)
             self.assertIn("audit_exports", tables)
+            audit_export_columns = column_names(connection, "audit_exports")
+            self.assertIn("event_count", audit_export_columns)
+            self.assertIn("complete", audit_export_columns)
+            self.assertIn("completeness_reason", audit_export_columns)
+            self.assertIn("chain_proof_json", audit_export_columns)
             self.assertIn("control_frameworks", tables)
             self.assertIn("controls", tables)
             self.assertIn("control_mappings", tables)
+            self.assertIn("mapping_version", column_names(connection, "control_mappings"))
             self.assertIn("evidence_items", tables)
+            evidence_columns = column_names(connection, "evidence_items")
+            self.assertIn("source_event_hash", evidence_columns)
+            self.assertIn("source_event_previous_hash", evidence_columns)
+            self.assertIn("source_event_hash_algorithm", evidence_columns)
+            self.assertIn("control_mapping_id", evidence_columns)
+            self.assertIn("control_mapping_version", evidence_columns)
+            self.assertIn("predicate_snapshot_json", evidence_columns)
+            self.assertIn("source_manifest_json", evidence_columns)
+            self.assertIn("trace_id", evidence_columns)
+            self.assertIn("run_id", evidence_columns)
+            self.assertIn("tool_id", evidence_columns)
+            self.assertIn("policy_id", evidence_columns)
+            self.assertIn("policy_version_id", evidence_columns)
+            self.assertIn("artifact_checksum", evidence_columns)
+            self.assertIn("chain_proof_json", evidence_columns)
             self.assertIn("compliance_violations", tables)
             self.assertIn("compliance_reports", tables)
             self.assertIn("report_evidence_items", tables)
             self.assertIn("report_attestations", tables)
+            self.assertIn("compliance_recompute_runs", tables)
             self.assertIn("workflow_logs", tables)
             self.assertIn("artifacts", tables)
             self.assertIn("artifact_links", tables)
@@ -281,6 +307,22 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
                     self.assertNotIn("tool_gateway_circuit_breaker_state", tables)
                 if migration == "0068":
                     self.assertNotIn("handshake_challenges", tables)
+                if migration == "0071":
+                    self.assertNotIn("compliance_recompute_runs", tables)
+                    self.assertNotIn("mapping_version", column_names(connection, "control_mappings"))
+                    self.assertNotIn("source_event_hash", column_names(connection, "evidence_items"))
+                    self.assertIn("event_count", column_names(connection, "audit_exports"))
+                    self.assertIn("audit_hash_checkpoints", tables)
+                if migration == "0070":
+                    audit_export_columns = column_names(connection, "audit_exports")
+                    self.assertNotIn("event_count", audit_export_columns)
+                    self.assertNotIn("complete", audit_export_columns)
+                    self.assertNotIn("completeness_reason", audit_export_columns)
+                    self.assertNotIn("chain_proof_json", audit_export_columns)
+                    self.assertIn("audit_hash_checkpoints", tables)
+                if migration == "0069":
+                    self.assertNotIn("audit_hash_checkpoints", tables)
+                    self.assertIn("audit_events", tables)
                 if migration == "0051":
                     self.assertNotIn("tool_upstream_targets", tables)
                     self.assertNotIn("tool_upstream_health_checks", tables)

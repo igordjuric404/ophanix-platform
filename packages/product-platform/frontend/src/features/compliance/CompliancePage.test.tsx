@@ -68,6 +68,10 @@ const evidence = {
   source_id: "evt_policy",
   title: "policy_decision evidence from policy.decision",
   summary: "policy-engine recorded policy.decision decision=deny",
+  source_event_hash: "hash-policy",
+  control_mapping_version: "2026.05.1",
+  policy_id: "policy_1",
+  policy_version_id: "pver_1",
   freshness_at: "2026-05-01T00:00:00+00:00",
   status: "fresh",
   created_at: "2026-05-01T00:00:00+00:00"
@@ -103,13 +107,25 @@ const report = {
   date_to: "2026-12-31",
   generated_by: "user_admin",
   artifact_uri: "compliance-report://crep_1.md",
-  summary: { evidence_count: 1, open_violation_count: 1 },
+  summary: {
+    evidence_count: 1,
+    open_violation_count: 1,
+    complete: true,
+    verification_manifest: {
+      audit_range_verification: { valid: true, checked_count: 2 },
+      checkpoint: { id: "achk_1" },
+      source_event_hashes: [{ evidence_item_id: "evid_policy", source_event_hash: "hash-policy" }],
+      linked_runtime_action_ids: ["raction_1"],
+      linked_policy_ids: ["policy_1"]
+    }
+  },
   created_at: "2026-05-01T00:00:00+00:00",
   updated_at: "2026-05-01T00:00:00+00:00",
   generated_at: "2026-05-01T00:00:00+00:00",
   evidence_item_ids: ["evid_policy"],
   attestation_count: 0,
-  rendered_markdown: "# SOC 2 Evidence Report\n\n## Evidence\n"
+  rendered_markdown:
+    "# SOC 2 Evidence Report\n\n## Verification Manifest\n\n- Source hashes: 1\n- Runtime actions: raction_1\n\n## Evidence\n\n- CC6.6: policy_decision evidence (fresh, audit_event:evt_policy, hash=hash-policy, mapping_version=2026.05.1, runtime_action=n/a)\n"
 };
 
 const reportArtifact = {
@@ -157,10 +173,14 @@ describe("CompliancePage", () => {
     expect(screen.getAllByText("CC6.6").length).toBeGreaterThan(0);
     expect(screen.getByText("Mapped Evidence")).toBeInTheDocument();
     expect(screen.getByText("policy_decision evidence from policy.decision")).toBeInTheDocument();
+    expect(screen.getByText("hash hash-policy")).toBeInTheDocument();
+    expect(screen.getByText("mapping 2026.05.1")).toBeInTheDocument();
     expect(screen.getByText("Violation Queue")).toBeInTheDocument();
     expect(screen.getByText("blocked by policy")).toBeInTheDocument();
     expect(screen.getByText("Report Builder")).toBeInTheDocument();
     expect(screen.getAllByText("SOC 2 Evidence Report").length).toBeGreaterThan(0);
+    expect(screen.getByText("checkpoint achk_1")).toBeInTheDocument();
+    expect(screen.getByText(/Verification Manifest/)).toBeInTheDocument();
     expect(screen.getByText("sha256-report")).toBeInTheDocument();
   });
 
@@ -180,7 +200,9 @@ describe("CompliancePage", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Export" }));
-    expect(await screen.findByText("audit-export://evt-policy.json")).toBeInTheDocument();
+    expect(
+      await screen.findByText("audit-export://evt-policy.json (partial: requested_limit_reached)")
+    ).toBeInTheDocument();
 
     const auditRow = screen.getAllByText("evt_policy")[0].closest("tr");
     expect(auditRow).toBeTruthy();
@@ -239,7 +261,13 @@ function mockComplianceFetch() {
       return json([policyEvent, runtimeEvent]);
     }
     if (path === "/api/v1/audit/export" && init?.method === "POST") {
-      return json({ id: "aexp_1", artifact_uri: "audit-export://evt-policy.json" });
+      return json({
+        id: "aexp_1",
+        artifact_uri: "audit-export://evt-policy.json",
+        event_count: 2,
+        complete: false,
+        completeness_reason: "requested_limit_reached"
+      });
     }
     if (path === "/api/v1/compliance/frameworks") {
       return json([framework]);

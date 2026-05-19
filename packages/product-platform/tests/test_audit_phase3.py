@@ -10,6 +10,7 @@ from product_platform.audit.events import AuditEventEnvelope
 from product_platform.audit.hash_chain import canonical_event_hash_input
 from product_platform.audit.store import AuditEventRepository
 from product_platform.api.settings import Settings
+from product_platform.db.postgres import IntegrityError
 from product_platform.db.seed import seed_demo_data
 from product_platform.db.testing import create_migrated_test_database
 
@@ -77,10 +78,7 @@ class AuditPhase3Tests(unittest.TestCase):
                 repository.insert(_event("evt_default_a"))
                 repository.insert(_event("evt_other", environment_id="env_other"))
                 repository.insert(_event("evt_default_b"))
-                connection.execute(
-                    "UPDATE audit_events SET payload_json = ? WHERE id = ?",
-                    (json.dumps({"tampered": True}), "evt_other"),
-                )
+                _tamper_event_payload_for_test(connection, "evt_other")
 
             repository = AuditEventRepository(database.connect())
             scoped = repository.verify_range("org_default", environment_id="env_default")
@@ -90,6 +88,58 @@ class AuditPhase3Tests(unittest.TestCase):
             self.assertEqual(scoped.checked_count, 2)
             self.assertFalse(organization_wide.valid)
             self.assertEqual(organization_wide.failed_event_id, "evt_other")
+        finally:
+            database.close()
+
+    def test_audit_event_and_hash_rows_are_append_only(self) -> None:
+        database = create_migrated_test_database()
+        try:
+            with database.transaction() as connection:
+                seed_demo_data(connection)
+                AuditEventRepository(connection).insert(_event("evt_append_only"))
+
+            with self.assertRaises(IntegrityError):
+                with database.transaction() as connection:
+                    connection.execute(
+                        "UPDATE audit_events SET payload_json = ? WHERE id = ?",
+                        (json.dumps({"tampered": True}), "evt_append_only"),
+                    )
+
+            with self.assertRaises(IntegrityError):
+                with database.transaction() as connection:
+                    connection.execute(
+                        "DELETE FROM audit_event_hashes WHERE event_id = ?",
+                        ("evt_append_only",),
+                    )
+        finally:
+            database.close()
+
+    def test_checkpoint_detects_missing_audit_row(self) -> None:
+        database = create_migrated_test_database()
+        try:
+            with database.transaction() as connection:
+                seed_demo_data(connection)
+                repository = AuditEventRepository(connection)
+                repository.insert(_event("evt_checkpoint_a"))
+                repository.insert(_event("evt_checkpoint_b"))
+                checkpoint = repository.create_checkpoint(
+                    "org_default",
+                    environment_id="env_default",
+                    created_by="test",
+                )
+                self.assertEqual(checkpoint["event_count"], 2)
+                self.assertIsNotNone(checkpoint["signature"])
+                _delete_event_for_test(connection, "evt_checkpoint_b")
+
+            verification = AuditEventRepository(database.connect()).verify_range(
+                "org_default",
+                environment_id="env_default",
+            )
+
+            self.assertFalse(verification.valid)
+            self.assertEqual(verification.failed_event_id, "evt_checkpoint_b")
+            self.assertEqual(verification.reason, "checkpoint_event_missing")
+            self.assertEqual(verification.checkpoint_id, checkpoint["id"])
         finally:
             database.close()
 
@@ -185,10 +235,7 @@ class AuditPhase3ApiTests(unittest.TestCase):
             with database.transaction() as connection:
                 seed_demo_data(connection)
                 AuditEventRepository(connection).insert(_event("evt_hash_tamper"))
-                connection.execute(
-                    "UPDATE audit_events SET payload_json = ? WHERE id = ?",
-                    (json.dumps({"tampered": True}), "evt_hash_tamper"),
-                )
+                _tamper_event_payload_for_test(connection, "evt_hash_tamper")
 
             verification = AuditEventRepository(database.connect()).verify_range("org_default")
 
@@ -210,6 +257,36 @@ def _event(event_id: str, *, environment_id: str = "env_default") -> AuditEventE
         payload_json={"event_id": event_id},
         created_at=f"2026-04-30T00:00:0{event_id[-1] if event_id[-1].isdigit() else 0}+00:00",
     )
+
+
+def _tamper_event_payload_for_test(connection, event_id: str) -> None:
+    """Bypass append-only guards to simulate privileged storage tampering."""
+
+    connection.execute("ALTER TABLE audit_events DISABLE TRIGGER trg_audit_events_append_only")
+    try:
+        connection.execute(
+            "UPDATE audit_events SET payload_json = ? WHERE id = ?",
+            (json.dumps({"tampered": True}), event_id),
+        )
+    finally:
+        connection.execute("ALTER TABLE audit_events ENABLE TRIGGER trg_audit_events_append_only")
+
+
+def _delete_event_for_test(connection, event_id: str) -> None:
+    """Bypass append-only guards to simulate a missing row beneath a checkpoint."""
+
+    connection.execute(
+        "ALTER TABLE audit_event_hashes DISABLE TRIGGER trg_audit_event_hashes_append_only"
+    )
+    connection.execute("ALTER TABLE audit_events DISABLE TRIGGER trg_audit_events_append_only")
+    try:
+        connection.execute("DELETE FROM audit_event_hashes WHERE event_id = ?", (event_id,))
+        connection.execute("DELETE FROM audit_events WHERE id = ?", (event_id,))
+    finally:
+        connection.execute("ALTER TABLE audit_events ENABLE TRIGGER trg_audit_events_append_only")
+        connection.execute(
+            "ALTER TABLE audit_event_hashes ENABLE TRIGGER trg_audit_event_hashes_append_only"
+        )
 
 
 if __name__ == "__main__":

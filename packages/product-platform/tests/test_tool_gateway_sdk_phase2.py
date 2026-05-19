@@ -516,6 +516,33 @@ class ToolGatewaySdkPhase2Tests(unittest.TestCase):
         self.assertNotIn("sdk-token", str(events))
         self.assertNotIn("claim_123", str(events))
 
+    def test_error_event_hook_includes_gateway_request_and_correlation_ids(self) -> None:
+        events: list[dict[str, Any]] = []
+        client = OphanixToolGatewayClient(
+            base_url="https://gateway.example.test",
+            token_provider=StaticTokenProvider("sdk-token"),
+            http_client=httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda _request: httpx.Response(
+                        502,
+                        json={
+                            "request_id": "req-error-event",
+                            "correlation_id": "corr-error-event",
+                            "error": {"code": "upstream_error"},
+                        },
+                    )
+                )
+            ),
+            event_hook=lambda event: events.append(dict(event)),
+        )
+
+        with self.assertRaises(ToolGatewayError):
+            client.call_tool("claims.lookup", {"claim_id": "claim_123"})
+
+        error = [event for event in events if event["event"] == "tool_call.error"][0]
+        self.assertEqual("req-error-event", error["request_id"])
+        self.assertEqual("corr-error-event", error["correlation_id"])
+
     def test_token_provider_is_called_for_each_request(self) -> None:
         provider = CountingTokenProvider()
         authorizations: list[str] = []

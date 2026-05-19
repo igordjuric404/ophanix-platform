@@ -1,0 +1,11 @@
+ALTER TABLE audit_exports
+ADD COLUMN IF NOT EXISTS event_count INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE audit_exports
+ADD COLUMN IF NOT EXISTS complete INTEGER NOT NULL DEFAULT 1;
+
+ALTER TABLE audit_exports
+ADD COLUMN IF NOT EXISTS completeness_reason TEXT;
+
+ALTER TABLE audit_exports
+ADD COLUMN IF NOT EXISTS chain_proof_json TEXT NOT NULL DEFAULT '{}';

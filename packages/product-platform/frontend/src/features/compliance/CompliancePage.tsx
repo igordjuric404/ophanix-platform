@@ -26,6 +26,7 @@ import {
   recomputeComplianceEvidence,
   useComplianceMutation,
   type Artifact,
+  type AuditExport,
   type ComplianceControl,
   type ComplianceEvidence,
   type ComplianceEvidenceRecompute,
@@ -61,7 +62,7 @@ export function CompliancePage() {
   const [evidenceFilters, setEvidenceFilters] = useState<ComplianceParams>({});
   const [violationFilters, setViolationFilters] = useState<ComplianceParams>({});
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
-  const [auditExport, setAuditExport] = useState<string | null>(null);
+  const [auditExport, setAuditExport] = useState<AuditExport | null>(null);
   const [evidenceRecompute, setEvidenceRecompute] =
     useState<ComplianceEvidenceRecompute | null>(null);
   const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
@@ -161,11 +162,11 @@ export function CompliancePage() {
           filters={auditFilters}
           isLoading={auditEventsQuery.isLoading}
           onExport={async (payload) => {
-            const result = await runWithFeedback<{ artifact_uri?: string }>(
+            const result = await runWithFeedback<AuditExport>(
               () =>
                 mutation.mutateAsync((tenantContext) =>
                   exportAuditEvents(payload, tenantContext)
-                ) as Promise<{ artifact_uri?: string }>,
+                ) as Promise<AuditExport>,
               {
                 errorMessage: "Audit export failed"
               }
@@ -173,7 +174,7 @@ export function CompliancePage() {
             if (!result) {
               return;
             }
-            setAuditExport(result.artifact_uri ?? "audit-export");
+            setAuditExport(result);
           }}
           onFilter={setAuditFilters}
           onOpenEvent={(eventId) => {
@@ -305,7 +306,7 @@ function AuditExplorer({
   verification
 }: {
   events: AuditEvent[];
-  exportResult: string | null;
+  exportResult: AuditExport | null;
   filters: ComplianceParams;
   isLoading: boolean;
   onExport: (payload: Record<string, unknown>) => void;
@@ -374,7 +375,19 @@ function AuditExplorer({
           <Button type="submit">
             Export
           </Button>
-          {exportResult ? <output className="text-sm text-muted-foreground">{exportResult}</output> : null}
+          {exportResult ? (
+            <output
+              className={cn(
+                "text-sm",
+                exportResult.complete === false
+                  ? "feedback-warning px-3 py-2"
+                  : "text-muted-foreground"
+              )}
+              data-compliance-audit-export-result
+            >
+              {auditExportDisplay(exportResult)}
+            </output>
+          ) : null}
         </form>
         {events.length ? (
           <div className="overflow-x-auto">
@@ -620,7 +633,22 @@ function EvidenceLibrary({
                     <strong>{item.title}</strong>
                     <small className="block text-muted-foreground">{item.summary}</small>
                   </TableCell>
-                  <TableCell>{`${item.source_type}:${item.source_id}`}</TableCell>
+                  <TableCell>
+                    <span>{`${item.source_type}:${item.source_id}`}</span>
+                    {item.source_event_hash ? (
+                      <small className="block text-muted-foreground">hash {item.source_event_hash}</small>
+                    ) : null}
+                    {item.control_mapping_version ? (
+                      <small className="block text-muted-foreground">
+                        mapping {item.control_mapping_version}
+                      </small>
+                    ) : null}
+                    {item.policy_id ? (
+                      <small className="block text-muted-foreground">
+                        policy {item.policy_id}
+                      </small>
+                    ) : null}
+                  </TableCell>
                   <TableCell>
                     <StatusBadge status={item.status} />
                   </TableCell>
@@ -850,6 +878,21 @@ function ReportBuilder({
               <h3 className="font-semibold">{selectedReport.name}</h3>
               <Badge tone="muted">{selectedReport.artifact_uri ?? "draft"}</Badge>
             </div>
+            {selectedReport.summary ? (
+              <div
+                className={cn(
+                  "mt-3 flex flex-wrap items-center gap-2 rounded-md border px-3 py-2 text-sm",
+                  reportIsComplete(selectedReport) ? "bg-muted" : "feedback-warning"
+                )}
+                data-compliance-report-verification={selectedReport.id}
+              >
+                <Badge tone={reportIsComplete(selectedReport) ? "success" : "warning"}>
+                  {reportIsComplete(selectedReport) ? "complete" : "partial"}
+                </Badge>
+                <span>audit {reportAuditStatus(selectedReport)}</span>
+                <span>checkpoint {reportCheckpointId(selectedReport)}</span>
+              </div>
+            ) : null}
             {activeArtifacts.length ? (
               <ul className="mt-3 space-y-2" data-compliance-report-artifacts={selectedReport.id}>
                 {activeArtifacts.map((artifact) => (
@@ -942,6 +985,46 @@ function auditEventFilterParams(filters: ComplianceParams) {
   return Object.fromEntries(
     Object.entries(filters).filter(([, value]) => value !== undefined && value !== null && value !== "")
   );
+}
+
+function auditExportDisplay(result: AuditExport) {
+  const artifact = result.artifact_uri ?? "audit-export";
+  if (result.complete === false) {
+    return `${artifact} (partial: ${result.completeness_reason ?? "incomplete"})`;
+  }
+  if (typeof result.event_count === "number") {
+    return `${artifact} (${result.event_count} events, complete)`;
+  }
+  return artifact;
+}
+
+function reportIsComplete(report: ComplianceReport) {
+  return report.summary?.complete !== false;
+}
+
+function reportAuditStatus(report: ComplianceReport) {
+  const verification = reportVerificationManifest(report)?.audit_range_verification;
+  if (isRecord(verification) && typeof verification.valid === "boolean") {
+    return verification.valid ? "valid" : "failed";
+  }
+  return "pending";
+}
+
+function reportCheckpointId(report: ComplianceReport) {
+  const checkpoint = reportVerificationManifest(report)?.checkpoint;
+  if (isRecord(checkpoint) && checkpoint.id) {
+    return String(checkpoint.id);
+  }
+  return "n/a";
+}
+
+function reportVerificationManifest(report: ComplianceReport) {
+  const manifest = report.summary?.verification_manifest;
+  return isRecord(manifest) ? manifest : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function cleanParamsFromForm(form: HTMLFormElement, keys: string[]) {
