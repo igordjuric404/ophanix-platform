@@ -1,5 +1,31 @@
 # Feature Audit: Authentication, Authorization, and API Keys
 
+## Remediation Summary
+
+Date of remediation: 2026-05-19
+
+Total findings in this report: 4
+
+Number fixed: 4
+
+Number partially fixed: 0
+
+Number blocked: 0
+
+Number already fixed: 0
+
+Files changed:
+`packages/product-platform/pyproject.toml`; `packages/product-platform/src/product_platform/api/auth.py`; `packages/product-platform/src/product_platform/api/settings.py`; `packages/product-platform/src/product_platform/api/app.py`; `packages/product-platform/src/product_platform/api/api_keys.py`; `packages/product-platform/src/product_platform/db/migrations/0072_environment_memberships.up.sql`; `packages/product-platform/src/product_platform/db/migrations/0072_environment_memberships.down.sql`; `packages/product-platform/src/product_platform/db/migrations/0073_tool_gateway_delegated_authorization.up.sql`; `packages/product-platform/src/product_platform/db/migrations/0073_tool_gateway_delegated_authorization.down.sql`; `packages/product-platform/src/product_platform/db/migrations/0074_api_key_lifecycle_metadata.up.sql`; `packages/product-platform/src/product_platform/db/migrations/0074_api_key_lifecycle_metadata.down.sql`; `packages/product-platform/src/product_platform/tool_gateway/auth.py`; `packages/product-platform/src/product_platform/tool_gateway/decision.py`; `packages/product-platform/src/product_platform/tool_gateway/runtime_audit.py`; `packages/product-platform/src/product_platform/tool_gateway/delegation.py`; `packages/product-platform/src/product_platform/tool_gateway/sdk.py`; `packages/product-platform/src/ophanix_tool_gateway/sdk.py`; `packages/product-platform/src/ophanix_tool_gateway/__init__.py`; `packages/ophanix-tool-gateway-sdk/src/ophanix_tool_gateway/sdk.py`; `packages/ophanix-tool-gateway-sdk/src/ophanix_tool_gateway/__init__.py`; `packages/product-platform/frontend/src/api/types.ts`; `packages/product-platform/frontend/src/lib/rbac.ts`; `packages/product-platform/frontend/src/app/tenantContext.ts`; `packages/product-platform/tests/test_auth_remediation_phase1.py`; `packages/product-platform/tests/test_auth_remediation_phase2.py`; `packages/product-platform/tests/test_auth_remediation_phase3.py`; `packages/product-platform/tests/oidc_test_utils.py`; `packages/product-platform/tests/test_api_shell_phase2.py`; `packages/product-platform/tests/test_api_shell_phase3.py`; `packages/product-platform/tests/test_db_phase1.py`; `packages/product-platform/tests/test_tool_gateway_sdk_phase2.py`; `packages/product-platform/tests/test_tool_gateway_auth_phase3.py`; `packages/product-platform/frontend/src/lib/rbac.test.ts`
+
+Tests added or updated:
+`test_auth_remediation_phase1.py::test_oidc_jwks_validation_rejects_bad_claims`; `test_auth_remediation_phase1.py::test_oidc_claims_authorize_only_claimed_environments`; `test_auth_remediation_phase1.py::test_production_config_requires_enterprise_idp_and_rejects_dev_auth`; `test_auth_remediation_phase1.py::test_human_user_without_environment_membership_is_denied`; `test_auth_remediation_phase1.py::test_break_glass_environment_access_requires_reason_and_is_audited`; `test_auth_remediation_phase2.py::test_gateway_requires_user_delegation_for_user_tool`; `test_auth_remediation_phase2.py::test_gateway_allows_active_delegated_authorization_and_binds_principal`; `test_auth_remediation_phase2.py::test_gateway_blocks_expired_delegated_authorization`; `test_auth_remediation_phase3.py::test_api_key_creation_applies_expiry_policy_and_records_creator`; `test_auth_remediation_phase3.py::test_api_key_rotation_revokes_old_key_and_keeps_replacement_working`; `test_auth_remediation_phase3.py::test_api_key_revoke_persists_actor_reason_and_audits_revoked_use`; `test_auth_remediation_phase3.py::test_expired_key_and_environment_scope_violation_are_rejected_and_audited`; `test_tool_gateway_sdk_phase2.py::test_authorization_required_response_raises_challenge_error`; `test_tool_gateway_sdk_phase2.py::test_authorization_status_helper_polls_gateway`; `test_tool_gateway_auth_phase3.py` production OIDC fixture coverage; `test_db_phase1.py` migration expectations for `0072`, `0073`, and `0074`; `test_api_shell_phase2.py` and `test_api_shell_phase3.py` production OIDC fixtures; `frontend/src/lib/rbac.test.ts` environment-access guard test.
+
+Validation commands run:
+`PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_auth_remediation_phase1.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_auth_remediation_phase2.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_auth_remediation_phase3.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_auth_remediation_phase*.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_sdk_phase2.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_auth_phase*.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_decision_phase*.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_runtime_audit_phase*.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_invocation_phase*.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_sdk*.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_auth_phase*.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_auth_overall.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_api_shell_phase2.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_api_shell_phase3.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mvp_cloud_deployment_phase*.py' -v` passed; `python3 -m compileall -q src/product_platform/api src/product_platform/db tests/test_auth_remediation_phase1.py tests/oidc_test_utils.py` passed; `python3 -m compileall -q src/product_platform/tool_gateway src/product_platform/api/app.py src/ophanix_tool_gateway tests/test_auth_remediation_phase2.py tests/test_tool_gateway_sdk_phase2.py tests/test_tool_gateway_auth_phase3.py` passed; `python3 -m compileall -q src/product_platform/api src/product_platform/db tests/test_auth_remediation_phase1.py tests/test_auth_remediation_phase2.py tests/test_auth_remediation_phase3.py tests/oidc_test_utils.py` passed; `python3 -m ruff check src/product_platform/api/auth.py src/product_platform/api/settings.py src/product_platform/api/app.py tests/test_auth_remediation_phase1.py tests/oidc_test_utils.py tests/test_api_shell_phase2.py tests/test_api_shell_phase3.py` passed; `python3 -m ruff check src/product_platform/tool_gateway src/product_platform/api/app.py src/ophanix_tool_gateway tests/test_auth_remediation_phase2.py tests/test_tool_gateway_sdk_phase2.py tests/test_tool_gateway_auth_phase3.py` passed; `python3 -m ruff check src/product_platform/api/api_keys.py src/product_platform/api/app.py src/product_platform/api/settings.py tests/test_auth_remediation_phase3.py tests/test_db_phase1.py` passed; `python3 -m pytest tests -q` in `packages/ophanix-tool-gateway-sdk` passed; `python3 -m compileall -q src tests` in `packages/ophanix-tool-gateway-sdk` passed; `python3 -m ruff check src tests` in `packages/ophanix-tool-gateway-sdk` passed; `npm test -- src/lib/rbac.test.ts` passed; `npm test -- src/app/tenantContext.test.tsx` passed.
+
+Remaining risks:
+None for the selected report findings. A broad all-gateway run still has unrelated upstream URL safety expectation failures outside this selected report; focused selected-report validation passes.
+
 ## 1. Scope
 
 This audit covers human authentication, RBAC, API keys, agent credentials, token/session behavior, environment scoping, frontend permission drift, and SDK authentication ergonomics. It inspects `product_platform/api/auth.py`, `api/rbac.py`, API-key models/routes/repositories, Tool Gateway auth, frontend RBAC, and SDK token providers. Relevant benchmarks are Microsoft enterprise access controls, AWS AgentCore Identity, Google IAM integration, Arcade/Composio user-specific authorization, and OpenAI approval patterns. Out of scope: provider credential storage, which is covered in INT.
@@ -23,6 +49,26 @@ Current workflow: users authenticate with local HMAC-style tokens, roles are enf
 ## 4. Findings
 
 ### F-AUTH-001 [P0] [Authentication] Enterprise IdP configuration exists but runtime auth remains local-token based
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Added production OIDC/JWKS bearer-token validation using configured issuer, audience, allowed algorithms, JWKS key id resolution, expiry/signature checks, and IdP claim mapping for roles, organization, environment memberships, IdP subject, issuer, and token id. Local HMAC token authentication is now enabled only when development login is enabled for local/test environments, and production startup now requires enterprise IdP configuration while rejecting development login. Production tests were updated to use generated OIDC tokens rather than local dev tokens.
+
+**Files changed:**
+`packages/product-platform/pyproject.toml`; `packages/product-platform/src/product_platform/api/auth.py`; `packages/product-platform/src/product_platform/api/settings.py`; `packages/product-platform/src/product_platform/api/app.py`; `packages/product-platform/tests/test_auth_remediation_phase1.py`; `packages/product-platform/tests/oidc_test_utils.py`; `packages/product-platform/tests/test_api_shell_phase2.py`; `packages/product-platform/tests/test_api_shell_phase3.py`
+
+**Tests added or updated:**
+`test_auth_remediation_phase1.py::test_oidc_jwks_validation_rejects_bad_claims`; `test_auth_remediation_phase1.py::test_oidc_claims_authorize_only_claimed_environments`; `test_auth_remediation_phase1.py::test_production_config_requires_enterprise_idp_and_rejects_dev_auth`; production OIDC fixtures in `test_api_shell_phase2.py` and `test_api_shell_phase3.py`.
+
+**Validation performed:**
+`PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_auth_remediation_phase1.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_auth_phase*.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_auth_overall.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_api_shell_phase2.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_api_shell_phase3.py' -v` passed; `python3 -m compileall -q src/product_platform/api src/product_platform/db tests/test_auth_remediation_phase1.py tests/oidc_test_utils.py` passed; `python3 -m ruff check src/product_platform/api/auth.py src/product_platform/api/settings.py src/product_platform/api/app.py tests/test_auth_remediation_phase1.py tests/oidc_test_utils.py tests/test_api_shell_phase2.py tests/test_api_shell_phase3.py` passed.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Missing
 
@@ -76,6 +122,26 @@ Production deployments will depend on non-enterprise auth and may grant access o
 
 ### F-AUTH-002 [P0] [Authorization] User-delegated OAuth and per-user tool authorization are missing
 
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Added delegated user and provider-account binding to Tool Gateway principals, persisted tool delegation requirements, delegated authorization grants, and authorization sessions, and extended policy decisions with `pending_authorization` and `require_approval`. Tool invocation now blocks missing, expired, insufficient-scope, or not-yet-approved delegated authorization before upstream execution and writes runtime audit records containing delegated user, provider account, approval state, and authorization session. Added SDK authorization challenge handling and an authorization status polling helper.
+
+**Files changed:**
+`packages/product-platform/src/product_platform/db/migrations/0073_tool_gateway_delegated_authorization.up.sql`; `packages/product-platform/src/product_platform/db/migrations/0073_tool_gateway_delegated_authorization.down.sql`; `packages/product-platform/src/product_platform/tool_gateway/delegation.py`; `packages/product-platform/src/product_platform/tool_gateway/auth.py`; `packages/product-platform/src/product_platform/tool_gateway/decision.py`; `packages/product-platform/src/product_platform/tool_gateway/runtime_audit.py`; `packages/product-platform/src/product_platform/api/app.py`; `packages/product-platform/src/product_platform/tool_gateway/sdk.py`; `packages/product-platform/src/ophanix_tool_gateway/sdk.py`; `packages/product-platform/src/ophanix_tool_gateway/__init__.py`; `packages/ophanix-tool-gateway-sdk/src/ophanix_tool_gateway/sdk.py`; `packages/ophanix-tool-gateway-sdk/src/ophanix_tool_gateway/__init__.py`; `packages/product-platform/tests/test_auth_remediation_phase2.py`; `packages/product-platform/tests/test_tool_gateway_sdk_phase2.py`; `packages/product-platform/tests/test_tool_gateway_auth_phase3.py`; `packages/product-platform/tests/test_db_phase1.py`
+
+**Tests added or updated:**
+`test_auth_remediation_phase2.py::test_gateway_requires_user_delegation_for_user_tool`; `test_auth_remediation_phase2.py::test_gateway_allows_active_delegated_authorization_and_binds_principal`; `test_auth_remediation_phase2.py::test_gateway_blocks_expired_delegated_authorization`; `test_tool_gateway_sdk_phase2.py::test_authorization_required_response_raises_challenge_error`; `test_tool_gateway_sdk_phase2.py::test_authorization_status_helper_polls_gateway`; `test_db_phase1.py` migration expectations for `0073_tool_gateway_delegated_authorization`; `test_tool_gateway_auth_phase3.py` production OIDC fixture coverage and disabled dev-login route behavior.
+
+**Validation performed:**
+`PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_auth_remediation_phase2.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_sdk_phase2.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_auth_phase*.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_decision_phase*.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_runtime_audit_phase*.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_invocation_phase*.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_sdk*.py' -v` passed; `python3 -m compileall -q src/product_platform/tool_gateway src/product_platform/api/app.py src/ophanix_tool_gateway tests/test_auth_remediation_phase2.py tests/test_tool_gateway_sdk_phase2.py tests/test_tool_gateway_auth_phase3.py` passed; `python3 -m ruff check src/product_platform/tool_gateway src/product_platform/api/app.py src/ophanix_tool_gateway tests/test_auth_remediation_phase2.py tests/test_tool_gateway_sdk_phase2.py tests/test_tool_gateway_auth_phase3.py` passed; `python3 -m pytest tests -q` in `packages/ophanix-tool-gateway-sdk` passed; `python3 -m compileall -q src tests` in `packages/ophanix-tool-gateway-sdk` passed; `python3 -m ruff check src tests` in `packages/ophanix-tool-gateway-sdk` passed.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
+
 **Status:** Missing
 
 **Current implementation:**
@@ -128,6 +194,26 @@ Agents may use organization-wide credentials for actions that should require use
 
 ### F-AUTH-003 [P1] [API Keys] API keys are hashed but lifecycle management is incomplete
 
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Added API-key lifecycle metadata, a policy-controlled default expiry and max TTL, an atomic rotation endpoint, revoke actor/reason persistence, rotation linkage between old and replacement keys, and API-key denied-use audit events. Expired and revoked valid keys now produce `auth.api_key.authentication_failed` audit events with safe reason codes, and environment scope violations now produce `auth.api_key.scope_violation` audit events without changing the existing 403 behavior.
+
+**Files changed:**
+`packages/product-platform/src/product_platform/api/api_keys.py`; `packages/product-platform/src/product_platform/api/app.py`; `packages/product-platform/src/product_platform/api/settings.py`; `packages/product-platform/src/product_platform/db/migrations/0074_api_key_lifecycle_metadata.up.sql`; `packages/product-platform/src/product_platform/db/migrations/0074_api_key_lifecycle_metadata.down.sql`; `packages/product-platform/tests/test_auth_remediation_phase3.py`; `packages/product-platform/tests/test_db_phase1.py`
+
+**Tests added or updated:**
+`test_auth_remediation_phase3.py::test_api_key_creation_applies_expiry_policy_and_records_creator`; `test_auth_remediation_phase3.py::test_api_key_rotation_revokes_old_key_and_keeps_replacement_working`; `test_auth_remediation_phase3.py::test_api_key_revoke_persists_actor_reason_and_audits_revoked_use`; `test_auth_remediation_phase3.py::test_expired_key_and_environment_scope_violation_are_rejected_and_audited`; `test_db_phase1.py` migration expectation for `0074_api_key_lifecycle_metadata`.
+
+**Validation performed:**
+`PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_auth_remediation_phase3.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_auth_remediation_phase*.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_auth_phase*.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_auth_overall.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_api_shell_phase2.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_api_shell_phase3.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mvp_cloud_deployment_phase*.py' -v` passed; `python3 -m compileall -q src/product_platform/api src/product_platform/db tests/test_auth_remediation_phase1.py tests/test_auth_remediation_phase2.py tests/test_auth_remediation_phase3.py tests/oidc_test_utils.py` passed; `python3 -m ruff check src/product_platform/api/api_keys.py src/product_platform/api/app.py src/product_platform/api/settings.py tests/test_auth_remediation_phase3.py tests/test_db_phase1.py` passed.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
+
 **Status:** Partially Implemented
 
 **Current implementation:**
@@ -179,6 +265,26 @@ Compromised or stale keys may remain useful longer than intended.
 **Affects stated Ophanix product promise:** Yes
 
 ### F-AUTH-004 [P1] [Authorization] Human tenant authorization is organization-wide rather than environment-scoped
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Added explicit human environment authorization through `UserPrincipal.environment_ids`, development-login environment grants, OIDC environment-claim mapping, and middleware enforcement that now fails closed for users without the selected environment. Added an `environment_memberships` migration for durable environment role assignments. Added audited break-glass access for Platform Admin users that requires `X-Break-Glass-Reason` and records `auth.environment_break_glass`. Updated frontend RBAC/types and tenant selection to model environment access and hide inaccessible selected-environment actions.
+
+**Files changed:**
+`packages/product-platform/src/product_platform/api/auth.py`; `packages/product-platform/src/product_platform/api/app.py`; `packages/product-platform/src/product_platform/api/settings.py`; `packages/product-platform/src/product_platform/db/migrations/0072_environment_memberships.up.sql`; `packages/product-platform/src/product_platform/db/migrations/0072_environment_memberships.down.sql`; `packages/product-platform/frontend/src/api/types.ts`; `packages/product-platform/frontend/src/lib/rbac.ts`; `packages/product-platform/frontend/src/app/tenantContext.ts`; `packages/product-platform/tests/test_auth_remediation_phase1.py`; `packages/product-platform/tests/test_db_phase1.py`; `packages/product-platform/frontend/src/lib/rbac.test.ts`
+
+**Tests added or updated:**
+`test_auth_remediation_phase1.py::test_human_user_without_environment_membership_is_denied`; `test_auth_remediation_phase1.py::test_break_glass_environment_access_requires_reason_and_is_audited`; `test_auth_remediation_phase1.py::test_oidc_claims_authorize_only_claimed_environments`; `test_db_phase1.py` migration expectations for `0072_environment_memberships`; `frontend/src/lib/rbac.test.ts` environment membership guard test.
+
+**Validation performed:**
+`PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_auth_remediation_phase1.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_auth_phase*.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_auth_overall.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` passed; `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mvp_cloud_deployment_phase*.py' -v` passed; `npm test -- src/lib/rbac.test.ts` passed; `npm test -- src/app/tenantContext.test.tsx` passed; `python3 -m compileall -q src/product_platform/api src/product_platform/db tests/test_auth_remediation_phase1.py tests/oidc_test_utils.py` passed; `python3 -m ruff check src/product_platform/api/auth.py src/product_platform/api/settings.py src/product_platform/api/app.py tests/test_auth_remediation_phase1.py tests/oidc_test_utils.py tests/test_api_shell_phase2.py tests/test_api_shell_phase3.py` passed.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Partially Implemented
 
@@ -279,4 +385,3 @@ None.
 ## 7. Feature-Level Target State
 
 Authentication should be enterprise-first: OIDC/JWKS or SAML-backed human auth, environment-scoped RBAC, audited API-key lifecycle, and user-delegated tool authorization. API models should represent user, agent, environment, credential, provider account, approval, policy, and scope in the same decision chain. The SDK should expose token providers plus authorization challenge helpers. UI and backend permission maps should come from one source of truth. Tests should prove IdP validation, environment scoping, key rotation, session revocation, and delegated tool access.
-

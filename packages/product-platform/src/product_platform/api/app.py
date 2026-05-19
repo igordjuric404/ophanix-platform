@@ -17,7 +17,7 @@ from uuid import uuid4
 from urllib.parse import parse_qs, urlparse
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,9 +26,13 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from product_platform import __version__
 from product_platform.api.api_keys import (
+    ApiKeyAuthenticationResult,
     ApiKeyCreateRequest,
     ApiKeyCreateResponse,
+    ApiKeyRevokeRequest,
     ApiKeyResponse,
+    ApiKeyRotateRequest,
+    ApiKeyRotationResponse,
     ApiKeyStore,
     DatabaseApiKeyStore,
 )
@@ -605,6 +609,11 @@ from product_platform.tool_gateway.auth import (
     parse_bearer_authorization,
 )
 from product_platform.tool_gateway.decision import ToolPolicyDecisionService
+from product_platform.tool_gateway.delegation import (
+    AuthorizationStatusResponse,
+    ToolDelegationRepository,
+    authorization_session_response,
+)
 from product_platform.tool_gateway.health import ToolUpstreamHealthChecker
 from product_platform.tool_gateway.invocation import (
     AsyncHttpToolInvocationExecutor,
@@ -837,6 +846,18 @@ def _validate_production_settings(settings: Settings) -> None:
     if enable_dev_login:
         raise ValueError("Development login must be disabled outside local/test environments.")
     if is_production:
+        missing_idp_settings: list[str] = []
+        if not settings.idp_issuer_url:
+            missing_idp_settings.append("OPHANIX_IDP_ISSUER_URL")
+        if not settings.idp_audience:
+            missing_idp_settings.append("OPHANIX_IDP_AUDIENCE")
+        if not (settings.idp_jwks_url or settings.idp_jwks_json):
+            missing_idp_settings.append("OPHANIX_IDP_JWKS_URL")
+        if missing_idp_settings:
+            raise ValueError(
+                ", ".join(missing_idp_settings)
+                + " must be configured for production enterprise IdP authentication."
+            )
         if not is_supported_secret_manager_ref(settings.secret_manager_ref):
             raise ValueError(
                 "OPHANIX_SECRET_MANAGER_REF must be set to 'env' or 'env:<ENV_VAR_PREFIX>' in production."
@@ -1192,7 +1213,10 @@ def create_app(
             "Authorization",
             "Content-Type",
             "X-Actor-Type",
+            "X-Break-Glass-Reason",
             "X-Correlation-ID",
+            "X-Delegated-Provider-Account-ID",
+            "X-Delegated-User-ID",
             "X-Environment-ID",
             "X-Organization-ID",
             "X-Request-ID",
@@ -1240,7 +1264,45 @@ def create_app(
         response.headers["X-Correlation-ID"] = correlation_id
         return response
 
-    public_api_paths = {"/api/v1/auth/dev-login"} if enable_dev_login else set()
+    public_api_paths = {"/api/v1/auth/dev-login"}
+
+    def _environment_access_denied_response(request: Request) -> JSONResponse:
+        return _error_response(
+            request,
+            status_code=403,
+            code="FORBIDDEN",
+            message="Environment access is denied.",
+        )
+
+    def _break_glass_reason(request: Request) -> str | None:
+        reason = str(request.headers.get("X-Break-Glass-Reason") or "").strip()
+        if not reason or len(reason) > 240:
+            return None
+        return reason
+
+    def _can_use_environment_break_glass(principal: UserPrincipal) -> bool:
+        return principal.actor_type == "user" and "Platform Admin" in set(principal.roles)
+
+    def _allow_environment_break_glass(
+        *,
+        request: Request,
+        principal: UserPrincipal,
+        organization_id: str,
+        environment_id: str,
+    ) -> bool:
+        reason = _break_glass_reason(request)
+        if not reason or not _can_use_environment_break_glass(principal):
+            return False
+        request.state.selected_organization_id = organization_id
+        request.state.selected_environment_id = environment_id
+        request.state.environment_break_glass_reason = reason
+        _record_environment_break_glass_audit_event(
+            request=request,
+            principal=principal,
+            environment_id=environment_id,
+            reason=reason,
+        )
+        return True
 
     def _uses_gateway_auth_path(path: str) -> bool:
         return _is_tool_gateway_runtime_path(path)
@@ -1292,9 +1354,26 @@ def create_app(
                 if scheme.lower() == "bearer" and token:
                     if use_persistent_api_keys:
                         with _audit_database().transaction() as connection:
-                            principal = _api_key_store(connection).authenticate(token)
+                            api_key_result = _api_key_store(connection).authenticate_with_result(
+                                token
+                            )
+                            principal = api_key_result.principal
+                            if principal is None:
+                                _record_api_key_auth_failure_audit_event(
+                                    request=request,
+                                    result=api_key_result,
+                                    token=token,
+                                    connection=connection,
+                                )
                     else:
-                        principal = api_keys.authenticate(token)
+                        api_key_result = api_keys.authenticate_with_result(token)
+                        principal = api_key_result.principal
+                        if principal is None:
+                            _record_api_key_auth_failure_audit_event(
+                                request=request,
+                                result=api_key_result,
+                                token=token,
+                            )
             if principal is None:
                 return _error_response(
                     request,
@@ -1332,20 +1411,20 @@ def create_app(
                         message="Environment access is denied.",
                     )
                 allowed_environment_ids = list(getattr(principal, "environment_ids", []))
-                if principal.actor_type == "api_key" and not allowed_environment_ids:
-                    return _error_response(
-                        request,
-                        status_code=403,
-                        code="FORBIDDEN",
-                        message="Environment access is denied.",
-                    )
-                if allowed_environment_ids and selected_environment_id not in allowed_environment_ids:
-                    return _error_response(
-                        request,
-                        status_code=403,
-                        code="FORBIDDEN",
-                        message="Environment access is denied.",
-                    )
+                if selected_environment_id not in allowed_environment_ids:
+                    if not _allow_environment_break_glass(
+                        request=request,
+                        principal=principal,
+                        organization_id=organization_id,
+                        environment_id=selected_environment_id,
+                    ):
+                        if principal.actor_type == "api_key":
+                            _record_api_key_scope_violation_audit_event(
+                                request=request,
+                                principal=principal,
+                                requested_environment_id=selected_environment_id,
+                            )
+                        return _environment_access_denied_response(request)
             request.state.selected_organization_id = organization_id
             request.state.selected_environment_id = selected_environment_id
         return await call_next(request)
@@ -1512,6 +1591,48 @@ def create_app(
 
     app.state.permission_denied_audit_recorder = _record_permission_denied_audit_event
 
+    def _record_environment_break_glass_audit_event(
+        *,
+        request: Request,
+        principal: UserPrincipal,
+        environment_id: str,
+        reason: str,
+    ) -> None:
+        organization_id = principal.organization_id
+        if not organization_id:
+            return
+        context = _request_context_from_request(request)
+        with _audit_database().transaction() as connection:
+            existing_environment_id = _existing_audit_environment_id(
+                connection,
+                organization_id,
+                environment_id,
+            )
+            if existing_environment_id is None:
+                return
+            AuditEventRepository(connection).insert(
+                AuditEventEnvelope(
+                    organization_id=organization_id,
+                    environment_id=existing_environment_id,
+                    event_type="auth.environment_break_glass",
+                    source_component="authz",
+                    actor_type=principal.actor_type,
+                    actor_id=principal.id,
+                    resource_type="environment",
+                    resource_id=existing_environment_id,
+                    decision="allow",
+                    severity="warning",
+                    correlation_id=context.correlation_id,
+                    trace_id=context.request_id,
+                    payload_json={
+                        "reason": reason,
+                        "roles": list(principal.roles),
+                        "path": request.url.path,
+                        "method": request.method,
+                    },
+                )
+            )
+
     def _record_admin_settings_audit_event(
         *,
         request: Request,
@@ -1559,6 +1680,127 @@ def create_app(
             return
         with _audit_database().transaction() as audit_connection:
             insert_event(audit_connection)
+
+    def _should_audit_api_key_auth_failure(
+        result: ApiKeyAuthenticationResult,
+        token: str,
+    ) -> bool:
+        return result.reason_code is not None and (
+            result.record is not None or token.startswith("opx_")
+        )
+
+    def _record_api_key_auth_failure_audit_event(
+        *,
+        request: Request,
+        result: ApiKeyAuthenticationResult,
+        token: str,
+        connection: Any | None = None,
+    ) -> None:
+        if not _should_audit_api_key_auth_failure(result, token):
+            return
+        record = result.record
+        organization_id = (
+            record.organization_id
+            if record is not None
+            else request.headers.get("X-Organization-ID")
+            or resolved_settings.default_organization_id
+        )
+        key_id = record.id if record is not None else None
+        environment_ids = list(record.environment_ids) if record is not None else []
+        environment_id = (
+            request.headers.get("X-Environment-ID")
+            or (environment_ids[0] if environment_ids else None)
+            or _default_environment_id_for_org(organization_id)
+        )
+        context = _request_context_from_request(request)
+
+        def insert_event(target_connection: Any) -> None:
+            existing_environment_id = _existing_audit_environment_id(
+                target_connection,
+                organization_id,
+                environment_id,
+            )
+            if existing_environment_id is None:
+                return
+            payload: dict[str, Any] = {
+                "reason_code": result.reason_code,
+                "path": request.url.path,
+                "method": request.method,
+                "requested_environment_id": request.headers.get("X-Environment-ID"),
+            }
+            if key_id is not None:
+                payload["key_id"] = key_id
+            if environment_ids:
+                payload["environment_ids"] = environment_ids
+            if record is not None:
+                payload["expires_at"] = record.expires_at
+                payload["revoked_at"] = record.revoked_at
+                payload["revoked_reason"] = record.revoked_reason
+            AuditEventRepository(target_connection).insert(
+                AuditEventEnvelope(
+                    organization_id=organization_id,
+                    environment_id=existing_environment_id,
+                    event_type="auth.api_key.authentication_failed",
+                    source_component="api-key-auth",
+                    actor_type="api_key" if key_id else "system",
+                    actor_id=key_id,
+                    resource_type="api_key" if key_id else "api_key_authentication",
+                    resource_id=key_id,
+                    decision="deny",
+                    severity="warning",
+                    correlation_id=context.correlation_id,
+                    trace_id=context.request_id,
+                    payload_json=payload,
+                )
+            )
+
+        if connection is not None:
+            insert_event(connection)
+            return
+        with _audit_database().transaction() as audit_connection:
+            insert_event(audit_connection)
+
+    def _record_api_key_scope_violation_audit_event(
+        *,
+        request: Request,
+        principal: UserPrincipal,
+        requested_environment_id: str,
+    ) -> None:
+        organization_id = principal.organization_id
+        if not organization_id:
+            return
+        context = _request_context_from_request(request)
+        with _audit_database().transaction() as connection:
+            environment_id = _existing_audit_environment_id(
+                connection,
+                organization_id,
+                requested_environment_id,
+            )
+            if environment_id is None:
+                return
+            AuditEventRepository(connection).insert(
+                AuditEventEnvelope(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    event_type="auth.api_key.scope_violation",
+                    source_component="api-key-auth",
+                    actor_type="api_key",
+                    actor_id=principal.id,
+                    resource_type="api_key",
+                    resource_id=principal.id,
+                    decision="deny",
+                    severity="warning",
+                    correlation_id=context.correlation_id,
+                    trace_id=context.request_id,
+                    payload_json={
+                        "reason_code": "api_key_scope_violation",
+                        "requested_environment_id": requested_environment_id,
+                        "environment_ids": list(getattr(principal, "environment_ids", [])),
+                        "path": request.url.path,
+                        "method": request.method,
+                    },
+                )
+            )
 
     def _gateway_token_verification_audit_event(
         *,
@@ -1708,6 +1950,12 @@ def create_app(
                     request.headers.get("Authorization"),
                     request_id=context.request_id,
                 )
+                principal.delegated_user_id = _trusted_trace_id(
+                    request.headers.get("X-Delegated-User-ID")
+                )
+                principal.delegated_provider_account_id = _trusted_trace_id(
+                    request.headers.get("X-Delegated-Provider-Account-ID")
+                )
                 AuditEventRepository(connection).insert(
                     _gateway_token_verification_audit_event(
                         request=request,
@@ -1772,6 +2020,21 @@ def create_app(
             if environment is None or environment.organization_id != organization_id:
                 raise HTTPException(status_code=400, detail="API key environment is not visible.")
         return environment_ids
+
+    def _api_key_expiration(requested_expires_at: int | None) -> int:
+        now = int(time.time())
+        default_ttl = max(1, int(resolved_settings.api_key_default_ttl_seconds))
+        max_ttl = max(default_ttl, int(resolved_settings.api_key_max_ttl_seconds))
+        expires_at = int(requested_expires_at) if requested_expires_at is not None else now + default_ttl
+        if expires_at <= now:
+            raise HTTPException(status_code=400, detail="API key expiration must be in the future.")
+        if expires_at - now > max_ttl:
+            raise HTTPException(status_code=400, detail="API key expiration exceeds policy.")
+        return expires_at
+
+    def _api_key_reason(value: str | None, fallback: str) -> str:
+        reason = str(value or "").strip()
+        return reason or fallback
 
     def _create_generated_artifact(
         *,
@@ -4109,6 +4372,31 @@ def create_app(
             ),
         )
 
+    @app.get(
+        "/api/v1/gateway/authorizations/{authorization_session_id}",
+        response_model=AuthorizationStatusResponse,
+        tags=["tool-gateway"],
+    )
+    async def get_gateway_authorization_status(
+        authorization_session_id: str,
+        principal: GatewayPrincipal = Depends(_get_gateway_principal),
+    ) -> AuthorizationStatusResponse:
+        """Return one delegated authorization session visible to this gateway credential."""
+
+        repository = ToolDelegationRepository(
+            _audit_database().connect(),
+            principal.organization_id,
+            principal.environment_id,
+        )
+        row = repository.get_authorization_session(
+            authorization_session_id,
+            agent_id=principal.agent_id,
+            credential_id=principal.credential_id,
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="Authorization session not found.")
+        return authorization_session_response(row)
+
     @app.post(
         "/api/v1/tools/{tool_name}/invoke",
         response_model=ToolInvocationResponse,
@@ -4149,7 +4437,16 @@ def create_app(
                     principal.organization_id,
                     principal.environment_id,
                 )
-                if decision.decision == "deny":
+                if decision.decision in {"deny", "pending_authorization", "require_approval"}:
+                    pending_authorization = decision.decision == "pending_authorization"
+                    pending_approval = decision.decision == "require_approval"
+                    action_status = (
+                        "authorization_pending"
+                        if pending_authorization
+                        else "approval_required"
+                        if pending_approval
+                        else "denied"
+                    )
                     runtime_action = runtime_repository.create_action(
                         ToolRuntimeActionCreate(
                             request_id=context.request_id,
@@ -4159,20 +4456,55 @@ def create_app(
                             tool_id=decision.tool_id,
                             permission_id=decision.permission_id,
                             decision_id=decision.id,
-                            action_status="denied",
+                            action_status=action_status,
                             reason_code=decision.reason_code,
                             payload_summary=body.payload,
+                            error_code=decision.reason_code,
+                            delegated_user_id=decision.delegated_user_id,
+                            provider_account_id=decision.provider_account_id,
+                            approval_state=decision.approval_state,
+                            authorization_session_id=decision.authorization_session_id,
                         )
+                    )
+                    event_type = (
+                        "tool.runtime.authorization_pending"
+                        if pending_authorization
+                        else "tool.runtime.approval_required"
+                        if pending_approval
+                        else "tool.runtime.denied"
                     )
                     _append_tool_runtime_event(
                         runtime_repository,
                         runtime_action["id"],
-                        "tool.runtime.denied",
+                        event_type,
                         {
                             "decision_id": decision.id,
                             "reason_code": decision.reason_code,
+                            "authorization_session_id": decision.authorization_session_id,
+                            "approval_state": decision.approval_state,
                         },
                     )
+                    if pending_authorization or pending_approval:
+                        error_body: dict[str, Any] = {
+                            "code": decision.reason_code,
+                            "message": decision.reason_message,
+                        }
+                        if decision.authorization_challenge is not None:
+                            error_body["authorization"] = decision.authorization_challenge.model_dump()
+                        return JSONResponse(
+                            status_code=403,
+                            content=jsonable_encoder(
+                                ToolInvocationResponse(
+                                    request_id=context.request_id,
+                                    correlation_id=correlation_id,
+                                    tool_name=tool_name,
+                                    decision=_tool_invocation_decision_summary(decision),
+                                    reason_code=decision.reason_code,
+                                    result=None,
+                                    error=error_body,
+                                )
+                            ),
+                        )
                     return JSONResponse(
                         status_code=403,
                         content=jsonable_encoder(
@@ -4215,6 +4547,10 @@ def create_app(
                                 reason_code=decision.reason_code,
                                 payload_summary=body.payload,
                                 error_code="schema_validation_failed",
+                                delegated_user_id=principal.delegated_user_id,
+                                provider_account_id=principal.delegated_provider_account_id,
+                                approval_state=principal.approval_state,
+                                authorization_session_id=principal.authorization_session_id,
                             )
                         )
                         _append_tool_runtime_event(
@@ -4332,6 +4668,10 @@ def create_app(
                         action_status="denied" if decision.decision == "deny" else "allowed",
                         reason_code=decision.reason_code,
                         payload_summary=body.payload,
+                        delegated_user_id=principal.delegated_user_id,
+                        provider_account_id=principal.delegated_provider_account_id,
+                        approval_state=principal.approval_state,
+                        authorization_session_id=principal.authorization_session_id,
                     )
                 )
                 _append_tool_runtime_event(
@@ -4748,6 +5088,7 @@ def create_app(
             organization_id=current_user.organization_id,
             selected_environment_id=environment_id,
         )
+        expires_at = _api_key_expiration(body.expires_at)
         if use_persistent_api_keys:
             with _audit_database().transaction() as connection:
                 record, secret = _api_key_store(connection).create_key(
@@ -4756,7 +5097,8 @@ def create_app(
                     scopes=delegated_scopes,
                     kind=body.kind,
                     environment_ids=environment_ids,
-                    expires_at=body.expires_at,
+                    expires_at=expires_at,
+                    created_by=current_user.id,
                 )
                 _record_admin_settings_audit_event(
                     request=request,
@@ -4771,6 +5113,7 @@ def create_app(
                         "scopes": list(record.scopes),
                         "environment_ids": list(record.environment_ids),
                         "expires_at": record.expires_at,
+                        "created_by": record.created_by,
                     },
                     connection=connection,
                 )
@@ -4781,7 +5124,8 @@ def create_app(
                 scopes=delegated_scopes,
                 kind=body.kind,
                 environment_ids=environment_ids,
-                expires_at=body.expires_at,
+                expires_at=expires_at,
+                created_by=current_user.id,
             )
             _record_admin_settings_audit_event(
                 request=request,
@@ -4796,6 +5140,7 @@ def create_app(
                     "scopes": list(record.scopes),
                     "environment_ids": list(record.environment_ids),
                     "expires_at": record.expires_at,
+                    "created_by": record.created_by,
                 },
             )
         return ApiKeyCreateResponse(key=record.to_response(), secret=secret)
@@ -4815,41 +5160,195 @@ def create_app(
             records = api_keys.list_keys(current_user.organization_id)
         return [record.to_response() for record in records]
 
+    @app.post(
+        "/api/v1/api-keys/{key_id}/rotate",
+        response_model=ApiKeyRotationResponse,
+        status_code=201,
+        tags=["auth"],
+    )
+    async def rotate_api_key(
+        key_id: str,
+        body: ApiKeyRotateRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.API_KEYS_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ApiKeyRotationResponse:
+        """Create a replacement API key and atomically revoke the previous key."""
+
+        if current_user.organization_id is None:
+            raise HTTPException(status_code=404, detail="API key not found.")
+        if use_persistent_api_keys:
+            with _audit_database().transaction() as connection:
+                previous = _api_key_store(connection).get_key(key_id, current_user.organization_id)
+                if previous is None:
+                    raise HTTPException(status_code=404, detail="API key not found.")
+                if previous.revoked_at is not None:
+                    raise HTTPException(status_code=409, detail="API key is already revoked.")
+                environment_ids = _api_key_environment_scope(
+                    body.environment_ids if body.environment_ids is not None else previous.environment_ids,
+                    organization_id=current_user.organization_id,
+                    selected_environment_id=environment_id,
+                )
+                rotated = _api_key_store(connection).rotate_key(
+                    key_id,
+                    current_user.organization_id,
+                    name=body.name or previous.name,
+                    environment_ids=environment_ids,
+                    expires_at=_api_key_expiration(body.expires_at),
+                    actor_id=current_user.id,
+                    reason=_api_key_reason(body.reason, "rotated via API"),
+                )
+                if rotated is None:
+                    raise HTTPException(status_code=409, detail="API key is already revoked.")
+                revoked_record, replacement, secret = rotated
+                _record_admin_settings_audit_event(
+                    request=request,
+                    principal=current_user,
+                    event_type="admin.api_key.rotated",
+                    resource_type="api_key",
+                    resource_id=revoked_record.id,
+                    payload_json={
+                        "key_id": revoked_record.id,
+                        "replacement_key_id": replacement.id,
+                        "reason": revoked_record.revoked_reason,
+                        "rotated_by": current_user.id,
+                        "previous_expires_at": previous.expires_at,
+                        "replacement_expires_at": replacement.expires_at,
+                        "environment_ids": list(replacement.environment_ids),
+                    },
+                    connection=connection,
+                )
+                _record_admin_settings_audit_event(
+                    request=request,
+                    principal=current_user,
+                    event_type="admin.api_key.revoked",
+                    resource_type="api_key",
+                    resource_id=revoked_record.id,
+                    payload_json={
+                        "key_id": revoked_record.id,
+                        "reason": revoked_record.revoked_reason,
+                        "revoked_by": revoked_record.revoked_by,
+                        "revoked_at": revoked_record.revoked_at,
+                        "rotated_to_key_id": replacement.id,
+                    },
+                    connection=connection,
+                )
+        else:
+            previous = api_keys.get_key(key_id, current_user.organization_id)
+            if previous is None:
+                raise HTTPException(status_code=404, detail="API key not found.")
+            if previous.revoked_at is not None:
+                raise HTTPException(status_code=409, detail="API key is already revoked.")
+            environment_ids = _api_key_environment_scope(
+                body.environment_ids if body.environment_ids is not None else previous.environment_ids,
+                organization_id=current_user.organization_id,
+                selected_environment_id=environment_id,
+            )
+            rotated = api_keys.rotate_key(
+                key_id,
+                current_user.organization_id,
+                name=body.name or previous.name,
+                environment_ids=environment_ids,
+                expires_at=_api_key_expiration(body.expires_at),
+                actor_id=current_user.id,
+                reason=_api_key_reason(body.reason, "rotated via API"),
+            )
+            if rotated is None:
+                raise HTTPException(status_code=409, detail="API key is already revoked.")
+            revoked_record, replacement, secret = rotated
+            _record_admin_settings_audit_event(
+                request=request,
+                principal=current_user,
+                event_type="admin.api_key.rotated",
+                resource_type="api_key",
+                resource_id=revoked_record.id,
+                payload_json={
+                    "key_id": revoked_record.id,
+                    "replacement_key_id": replacement.id,
+                    "reason": revoked_record.revoked_reason,
+                    "rotated_by": current_user.id,
+                    "previous_expires_at": previous.expires_at,
+                    "replacement_expires_at": replacement.expires_at,
+                    "environment_ids": list(replacement.environment_ids),
+                },
+            )
+            _record_admin_settings_audit_event(
+                request=request,
+                principal=current_user,
+                event_type="admin.api_key.revoked",
+                resource_type="api_key",
+                resource_id=revoked_record.id,
+                payload_json={
+                    "key_id": revoked_record.id,
+                    "reason": revoked_record.revoked_reason,
+                    "revoked_by": revoked_record.revoked_by,
+                    "revoked_at": revoked_record.revoked_at,
+                    "rotated_to_key_id": replacement.id,
+                },
+            )
+        return ApiKeyRotationResponse(
+            previous_key=revoked_record.to_response(),
+            replacement_key=replacement.to_response(),
+            secret=secret,
+        )
+
     @app.delete("/api/v1/api-keys/{key_id}", status_code=204, tags=["auth"])
     async def revoke_api_key(
         key_id: str,
         request: Request,
+        body: ApiKeyRevokeRequest | None = Body(default=None),
         current_user: UserPrincipal = Depends(require_permission(Permission.API_KEYS_MANAGE)),
     ) -> None:
         """Revoke an API key for the current organization."""
 
         if current_user.organization_id is None:
             raise HTTPException(status_code=404, detail="API key not found.")
+        reason = _api_key_reason(body.reason if body else None, "revoked via API")
         if use_persistent_api_keys:
             with _audit_database().transaction() as connection:
-                revoked = _api_key_store(connection).revoke(key_id, current_user.organization_id)
-                if revoked:
+                revoked_record = _api_key_store(connection).revoke_key(
+                    key_id,
+                    current_user.organization_id,
+                    revoked_by=current_user.id,
+                    revoked_reason=reason,
+                )
+                if revoked_record is not None:
                     _record_admin_settings_audit_event(
                         request=request,
                         principal=current_user,
                         event_type="admin.api_key.revoked",
                         resource_type="api_key",
                         resource_id=key_id,
-                        payload_json={"key_id": key_id},
+                        payload_json={
+                            "key_id": key_id,
+                            "reason": revoked_record.revoked_reason,
+                            "revoked_by": revoked_record.revoked_by,
+                            "revoked_at": revoked_record.revoked_at,
+                        },
                         connection=connection,
                     )
         else:
-            revoked = api_keys.revoke(key_id, current_user.organization_id)
-            if revoked:
+            revoked_record = api_keys.revoke_key(
+                key_id,
+                current_user.organization_id,
+                revoked_by=current_user.id,
+                revoked_reason=reason,
+            )
+            if revoked_record is not None:
                 _record_admin_settings_audit_event(
                     request=request,
                     principal=current_user,
                     event_type="admin.api_key.revoked",
                     resource_type="api_key",
                     resource_id=key_id,
-                    payload_json={"key_id": key_id},
+                    payload_json={
+                        "key_id": key_id,
+                        "reason": revoked_record.revoked_reason,
+                        "revoked_by": revoked_record.revoked_by,
+                        "revoked_at": revoked_record.revoked_at,
+                    },
                 )
-        if not revoked:
+        if revoked_record is None:
             raise HTTPException(status_code=404, detail="API key not found.")
 
     @app.post("/api/v1/audit/events", response_model=AuditEventEnvelope, status_code=201, tags=["audit"])

@@ -5,9 +5,9 @@ import unittest
 from fastapi.testclient import TestClient
 
 from product_platform import create_app
-from product_platform.api.auth import DevLoginRequest
 from product_platform.api.settings import Settings
 from product_platform.db.testing import create_test_database
+from oidc_test_utils import OIDCTestKey, oidc_settings_kwargs
 
 
 class ProductApiShellPhase2Tests(unittest.TestCase):
@@ -132,6 +132,7 @@ class ProductApiShellPhase2Tests(unittest.TestCase):
     def test_production_http_errors_do_not_leak_route_specific_details(self) -> None:
         database = create_test_database()
         try:
+            oidc_key = OIDCTestKey()
             app = create_app(
                 Settings(
                     app_name="Ophanix Test Platform",
@@ -144,10 +145,11 @@ class ProductApiShellPhase2Tests(unittest.TestCase):
                     gateway_token_hash_pepper="test-pepper",
                     api_key_hash_pepper="test-api-key-pepper",
                     tool_gateway_upstream_host_allowlist=["*.example.com"],
+                    **oidc_settings_kwargs(oidc_key),
                 ),
                 database=database,
             )
-            token = app.state.auth_service.login(DevLoginRequest(email="admin@example.com")).access_token
+            token = oidc_key.token()
             client = TestClient(app, raise_server_exceptions=False)
 
             response = client.get(
@@ -165,6 +167,7 @@ class ProductApiShellPhase2Tests(unittest.TestCase):
     def test_production_validation_errors_do_not_echo_invalid_input(self) -> None:
         database = create_test_database()
         try:
+            oidc_key = OIDCTestKey()
             app = create_app(
                 Settings(
                     app_name="Ophanix Test Platform",
@@ -177,10 +180,11 @@ class ProductApiShellPhase2Tests(unittest.TestCase):
                     gateway_token_hash_pepper="test-pepper",
                     api_key_hash_pepper="test-api-key-pepper",
                     tool_gateway_upstream_host_allowlist=["*.example.com"],
+                    **oidc_settings_kwargs(oidc_key),
                 ),
                 database=database,
             )
-            token = app.state.auth_service.login(DevLoginRequest(email="admin@example.com")).access_token
+            token = oidc_key.token()
             client = TestClient(app, raise_server_exceptions=False)
 
             response = client.get(

@@ -99,6 +99,9 @@ FEATURE_MIGRATIONS = [
     "0069",
     "0070",
     "0071",
+    "0072",
+    "0073",
+    "0074",
 ]
 
 ALL_EXPECTED_MIGRATIONS = [*EXPECTED_MIGRATIONS, *FEATURE_MIGRATIONS]
@@ -135,8 +138,15 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertIn("organizations", tables)
             self.assertIn("environments", tables)
             self.assertIn("api_keys", tables)
+            api_key_columns = column_names(connection, "api_keys")
+            self.assertIn("created_by", api_key_columns)
+            self.assertIn("revoked_by", api_key_columns)
+            self.assertIn("revoked_reason", api_key_columns)
+            self.assertIn("rotated_from_key_id", api_key_columns)
+            self.assertIn("rotated_to_key_id", api_key_columns)
             self.assertIn("audit_events", tables)
             self.assertIn("audit_hash_checkpoints", tables)
+            self.assertIn("environment_memberships", tables)
             self.assertIn("agents", tables)
             self.assertIn("agent_lifecycle_events", tables)
             identity_columns = column_names(connection, "agent_identities")
@@ -270,9 +280,22 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertIn("tool_response_policies", tables)
             self.assertIn("tool_runtime_actions", tables)
             self.assertIn("tool_runtime_action_events", tables)
+            self.assertIn("tool_delegation_requirements", tables)
+            self.assertIn("tool_delegated_authorizations", tables)
+            self.assertIn("tool_oauth_authorization_sessions", tables)
             self.assertIn("tool_invocation_idempotency_records", tables)
             self.assertIn("tool_gateway_rate_limit_windows", tables)
             self.assertIn("tool_gateway_circuit_breaker_state", tables)
+            policy_decision_columns = column_names(connection, "tool_policy_decisions")
+            self.assertIn("delegated_user_id", policy_decision_columns)
+            self.assertIn("provider_account_id", policy_decision_columns)
+            self.assertIn("approval_state", policy_decision_columns)
+            self.assertIn("authorization_session_id", policy_decision_columns)
+            runtime_action_columns = column_names(connection, "tool_runtime_actions")
+            self.assertIn("delegated_user_id", runtime_action_columns)
+            self.assertIn("provider_account_id", runtime_action_columns)
+            self.assertIn("approval_state", runtime_action_columns)
+            self.assertIn("authorization_session_id", runtime_action_columns)
             upstream_columns = column_names(connection, "tool_upstream_targets")
             self.assertIn("auth_config_json", upstream_columns)
             self.assertIn("query_parameter_allowlist_json", upstream_columns)
@@ -313,6 +336,22 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
                     self.assertNotIn("source_event_hash", column_names(connection, "evidence_items"))
                     self.assertIn("event_count", column_names(connection, "audit_exports"))
                     self.assertIn("audit_hash_checkpoints", tables)
+                if migration == "0072":
+                    self.assertNotIn("environment_memberships", tables)
+                    self.assertIn("compliance_recompute_runs", tables)
+                if migration == "0073":
+                    self.assertNotIn("tool_delegation_requirements", tables)
+                    self.assertNotIn("tool_delegated_authorizations", tables)
+                    self.assertNotIn("tool_oauth_authorization_sessions", tables)
+                    self.assertNotIn(
+                        "delegated_user_id",
+                        column_names(connection, "tool_policy_decisions"),
+                    )
+                    self.assertNotIn(
+                        "authorization_session_id",
+                        column_names(connection, "tool_runtime_actions"),
+                    )
+                    self.assertIn("environment_memberships", tables)
                 if migration == "0070":
                     audit_export_columns = column_names(connection, "audit_exports")
                     self.assertNotIn("event_count", audit_export_columns)

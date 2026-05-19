@@ -59,6 +59,12 @@ class GatewayPrincipal(BaseModel):
     scopes: list[str] = Field(default_factory=list)
     scope_grants: list[GatewayCredentialScope] = Field(default_factory=list)
     request_id: str
+    delegated_user_id: str | None = None
+    delegated_provider_account_id: str | None = None
+    delegated_authorization_id: str | None = None
+    delegated_scopes: list[str] = Field(default_factory=list)
+    approval_state: str | None = None
+    authorization_session_id: str | None = None
 
     def allows_tool_scope(self, required_scope: str, *, tool_id: str, tool_name: str) -> bool:
         """Return whether this credential grants a scope for the specific tool resource."""

@@ -80,7 +80,25 @@ export function userHasPermission(user: UserPrincipal | null | undefined, permis
   );
 }
 
-export function canAccessRoute(path: string, user: UserPrincipal | null | undefined) {
+export function userHasEnvironmentAccess(
+  user: UserPrincipal | null | undefined,
+  environmentId: string | null | undefined
+) {
+  if (!user || !environmentId) {
+    return false;
+  }
+  const environmentIds = user.environment_ids ?? [];
+  return environmentIds.includes(environmentId);
+}
+
+export function canAccessRoute(
+  path: string,
+  user: UserPrincipal | null | undefined,
+  environmentId?: string | null
+) {
+  if (environmentId !== undefined && !userHasEnvironmentAccess(user, environmentId)) {
+    return false;
+  }
   const requiredPermission = routePermissions[path];
   if (!requiredPermission) {
     return true;

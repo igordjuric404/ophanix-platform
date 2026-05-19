@@ -60,6 +60,9 @@ class Settings:
     default_organization_id: str = field(
         default_factory=lambda: os.environ.get("OPHANIX_DEFAULT_ORGANIZATION_ID", "org_default")
     )
+    default_environment_id: str = field(
+        default_factory=lambda: os.environ.get("OPHANIX_DEFAULT_ENVIRONMENT_ID", "env_default")
+    )
     database_url: str = field(
         default_factory=lambda: os.environ.get("OPHANIX_DATABASE_URL", DEFAULT_POSTGRES_URL)
     )
@@ -122,8 +125,40 @@ class Settings:
     api_key_hash_pepper: str | None = field(
         default_factory=lambda: os.environ.get("OPHANIX_API_KEY_HASH_PEPPER")
     )
+    api_key_default_ttl_seconds: int = field(
+        default_factory=lambda: _int_env("OPHANIX_API_KEY_DEFAULT_TTL_SECONDS", 90 * 24 * 60 * 60)
+    )
+    api_key_max_ttl_seconds: int = field(
+        default_factory=lambda: _int_env("OPHANIX_API_KEY_MAX_TTL_SECONDS", 365 * 24 * 60 * 60)
+    )
     idp_issuer_url: str | None = field(default_factory=lambda: os.environ.get("OPHANIX_IDP_ISSUER_URL"))
     idp_audience: str | None = field(default_factory=lambda: os.environ.get("OPHANIX_IDP_AUDIENCE"))
+    idp_jwks_url: str | None = field(default_factory=lambda: os.environ.get("OPHANIX_IDP_JWKS_URL"))
+    idp_jwks_json: str | None = field(default_factory=lambda: os.environ.get("OPHANIX_IDP_JWKS_JSON"))
+    idp_algorithms: list[str] = field(
+        default_factory=lambda: _csv_env("OPHANIX_IDP_ALGORITHMS", "RS256")
+    )
+    idp_groups_claim: str = field(
+        default_factory=lambda: os.environ.get("OPHANIX_IDP_GROUPS_CLAIM", "groups")
+    )
+    idp_roles_claim: str = field(
+        default_factory=lambda: os.environ.get("OPHANIX_IDP_ROLES_CLAIM", "roles")
+    )
+    idp_environment_ids_claim: str = field(
+        default_factory=lambda: os.environ.get(
+            "OPHANIX_IDP_ENVIRONMENT_IDS_CLAIM",
+            "ophanix_environment_ids",
+        )
+    )
+    idp_organization_id_claim: str = field(
+        default_factory=lambda: os.environ.get(
+            "OPHANIX_IDP_ORGANIZATION_ID_CLAIM",
+            "ophanix_organization_id",
+        )
+    )
+    idp_group_role_map_json: str = field(
+        default_factory=lambda: os.environ.get("OPHANIX_IDP_GROUP_ROLE_MAP_JSON", "{}")
+    )
     tls_certificate_ref: str | None = field(default_factory=lambda: os.environ.get("OPHANIX_TLS_CERTIFICATE_REF"))
     internal_cidrs: list[str] = field(
         default_factory=lambda: _csv_env("OPHANIX_INTERNAL_CIDRS", "10.0.0.0/8")

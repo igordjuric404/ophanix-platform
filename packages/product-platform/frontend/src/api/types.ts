@@ -12,6 +12,10 @@ export interface UserPrincipal {
   scopes?: string[];
   organization_id?: string | null;
   environment_id?: string | null;
+  environment_ids?: string[];
+  idp_subject?: string | null;
+  idp_issuer?: string | null;
+  token_id?: string | null;
   actor_type?: string;
 }
 
@@ -27,6 +31,7 @@ export interface DevLoginRequest {
   display_name?: string;
   roles?: string[];
   organization_id?: string;
+  environment_ids?: string[];
 }
 
 export interface Organization {

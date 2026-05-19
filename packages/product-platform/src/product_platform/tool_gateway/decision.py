@@ -12,12 +12,24 @@ from pydantic import BaseModel, Field, field_validator
 from product_platform.db.ids import generate_id
 from product_platform.db.time import utc_now_iso
 from product_platform.tool_gateway.auth import GatewayPrincipal
+from product_platform.tool_gateway.delegation import (
+    AuthorizationChallengeResponse,
+    ToolDelegationRepository,
+    authorization_has_required_scopes,
+    authorization_is_current,
+    authorization_scopes,
+    authorization_session_response,
+    requirement_scopes,
+)
 from product_platform.tool_gateway.repository import ToolRegistryRepository
 
-TOOL_POLICY_DECISIONS = {"allow", "deny"}
+TOOL_POLICY_DECISIONS = {"allow", "deny", "pending_authorization", "require_approval"}
 TOOL_POLICY_REASON_CODES = {
     "agent_missing",
     "agent_inactive",
+    "approval_required",
+    "authorization_required",
+    "delegated_authorization_expired",
     "tool_missing",
     "tool_inactive",
     "permission_missing",
@@ -52,6 +64,9 @@ SECRET_LIKE_VALUE_PATTERNS = (
 TOOL_POLICY_REASON_MESSAGES = {
     "agent_missing": "Authenticated agent identity was not found.",
     "agent_inactive": "Agent is not active.",
+    "approval_required": "Delegated tool authorization requires approval.",
+    "authorization_required": "User authorization is required.",
+    "delegated_authorization_expired": "Delegated user authorization is expired.",
     "tool_missing": "Requested tool was not found.",
     "tool_inactive": "Requested tool is not active.",
     "permission_missing": "No active permission binding was found.",
@@ -75,6 +90,10 @@ class ToolPolicyDecisionCreate(BaseModel):
     request_id: str = Field(min_length=1)
     correlation_id: str | None = None
     payload_summary: dict[str, Any] = Field(default_factory=dict)
+    delegated_user_id: str | None = None
+    provider_account_id: str | None = None
+    approval_state: str | None = None
+    authorization_session_id: str | None = None
 
     @field_validator("decision")
     @classmethod
@@ -102,7 +121,17 @@ class ToolPolicyDecisionCreate(BaseModel):
             raise ValueError("field must not be blank.")
         return stripped
 
-    @field_validator("agent_id", "tool_id", "permission_id", "matched_policy_id", "correlation_id")
+    @field_validator(
+        "agent_id",
+        "tool_id",
+        "permission_id",
+        "matched_policy_id",
+        "correlation_id",
+        "delegated_user_id",
+        "provider_account_id",
+        "approval_state",
+        "authorization_session_id",
+    )
     @classmethod
     def _strip_optional_text(cls, value: str | None) -> str | None:
         if value is None:
@@ -127,6 +156,11 @@ class ToolPolicyDecisionResult(BaseModel):
     request_id: str
     correlation_id: str | None = None
     payload_summary: dict[str, Any] = Field(default_factory=dict)
+    delegated_user_id: str | None = None
+    provider_account_id: str | None = None
+    approval_state: str | None = None
+    authorization_session_id: str | None = None
+    authorization_challenge: AuthorizationChallengeResponse | None = None
     created_at: str
 
 
@@ -188,9 +222,10 @@ class ToolPolicyDecisionRepository:
                 id, organization_id, environment_id, agent_id, tool_id,
                 permission_id, decision, reason_code, reason_message,
                 matched_policy_id, request_id, correlation_id,
-                payload_summary_json, created_at
+                payload_summary_json, delegated_user_id, provider_account_id,
+                approval_state, authorization_session_id, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 decision_id,
@@ -206,6 +241,10 @@ class ToolPolicyDecisionRepository:
                 body.request_id,
                 body.correlation_id,
                 json.dumps(body.payload_summary, sort_keys=True, separators=(",", ":")),
+                body.delegated_user_id,
+                body.provider_account_id,
+                body.approval_state,
+                body.authorization_session_id,
                 utc_now_iso(),
             ),
         )
@@ -246,6 +285,7 @@ class ToolPolicyDecisionService:
         self.policy_hook = policy_hook
         self.registry = ToolRegistryRepository(connection, organization_id, environment_id)
         self.decisions = ToolPolicyDecisionRepository(connection, organization_id, environment_id)
+        self.delegations = ToolDelegationRepository(connection, organization_id, environment_id)
 
     def evaluate_tool_call(
         self,
@@ -383,6 +423,18 @@ class ToolPolicyDecisionService:
                 payload_summary=payload_summary,
             )
 
+        delegation_decision = self._evaluate_delegation_requirement(
+            principal=principal,
+            tool=tool,
+            permission_id=permission["id"],
+            request_id=request_id,
+            correlation_id=correlation_id,
+            payload_summary=payload_summary,
+            now=now,
+        )
+        if delegation_decision is not None:
+            return delegation_decision
+
         if self.policy_hook is not None:
             context = ToolPolicyHookContext(
                 organization_id=self.organization_id,
@@ -448,6 +500,185 @@ class ToolPolicyDecisionService:
             payload_summary=payload_summary,
         )
 
+    def _evaluate_delegation_requirement(
+        self,
+        *,
+        principal: GatewayPrincipal,
+        tool: Row,
+        permission_id: str,
+        request_id: str,
+        correlation_id: str | None,
+        payload_summary: dict[str, Any],
+        now: str | None,
+    ) -> ToolPolicyDecisionResult | None:
+        requirement = self.delegations.get_active_requirement(str(tool["id"]))
+        if requirement is None:
+            return None
+
+        required_scopes = requirement_scopes(requirement)
+        if not principal.delegated_user_id or not principal.delegated_provider_account_id:
+            session = self.delegations.create_authorization_session(
+                agent_id=principal.agent_id,
+                credential_id=principal.credential_id,
+                tool_id=str(tool["id"]),
+                user_id=principal.delegated_user_id,
+                provider_account_id=principal.delegated_provider_account_id,
+                provider=str(requirement["provider"]),
+                required_scopes=required_scopes,
+                reason_code="authorization_required",
+                approval_state="pending_authorization",
+                status="pending_authorization",
+            )
+            challenge = authorization_session_response(session)
+            return self._persist(
+                agent_id=principal.agent_id,
+                tool_id=str(tool["id"]),
+                permission_id=permission_id,
+                decision="pending_authorization",
+                reason_code="authorization_required",
+                matched_policy_id=None,
+                request_id=request_id,
+                correlation_id=correlation_id,
+                payload_summary=payload_summary,
+                delegated_user_id=principal.delegated_user_id,
+                provider_account_id=principal.delegated_provider_account_id,
+                approval_state="pending_authorization",
+                authorization_session_id=str(session["id"]),
+                authorization_challenge=challenge,
+            )
+
+        authorization = self.delegations.find_authorization(
+            agent_id=principal.agent_id,
+            tool_id=str(tool["id"]),
+            user_id=principal.delegated_user_id,
+            provider_account_id=principal.delegated_provider_account_id,
+            provider=str(requirement["provider"]),
+        )
+        if authorization is None or authorization["status"] != "active":
+            session = self.delegations.create_authorization_session(
+                agent_id=principal.agent_id,
+                credential_id=principal.credential_id,
+                tool_id=str(tool["id"]),
+                user_id=principal.delegated_user_id,
+                provider_account_id=principal.delegated_provider_account_id,
+                provider=str(requirement["provider"]),
+                required_scopes=required_scopes,
+                reason_code="authorization_required",
+                approval_state="pending_authorization",
+                status="pending_authorization",
+            )
+            return self._persist(
+                agent_id=principal.agent_id,
+                tool_id=str(tool["id"]),
+                permission_id=permission_id,
+                decision="pending_authorization",
+                reason_code="authorization_required",
+                matched_policy_id=None,
+                request_id=request_id,
+                correlation_id=correlation_id,
+                payload_summary=payload_summary,
+                delegated_user_id=principal.delegated_user_id,
+                provider_account_id=principal.delegated_provider_account_id,
+                approval_state="pending_authorization",
+                authorization_session_id=str(session["id"]),
+                authorization_challenge=authorization_session_response(session),
+            )
+
+        if not authorization_is_current(authorization, now=now):
+            session = self.delegations.create_authorization_session(
+                agent_id=principal.agent_id,
+                credential_id=principal.credential_id,
+                tool_id=str(tool["id"]),
+                user_id=principal.delegated_user_id,
+                provider_account_id=principal.delegated_provider_account_id,
+                provider=str(requirement["provider"]),
+                required_scopes=required_scopes,
+                reason_code="delegated_authorization_expired",
+                approval_state="pending_authorization",
+                status="pending_authorization",
+            )
+            return self._persist(
+                agent_id=principal.agent_id,
+                tool_id=str(tool["id"]),
+                permission_id=permission_id,
+                decision="pending_authorization",
+                reason_code="delegated_authorization_expired",
+                matched_policy_id=None,
+                request_id=request_id,
+                correlation_id=correlation_id,
+                payload_summary=payload_summary,
+                delegated_user_id=principal.delegated_user_id,
+                provider_account_id=principal.delegated_provider_account_id,
+                approval_state="pending_authorization",
+                authorization_session_id=str(session["id"]),
+                authorization_challenge=authorization_session_response(session),
+            )
+
+        if not authorization_has_required_scopes(authorization, required_scopes):
+            session = self.delegations.create_authorization_session(
+                agent_id=principal.agent_id,
+                credential_id=principal.credential_id,
+                tool_id=str(tool["id"]),
+                user_id=principal.delegated_user_id,
+                provider_account_id=principal.delegated_provider_account_id,
+                provider=str(requirement["provider"]),
+                required_scopes=required_scopes,
+                reason_code="authorization_required",
+                approval_state="pending_authorization",
+                status="pending_authorization",
+            )
+            return self._persist(
+                agent_id=principal.agent_id,
+                tool_id=str(tool["id"]),
+                permission_id=permission_id,
+                decision="pending_authorization",
+                reason_code="authorization_required",
+                matched_policy_id=None,
+                request_id=request_id,
+                correlation_id=correlation_id,
+                payload_summary=payload_summary,
+                delegated_user_id=principal.delegated_user_id,
+                provider_account_id=principal.delegated_provider_account_id,
+                approval_state="pending_authorization",
+                authorization_session_id=str(session["id"]),
+                authorization_challenge=authorization_session_response(session),
+            )
+
+        if bool(requirement["approval_required"]) and authorization["approval_state"] != "approved":
+            session = self.delegations.create_authorization_session(
+                agent_id=principal.agent_id,
+                credential_id=principal.credential_id,
+                tool_id=str(tool["id"]),
+                user_id=principal.delegated_user_id,
+                provider_account_id=principal.delegated_provider_account_id,
+                provider=str(requirement["provider"]),
+                required_scopes=required_scopes,
+                reason_code="approval_required",
+                approval_state="pending_approval",
+                status="pending_approval",
+            )
+            return self._persist(
+                agent_id=principal.agent_id,
+                tool_id=str(tool["id"]),
+                permission_id=permission_id,
+                decision="require_approval",
+                reason_code="approval_required",
+                matched_policy_id=None,
+                request_id=request_id,
+                correlation_id=correlation_id,
+                payload_summary=payload_summary,
+                delegated_user_id=principal.delegated_user_id,
+                provider_account_id=principal.delegated_provider_account_id,
+                approval_state="pending_approval",
+                authorization_session_id=str(session["id"]),
+                authorization_challenge=authorization_session_response(session),
+            )
+
+        principal.delegated_authorization_id = str(authorization["id"])
+        principal.delegated_scopes = authorization_scopes(authorization)
+        principal.approval_state = str(authorization["approval_state"])
+        return None
+
     def _get_agent(self, agent_id: str) -> Row | None:
         return self.connection.execute(
             """
@@ -488,6 +719,11 @@ class ToolPolicyDecisionService:
         correlation_id: str | None,
         payload_summary: dict[str, Any],
         reason_message: str | None = None,
+        delegated_user_id: str | None = None,
+        provider_account_id: str | None = None,
+        approval_state: str | None = None,
+        authorization_session_id: str | None = None,
+        authorization_challenge: AuthorizationChallengeResponse | None = None,
     ) -> ToolPolicyDecisionResult:
         row = self.decisions.create_decision(
             ToolPolicyDecisionCreate(
@@ -501,9 +737,13 @@ class ToolPolicyDecisionService:
                 request_id=request_id,
                 correlation_id=correlation_id,
                 payload_summary=payload_summary,
+                delegated_user_id=delegated_user_id,
+                provider_account_id=provider_account_id,
+                approval_state=approval_state,
+                authorization_session_id=authorization_session_id,
             )
         )
-        return tool_policy_decision_response(row)
+        return tool_policy_decision_response(row, authorization_challenge=authorization_challenge)
 
 
 def summarize_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -519,7 +759,11 @@ def summarize_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
-def tool_policy_decision_response(row: Row) -> ToolPolicyDecisionResult:
+def tool_policy_decision_response(
+    row: Row,
+    *,
+    authorization_challenge: AuthorizationChallengeResponse | None = None,
+) -> ToolPolicyDecisionResult:
     """Serialize a persisted policy decision."""
 
     return ToolPolicyDecisionResult(
@@ -536,6 +780,11 @@ def tool_policy_decision_response(row: Row) -> ToolPolicyDecisionResult:
         request_id=row["request_id"],
         correlation_id=row["correlation_id"],
         payload_summary=json.loads(row["payload_summary_json"]),
+        delegated_user_id=row["delegated_user_id"],
+        provider_account_id=row["provider_account_id"],
+        approval_state=row["approval_state"],
+        authorization_session_id=row["authorization_session_id"],
+        authorization_challenge=authorization_challenge,
         created_at=row["created_at"],
     )
 

@@ -3,14 +3,15 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import type { UserPrincipal } from "../api/types";
-import { canAccessRoute, permissions, rolePermissions } from "./rbac";
+import { canAccessRoute, permissions, rolePermissions, userHasEnvironmentAccess } from "./rbac";
 
 function userWithRole(role: string): UserPrincipal {
   return {
     id: `user_${role}`,
     email: "user@example.com",
     display_name: role,
-    roles: [role]
+    roles: [role],
+    environment_ids: ["env_default"]
   };
 }
 
@@ -55,5 +56,15 @@ describe("route RBAC", () => {
     const securityAdmin = userWithRole("Security Admin");
 
     expect(canAccessRoute("/settings", securityAdmin)).toBe(true);
+  });
+
+  it("matches backend environment membership checks for selected environments", () => {
+    const policyAdmin = userWithRole("Policy Admin");
+    const orgOnlyPolicyAdmin = { ...policyAdmin, environment_ids: [] };
+
+    expect(userHasEnvironmentAccess(policyAdmin, "env_default")).toBe(true);
+    expect(userHasEnvironmentAccess(policyAdmin, "env_prod")).toBe(false);
+    expect(canAccessRoute("/policies", policyAdmin, "env_default")).toBe(true);
+    expect(canAccessRoute("/policies", orgOnlyPolicyAdmin, "env_default")).toBe(false);
   });
 });

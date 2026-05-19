@@ -14,6 +14,7 @@ from product_platform.tool_gateway.sdk import (
     OphanixToolGatewayClient,
     StaticTokenProvider,
     ToolAuthenticationError,
+    ToolAuthorizationRequired,
     ToolDeniedError,
     ToolGatewayError,
 )
@@ -329,6 +330,65 @@ class ToolGatewaySdkPhase2Tests(unittest.TestCase):
         self.assertEqual(raised.exception.reason_code, "permission_missing")
         self.assertEqual(raised.exception.request_id, "req-denied")
         self.assertEqual(raised.exception.correlation_id, "corr-denied")
+
+    def test_authorization_required_response_raises_challenge_error(self) -> None:
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                403,
+                json={
+                    "request_id": "req-authz",
+                    "correlation_id": "corr-authz",
+                    "tool_name": "claims.lookup",
+                    "decision": {"decision": "pending_authorization"},
+                    "reason_code": "authorization_required",
+                    "result": None,
+                    "error": {
+                        "code": "authorization_required",
+                        "message": "User authorization is required.",
+                        "authorization": {
+                            "authorization_session_id": "oauthsess_123",
+                            "authorization_url": "https://auth.example.com/start",
+                            "provider": "claims-oauth",
+                            "required_scopes": ["claims.read"],
+                            "approval_state": "pending_authorization",
+                        },
+                    },
+                },
+            )
+
+        client = _client(handler)
+
+        with self.assertRaises(ToolAuthorizationRequired) as raised:
+            client.call_tool("claims.lookup", {"claim_id": "claim_123"})
+
+        self.assertEqual(raised.exception.status_code, 403)
+        self.assertEqual(raised.exception.reason_code, "authorization_required")
+        self.assertEqual(raised.exception.challenge.authorization_session_id, "oauthsess_123")
+        self.assertEqual(raised.exception.challenge.required_scopes, ("claims.read",))
+
+    def test_authorization_status_helper_polls_gateway(self) -> None:
+        seen: dict[str, str] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["path"] = request.url.path
+            return httpx.Response(
+                200,
+                json={
+                    "authorization_session_id": "oauthsess_123",
+                    "status": "authorized",
+                    "approval_state": "approved",
+                    "provider": "claims-oauth",
+                    "required_scopes": ["claims.read"],
+                },
+            )
+
+        client = _client(handler)
+        status = client.get_authorization_status("oauthsess_123")
+
+        self.assertEqual(seen["path"], "/api/v1/gateway/authorizations/oauthsess_123")
+        self.assertEqual(status.authorization_session_id, "oauthsess_123")
+        self.assertEqual(status.status, "authorized")
+        self.assertEqual(status.approval_state, "approved")
 
     def test_generic_403_response_is_not_reported_as_policy_denial(self) -> None:
         client = _client(

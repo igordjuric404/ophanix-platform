@@ -36,11 +36,17 @@ export function useTenantSelection(user: UserPrincipal): TenantSelection {
     organizationItems.find((organization) => organization.id === user.organization_id) ??
     organizationItems[0] ??
     null;
+  const allowedEnvironmentIds =
+    user.environment_ids === undefined ? null : new Set(user.environment_ids);
   const organizationEnvironments = selectedOrganization
     ? environmentItems.filter(
-        (environment) => environment.organization_id === selectedOrganization.id
+        (environment) =>
+          environment.organization_id === selectedOrganization.id &&
+          (allowedEnvironmentIds === null || allowedEnvironmentIds.has(environment.id))
       )
-    : environmentItems;
+    : environmentItems.filter(
+        (environment) => allowedEnvironmentIds === null || allowedEnvironmentIds.has(environment.id)
+      );
   const selectedEnvironment =
     organizationEnvironments.find((environment) => environment.id === selectedEnvironmentId) ??
     organizationEnvironments[0] ??

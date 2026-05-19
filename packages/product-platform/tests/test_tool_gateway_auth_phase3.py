@@ -24,6 +24,7 @@ from product_platform.tool_gateway.models import (
 )
 from product_platform.tool_gateway.operational_state import tool_gateway_rate_limit_result
 from product_platform.tool_gateway.repository import ToolRegistryRepository
+from oidc_test_utils import OIDCTestKey, oidc_settings_kwargs
 
 
 class ToolGatewayAuthPhase3Tests(unittest.TestCase):
@@ -99,6 +100,7 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
         return headers
 
     def _production_settings(self, **overrides: Any) -> Settings:
+        oidc_key = OIDCTestKey()
         values: dict[str, Any] = {
             "app_name": "Ophanix Test Platform",
             "environment": "production",
@@ -111,6 +113,7 @@ class ToolGatewayAuthPhase3Tests(unittest.TestCase):
             "api_key_hash_pepper": "test-api-key-pepper",
             "tool_gateway_upstream_host_allowlist": ["*.example.com"],
             "cors_origins": ["https://app.example.com"],
+            **oidc_settings_kwargs(oidc_key),
         }
         values.update(overrides)
         return Settings(**values)

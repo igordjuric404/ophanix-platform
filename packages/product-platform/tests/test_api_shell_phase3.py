@@ -12,6 +12,7 @@ from product_platform.api.dependencies import (
 )
 from product_platform.api.settings import Settings
 from product_platform.db.testing import create_test_database
+from oidc_test_utils import OIDCTestKey, oidc_settings_kwargs
 
 
 def _settings() -> Settings:
@@ -87,6 +88,7 @@ class ProductApiShellPhase3Tests(unittest.TestCase):
     def test_production_readiness_redacts_dependency_messages(self) -> None:
         database = create_test_database()
         try:
+            oidc_key = OIDCTestKey()
             registry = DependencyRegistry()
             registry.register(
                 "database",
@@ -110,6 +112,7 @@ class ProductApiShellPhase3Tests(unittest.TestCase):
                         gateway_token_hash_pepper="test-pepper",
                         api_key_hash_pepper="test-api-key-pepper",
                         tool_gateway_upstream_host_allowlist=["*.example.com"],
+                        **oidc_settings_kwargs(oidc_key),
                     ),
                     database=database,
                     dependency_registry=registry,

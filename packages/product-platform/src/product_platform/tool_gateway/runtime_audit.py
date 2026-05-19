@@ -19,9 +19,11 @@ DEFAULT_IDEMPOTENCY_REPLAY_RETENTION_SECONDS = 7 * 24 * 60 * 60
 
 TOOL_RUNTIME_ACTION_STATUSES = {
     "authentication_failed",
+    "authorization_pending",
     "denied",
     "validation_failed",
     "allowed",
+    "approval_required",
     "forwarded",
     "upstream_failed",
     "response_blocked",
@@ -47,6 +49,10 @@ class ToolRuntimeActionCreate(BaseModel):
     response_summary: dict[str, Any] | None = None
     redaction_applied: bool = False
     error_code: str | None = None
+    delegated_user_id: str | None = None
+    provider_account_id: str | None = None
+    approval_state: str | None = None
+    authorization_session_id: str | None = None
 
     @field_validator("request_id")
     @classmethod
@@ -160,6 +166,10 @@ class ToolRuntimeActionResponse(BaseModel):
     response_summary: dict[str, Any] | None = None
     redaction_applied: bool
     error_code: str | None = None
+    delegated_user_id: str | None = None
+    provider_account_id: str | None = None
+    approval_state: str | None = None
+    authorization_session_id: str | None = None
     created_at: str
     updated_at: str
 
@@ -195,9 +205,10 @@ class ToolRuntimeActionRepository:
                 agent_id, credential_id, tool_id, permission_id, decision_id,
                 action_status, reason_code, upstream_status_code, latency_ms,
                 payload_summary_json, response_summary_json, redaction_applied,
-                error_code, created_at, updated_at
+                error_code, delegated_user_id, provider_account_id, approval_state,
+                authorization_session_id, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 action_id,
@@ -218,6 +229,10 @@ class ToolRuntimeActionRepository:
                 _optional_summary_to_json(body.response_summary),
                 1 if body.redaction_applied else 0,
                 body.error_code,
+                body.delegated_user_id,
+                body.provider_account_id,
+                body.approval_state,
+                body.authorization_session_id,
                 now,
                 now,
             ),
@@ -729,6 +744,10 @@ def tool_runtime_action_response(row: Row) -> ToolRuntimeActionResponse:
         response_summary=_loads_optional_mapping(row["response_summary_json"]),
         redaction_applied=bool(row["redaction_applied"]),
         error_code=row["error_code"],
+        delegated_user_id=row["delegated_user_id"],
+        provider_account_id=row["provider_account_id"],
+        approval_state=row["approval_state"],
+        authorization_session_id=row["authorization_session_id"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
