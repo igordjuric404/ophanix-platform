@@ -1,5 +1,88 @@
 # Feature Audit: MCP Proxy and Tool Governance
 
+## Remediation Summary
+
+Date of remediation: 2026-05-19
+
+Total findings in this report: 5
+
+Number fixed: 5
+
+Number partially fixed: 0
+
+Number blocked: 0
+
+Number already fixed: 0
+
+Files changed:
+
+- `packages/product-platform/src/product_platform/mcp/transport.py`
+- `packages/product-platform/src/product_platform/mcp/discovery.py`
+- `packages/product-platform/src/product_platform/mcp/repository.py`
+- `packages/product-platform/src/product_platform/mcp/proxy.py`
+- `packages/product-platform/src/product_platform/mcp/models.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/db/migrations/0078_mcp_proxy_policy_upstream_evidence.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0078_mcp_proxy_policy_upstream_evidence.down.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0079_mcp_approval_release_evidence.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0079_mcp_approval_release_evidence.down.sql`
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase1.py`
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase2.py`
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase3.py`
+- `packages/product-platform/tests/test_mcp_proxy_approval_release_phase2.py`
+- `packages/product-platform/tests/test_mcp_proxy_traffic_phase1.py`
+- `packages/product-platform/tests/test_mcp_proxy_traffic_phase2.py`
+- `packages/product-platform/tests/test_mcp_proxy_traffic_phase3.py`
+- `packages/product-platform/tests/test_mcp_proxy_traffic_phase4.py`
+- `packages/product-platform/tests/test_mcp_proxy_traffic_overall.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+- `packages/agent-os/src/agent_os/policies/schema.py`
+- `docs/product-platform-worktree/execution-logs/mcp-proxy-tool-governance-report-v1-remediation/*`
+
+Tests added or updated:
+
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase1.py`
+  - `MCPProxyGovernancePhase1Tests::test_real_mcp_tools_list_and_call_are_mediated`
+  - `MCPProxyGovernancePhase1Tests::test_demo_adapter_is_rejected_in_production`
+  - `MCPProxyGovernancePhase1Tests::test_bound_deny_policy_blocks_before_upstream_execution`
+  - `MCPProxyGovernancePhase1Tests::test_bound_approval_policy_creates_pending_approval_before_execution`
+- `packages/product-platform/tests/test_db_phase1.py`
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase2.py`
+  - `MCPProxyGovernancePhase2Tests::test_approved_call_releases_only_original_payload`
+  - `MCPProxyGovernancePhase2Tests::test_expired_approval_cannot_be_released`
+  - `MCPProxyGovernancePhase2Tests::test_policy_change_between_request_and_release_is_revalidated`
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase3.py`
+  - `MCPProxyGovernancePhase3Tests::test_not_scanned_tool_is_denied_before_upstream_execution`
+  - `MCPProxyGovernancePhase3Tests::test_disabled_server_and_tool_are_denied`
+  - `MCPProxyGovernancePhase3Tests::test_open_blocking_finding_denies_call_with_finding_evidence`
+  - `MCPProxyGovernancePhase3Tests::test_private_endpoint_is_denied_even_with_clean_tool_state`
+  - `MCPProxyGovernancePhase3Tests::test_production_runtime_denies_loopback_endpoint`
+- Existing MCP proxy traffic/governance tests updated to mark clean scan state where they exercise policy, approval, sanitizer, or baseline proxy behavior.
+- `packages/product-platform/tests/test_mcp_proxy_traffic_phase4.py`
+  - `MCPProxyTrafficPhase4Tests::test_mcp_proxy_cost_budget_denial`
+  - `MCPProxyTrafficPhase4Tests::test_mcp_proxy_rate_limit_enforced`
+  - `MCPProxyTrafficPhase4Tests::test_mcp_proxy_rate_limit_shared_across_app_instances`
+  - `MCPProxyTrafficPhase4Tests::test_rate_limit_create_and_list`
+
+Validation commands run:
+
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_governance_phase1.py' -v` - passed, 4 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_governance_phase2.py' -v` - passed, 3 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_governance_phase3.py' -v` - passed, 5 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_governance_phase*.py' -v` - passed, 12 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_traffic_phase4.py' -v` - passed, 4 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_traffic_phase*.py' -v` - passed, 14 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_traffic_overall.py' -v` - passed, 1 test.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_approval_release_phase2.py' -v` - passed, 3 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_security_scans_phase*.py' -v` - passed, 9 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` - passed, 5 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_policy_evaluations_phase1.py' -v` - passed, 4 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_policy_bindings_overall.py' -v` - passed, 1 test.
+
+Remaining risks:
+
+- None.
+
 ## 1. Scope
 
 This audit covers MCP server/tool registry, MCP proxy calls, approval flow, policy bindings, rate limits, scan gating, Tool Gateway policy decisions, SDK coverage, and audit redaction. It inspects `product_platform/mcp`, `product_platform/tool_gateway`, MCP-related migrations, routes in `api/app.py`, `packages/agent-mesh/packages/mcp-proxy`, `agent-mcp-governance`, and `ophanix-python-sdk`. Relevant benchmarks are OpenAI Agents SDK MCP tools and approvals, AWS AgentCore Gateway, Google Agent Gateway, JFrog MCP Registry/Agent Guard, Arcade/Composio authorization, Galileo, and Onyx. Out of scope: plugin catalog governance, covered in PLG.
@@ -24,6 +107,38 @@ Current workflow: operators can register/discover MCP-like tools, record proxy c
 ## 4. Findings
 
 ### F-MCP-001 [P0] [Tool Governance] Product MCP proxy is a demo recorder, not a real MCP data plane
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Added a real MCP Streamable HTTP JSON-RPC client with JSON and SSE response parsing, wired MCP discovery to call `tools/list` for non-demo servers, wired MCP proxy execution to call real upstream `tools/call`, persisted upstream request/result metadata on tool-call decisions, and rejected demo adapter selection in production.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/mcp/transport.py`
+- `packages/product-platform/src/product_platform/mcp/discovery.py`
+- `packages/product-platform/src/product_platform/mcp/proxy.py`
+- `packages/product-platform/src/product_platform/mcp/models.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/db/migrations/0078_mcp_proxy_policy_upstream_evidence.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0078_mcp_proxy_policy_upstream_evidence.down.sql`
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase1.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+
+**Tests added or updated:**
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase1.py::MCPProxyGovernancePhase1Tests::test_real_mcp_tools_list_and_call_are_mediated`
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase1.py::MCPProxyGovernancePhase1Tests::test_demo_adapter_is_rejected_in_production`
+- `packages/product-platform/tests/test_db_phase1.py::DatabaseMigrationPhase1Tests::test_migration_applies_to_empty_database`
+
+**Validation performed:**
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_governance_phase1.py' -v` - passed, 4 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_traffic_phase*.py' -v` - passed, 14 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` - passed, 5 tests.
+
+**Remaining work:**
+None.
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Incorrect
 
@@ -77,6 +192,37 @@ Ophanix can appear to govern MCP while real clients bypass the product data plan
 
 ### F-MCP-002 [P0] [Tool Governance] MCP policy bindings are linked but not enforced before execution
 
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Replaced heuristic-only proxy policy handling with live Product Platform policy evaluation for bound MCP tool/server policies before upstream execution. Enforced deny/block decisions before `tools/call`, created pending approval records for enforced `require_approval` policy actions before execution, and persisted policy binding/version/action/reason/matched-rule/input evidence with the MCP tool-call record.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/mcp/proxy.py`
+- `packages/product-platform/src/product_platform/mcp/models.py`
+- `packages/product-platform/src/product_platform/db/migrations/0078_mcp_proxy_policy_upstream_evidence.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0078_mcp_proxy_policy_upstream_evidence.down.sql`
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase1.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+- `packages/agent-os/src/agent_os/policies/schema.py`
+
+**Tests added or updated:**
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase1.py::MCPProxyGovernancePhase1Tests::test_bound_deny_policy_blocks_before_upstream_execution`
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase1.py::MCPProxyGovernancePhase1Tests::test_bound_approval_policy_creates_pending_approval_before_execution`
+- `packages/product-platform/tests/test_db_phase1.py::DatabaseMigrationPhase1Tests::test_migration_applies_to_empty_database`
+
+**Validation performed:**
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_governance_phase1.py' -v` - passed, 4 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_policy_evaluations_phase1.py' -v` - passed, 4 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_policy_bindings_overall.py' -v` - passed, 1 test.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_traffic_phase*.py' -v` - passed, 14 tests.
+
+**Remaining work:**
+None.
+
+**Remediated by:**
+AI coding agent
+
 **Status:** Incorrect
 
 **Current implementation:**
@@ -128,6 +274,48 @@ Unsafe tool calls can execute despite configured policy bindings.
 **Affects stated Ophanix product promise:** Yes
 
 ### F-MCP-003 [P1] [Security] MCP supply-chain scan state does not gate calls
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Added an MCP supply-chain gate in the proxy decision path and approval-release path. Proxy calls now fail closed when the server is not active, the endpoint is unsafe, the tool has no current version, the current version has open MCP findings, the current version is not in an allowed scan state, or the tool is disabled/non-active. MCP scan completion now refreshes persisted tool/version gate state, marking clean versions `passed`/`active` and versions with open findings `blocked`. Finding lifecycle changes refresh the tool gate state so accepted/resolved/false-positive findings stop blocking when no open findings remain. Unsafe private/link-local endpoints are denied before any upstream call, and direct proxy calls now pass the app runtime environment into the supply-chain gate so production loopback rules are enforced.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/mcp/repository.py`
+- `packages/product-platform/src/product_platform/mcp/proxy.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase3.py`
+- `packages/product-platform/tests/test_mcp_proxy_traffic_phase1.py`
+- `packages/product-platform/tests/test_mcp_proxy_traffic_phase2.py`
+- `packages/product-platform/tests/test_mcp_proxy_traffic_phase3.py`
+- `packages/product-platform/tests/test_mcp_proxy_traffic_overall.py`
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase1.py`
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase2.py`
+- `packages/product-platform/tests/test_mcp_proxy_approval_release_phase2.py`
+- `docs/product-platform-worktree/execution-logs/mcp-proxy-tool-governance-report-v1-remediation/phase-03-supply-chain-scan-gate-and-endpoint-hardening.md`
+- `docs/product-platform-worktree/execution-logs/mcp-proxy-tool-governance-report-v1-remediation/00-execution-index.md`
+
+**Tests added or updated:**
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase3.py::MCPProxyGovernancePhase3Tests::test_not_scanned_tool_is_denied_before_upstream_execution`
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase3.py::MCPProxyGovernancePhase3Tests::test_disabled_server_and_tool_are_denied`
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase3.py::MCPProxyGovernancePhase3Tests::test_open_blocking_finding_denies_call_with_finding_evidence`
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase3.py::MCPProxyGovernancePhase3Tests::test_private_endpoint_is_denied_even_with_clean_tool_state`
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase3.py::MCPProxyGovernancePhase3Tests::test_production_runtime_denies_loopback_endpoint`
+- Existing MCP proxy traffic, governance, and approval-release tests updated to set clean scan state where they exercise unrelated behavior.
+
+**Validation performed:**
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_governance_phase3.py' -v` - passed, 5 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_governance_phase*.py' -v` - passed, 12 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_traffic_phase*.py' -v` - passed, 14 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_traffic_overall.py' -v` - passed, 1 test.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_approval_release_phase2.py' -v` - passed, 3 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_security_scans_phase*.py' -v` - passed, 9 tests.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Risky
 
@@ -181,6 +369,44 @@ Untrusted or changed tool servers can execute in governed environments.
 
 ### F-MCP-004 [P1] [Scalability] MCP rate limits are configuration-only
 
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Added runtime MCP rate-limit and cost-budget enforcement in the proxy decision path. The proxy now resolves enabled MCP rate-limit rows for organization, environment, server, tool, source-agent, and policy targets, counts matching persisted `mcp_tool_calls` inside the configured window, and denies calls at `gateway_stage="rate_limit"` before approval creation or upstream execution when the configured limit is exceeded. Denial reasons include the limit ID, target, current usage, window, and retry-after seconds. The proxy also resolves existing observability cost budgets for MCP organization, environment, agent, server, tool, and policy targets and denies breached `throttle` or `kill_switch` budgets at `gateway_stage="cost_budget"`. The implementation uses shared persisted records, so separate app instances sharing the same database enforce the same limit and budget state.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/mcp/proxy.py`
+- `packages/product-platform/tests/test_mcp_proxy_traffic_phase4.py`
+- `docs/product-platform-worktree/execution-logs/mcp-proxy-tool-governance-report-v1-remediation/phase-04-mcp-runtime-rate-limits-and-final-validation.md`
+- `docs/product-platform-worktree/execution-logs/mcp-proxy-tool-governance-report-v1-remediation/00-execution-index.md`
+
+**Tests added or updated:**
+- `packages/product-platform/tests/test_mcp_proxy_traffic_phase4.py::MCPProxyTrafficPhase4Tests::test_mcp_proxy_cost_budget_denial`
+- `packages/product-platform/tests/test_mcp_proxy_traffic_phase4.py::MCPProxyTrafficPhase4Tests::test_mcp_proxy_rate_limit_enforced`
+- `packages/product-platform/tests/test_mcp_proxy_traffic_phase4.py::MCPProxyTrafficPhase4Tests::test_mcp_proxy_rate_limit_shared_across_app_instances`
+- `packages/product-platform/tests/test_mcp_proxy_traffic_phase4.py::MCPProxyTrafficPhase4Tests::test_rate_limit_create_and_list`
+
+**Validation performed:**
+- `python3 -m py_compile src/product_platform/mcp/proxy.py` - passed.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_traffic_phase4.py' -v` - passed, 4 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_traffic_phase*.py' -v` - passed, 14 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_governance_phase*.py' -v` - passed, 12 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_approval_release_phase2.py' -v` - passed, 3 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_security_scans_phase*.py' -v` - passed, 9 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` - passed, 5 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_policy_evaluations_phase1.py' -v` - passed, 4 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_policy_bindings_overall.py' -v` - passed, 1 test.
+- `python3 -m py_compile src/product_platform/mcp/proxy.py src/product_platform/mcp/repository.py src/product_platform/mcp/models.py src/product_platform/api/app.py` - passed.
+- `python3 -m ruff check src/product_platform/mcp src/product_platform/api/app.py tests/test_mcp_proxy_governance_phase1.py tests/test_mcp_proxy_governance_phase2.py tests/test_mcp_proxy_governance_phase3.py tests/test_mcp_proxy_traffic_phase1.py tests/test_mcp_proxy_traffic_phase2.py tests/test_mcp_proxy_traffic_phase3.py tests/test_mcp_proxy_traffic_phase4.py tests/test_mcp_proxy_traffic_overall.py tests/test_mcp_proxy_approval_release_phase2.py` - passed.
+- `python3 -m mypy` - passed.
+- `python3 -m build` - passed.
+
+**Remaining work:**
+None.
+
+**Remediated by:**
+AI coding agent
+
 **Status:** Missing
 
 **Current implementation:**
@@ -232,6 +458,40 @@ Runaway agents can exhaust upstream services or budgets.
 **Affects stated Ophanix product promise:** Yes
 
 ### F-MCP-005 [P0] [Approval Patterns] MCP approvals are not execution-grade
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Added execution-grade approval release state for MCP proxy calls. Approval requests now escrow the original payload server-side, persist a deterministic payload hash, expiry, replay token hash, policy snapshot, idempotency key, release status, release timestamp, and release errors. Approval release now rejects expired approvals, verifies the escrowed payload hash, revalidates the current bound policy before execution, and calls the real MCP upstream with the original reviewed payload instead of replaying a demo response from summarized params. Expired and policy-rejected release attempts persist terminal call/approval state and emit audit events.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/mcp/models.py`
+- `packages/product-platform/src/product_platform/mcp/proxy.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/db/migrations/0079_mcp_approval_release_evidence.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0079_mcp_approval_release_evidence.down.sql`
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase2.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+- `docs/product-platform-worktree/execution-logs/mcp-proxy-tool-governance-report-v1-remediation/phase-02-execution-grade-approval-release.md`
+- `docs/product-platform-worktree/execution-logs/mcp-proxy-tool-governance-report-v1-remediation/00-execution-index.md`
+
+**Tests added or updated:**
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase2.py::MCPProxyGovernancePhase2Tests::test_approved_call_releases_only_original_payload`
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase2.py::MCPProxyGovernancePhase2Tests::test_expired_approval_cannot_be_released`
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase2.py::MCPProxyGovernancePhase2Tests::test_policy_change_between_request_and_release_is_revalidated`
+- `packages/product-platform/tests/test_db_phase1.py::DatabaseMigrationPhase1Tests`
+
+**Validation performed:**
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_governance_phase2.py' -v` - passed, 3 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_traffic_phase*.py' -v` - passed, 14 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_mcp_proxy_governance_phase1.py' -v` - passed, 4 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` - passed, 5 tests.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Incorrect
 
@@ -339,4 +599,3 @@ None.
 ## 7. Feature-Level Target State
 
 MCP governance should be a real data plane: approved tools are exposed through a proxy that enforces policy, scan state, lifecycle, approvals, rate/cost budgets, and audit logging before upstream execution. Data models should represent server/tool versions, scan findings, policy decision snapshots, approval payload hashes, rate-limit counters, and trace IDs. SDKs should support MCP proxy mode, approval polling, and OpenAI Agents SDK integration. Tests should prove real MCP mediation, policy denial, scan gates, approvals, rate limits, redaction, and trace-linked evidence.
-

@@ -105,6 +105,8 @@ FEATURE_MIGRATIONS = [
     "0075",
     "0076",
     "0077",
+    "0078",
+    "0079",
 ]
 
 ALL_EXPECTED_MIGRATIONS = [*EXPECTED_MIGRATIONS, *FEATURE_MIGRATIONS]
@@ -197,7 +199,25 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertIn("mcp_findings", tables)
             self.assertIn("mcp_scan_baselines", tables)
             self.assertIn("mcp_tool_calls", tables)
+            mcp_tool_call_columns = column_names(connection, "mcp_tool_calls")
+            self.assertIn("policy_binding_id", mcp_tool_call_columns)
+            self.assertIn("policy_action", mcp_tool_call_columns)
+            self.assertIn("policy_reason", mcp_tool_call_columns)
+            self.assertIn("policy_matched_rule", mcp_tool_call_columns)
+            self.assertIn("policy_input_json", mcp_tool_call_columns)
+            self.assertIn("upstream_request_json", mcp_tool_call_columns)
+            self.assertIn("upstream_response_metadata_json", mcp_tool_call_columns)
             self.assertIn("mcp_approvals", tables)
+            mcp_approval_columns = column_names(connection, "mcp_approvals")
+            self.assertIn("original_params_json", mcp_approval_columns)
+            self.assertIn("payload_hash", mcp_approval_columns)
+            self.assertIn("expires_at", mcp_approval_columns)
+            self.assertIn("replay_token_hash", mcp_approval_columns)
+            self.assertIn("policy_snapshot_json", mcp_approval_columns)
+            self.assertIn("release_status", mcp_approval_columns)
+            self.assertIn("released_at", mcp_approval_columns)
+            self.assertIn("release_idempotency_key", mcp_approval_columns)
+            self.assertIn("release_error", mcp_approval_columns)
             self.assertIn("mcp_rate_limits", tables)
             self.assertIn("runtime_sessions", tables)
             self.assertIn("runtime_actions", tables)
@@ -409,6 +429,17 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
                     self.assertNotIn("subject_type", provider_credential_columns)
                     self.assertNotIn("credential_type", provider_credential_columns)
                     self.assertNotIn("allowed_tool_ids_json", provider_credential_columns)
+                if migration == "0079":
+                    mcp_approval_columns = column_names(connection, "mcp_approvals")
+                    self.assertNotIn("original_params_json", mcp_approval_columns)
+                    self.assertNotIn("payload_hash", mcp_approval_columns)
+                    self.assertNotIn("expires_at", mcp_approval_columns)
+                    self.assertNotIn("replay_token_hash", mcp_approval_columns)
+                    self.assertNotIn("policy_snapshot_json", mcp_approval_columns)
+                    self.assertNotIn("release_status", mcp_approval_columns)
+                    self.assertNotIn("released_at", mcp_approval_columns)
+                    self.assertNotIn("release_idempotency_key", mcp_approval_columns)
+                    self.assertNotIn("release_error", mcp_approval_columns)
                 if migration == "0070":
                     audit_export_columns = column_names(connection, "audit_exports")
                     self.assertNotIn("event_count", audit_export_columns)

@@ -17,9 +17,11 @@ from product_platform.mcp.models import (
     MCPServerResponse,
     MCPToolResponse,
     MCPToolVersionResponse,
-    SUPPORTED_MCP_FINDING_STATUSES,
+SUPPORTED_MCP_FINDING_STATUSES,
 )
 from product_platform.mcp.scans import MCPScanFindingCandidate
+
+BLOCKING_MCP_FINDING_STATUSES = {"open"}
 
 
 class MCPServerNotFoundError(ValueError):
@@ -483,6 +485,82 @@ class MCPRegistryRepository:
             raise ValueError("Finished MCP scan run could not be loaded.")
         return row
 
+    def refresh_server_scan_gate_state(self, server_id: str) -> None:
+        """Refresh tool/version gate state after a scan or finding lifecycle change."""
+
+        if self.get_server(server_id) is None:
+            raise MCPServerNotFoundError("MCP server not found.")
+        for tool in self.list_tools(server_id=server_id, limit=500):
+            version = self.current_tool_version(tool)
+            if version is None:
+                continue
+            self.refresh_tool_scan_gate_state(tool["id"], version["id"])
+
+    def refresh_tool_scan_gate_state(self, tool_id: str, version_id: str | None) -> None:
+        """Mark a tool active or blocked based on current-version findings."""
+
+        if version_id is None:
+            return
+        open_findings = self.connection.execute(
+            """
+            SELECT severity
+            FROM mcp_findings
+            WHERE tool_id = ?
+              AND tool_version_id = ?
+              AND status = 'open'
+            """,
+            (tool_id, version_id),
+        ).fetchall()
+        if open_findings:
+            risk_level = _highest_mcp_risk(row["severity"] for row in open_findings)
+            self.connection.execute(
+                """
+                UPDATE mcp_tool_versions
+                SET scan_status = ?
+                WHERE id = ?
+                """,
+                ("blocked", version_id),
+            )
+            self.connection.execute(
+                """
+                UPDATE mcp_tools
+                SET status = ?, risk_level = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                ("blocked", risk_level, utc_now_iso(), tool_id),
+            )
+            return
+
+        accepted = self.connection.execute(
+            """
+            SELECT 1
+            FROM mcp_findings
+            WHERE tool_id = ?
+              AND tool_version_id = ?
+              AND status = 'accepted_risk'
+            LIMIT 1
+            """,
+            (tool_id, version_id),
+        ).fetchone()
+        scan_status = "accepted_risk" if accepted is not None else "passed"
+        risk_level = "medium" if accepted is not None else "low"
+        self.connection.execute(
+            """
+            UPDATE mcp_tool_versions
+            SET scan_status = ?
+            WHERE id = ?
+            """,
+            (scan_status, version_id),
+        )
+        self.connection.execute(
+            """
+            UPDATE mcp_tools
+            SET status = ?, risk_level = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("active", risk_level, utc_now_iso(), tool_id),
+        )
+
     def get_scan_run(self, scan_run_id: str) -> Row | None:
         """Get one MCP scan run in tenant scope."""
 
@@ -678,6 +756,7 @@ class MCPRegistryRepository:
                 accepted_at=now,
                 reason=normalized_reason or "",
             )
+        self.refresh_tool_scan_gate_state(existing["tool_id"], existing["tool_version_id"])
         updated = self.get_finding(finding_id)
         if updated is None:
             raise MCPFindingNotFoundError("MCP finding not found after update.")
@@ -929,3 +1008,23 @@ def mcp_finding_response(row: Row) -> MCPFindingResponse:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+def _highest_mcp_risk(severities: object) -> str:
+    order = {
+        "critical": 5,
+        "high": 4,
+        "warning": 3,
+        "medium": 3,
+        "low": 2,
+        "info": 1,
+    }
+    highest = "warning"
+    highest_score = 0
+    for severity in severities:
+        normalized = str(severity).strip().lower()
+        score = order.get(normalized, 3)
+        if score > highest_score:
+            highest = "critical" if normalized == "critical" else normalized
+            highest_score = score
+    return highest

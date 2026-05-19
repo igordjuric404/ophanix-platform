@@ -120,7 +120,27 @@ class MCPProxyTrafficPhase2Tests(unittest.TestCase):
             headers=self._headers(),
         )
         self.assertEqual(discovery.status_code, 201)
+        self._mark_server_tools_clean(server.json()["id"])
         return server.json(), self._tool_by_name("claims.issue_refund")
+
+    def _mark_server_tools_clean(self, server_id: str) -> None:
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                UPDATE mcp_tool_versions
+                SET scan_status = 'passed'
+                WHERE tool_id IN (SELECT id FROM mcp_tools WHERE server_id = ?)
+                """,
+                (server_id,),
+            )
+            connection.execute(
+                """
+                UPDATE mcp_tools
+                SET status = 'active', risk_level = 'low'
+                WHERE server_id = ?
+                """,
+                (server_id,),
+            )
 
     def _tool_by_name(self, name: str) -> dict:
         tools = self.client.get("/api/v1/mcp/tools", headers=self._headers())

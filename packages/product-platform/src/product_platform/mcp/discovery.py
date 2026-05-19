@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import parse_qs, urlparse
 
+from product_platform.mcp.transport import MCPStreamableHTTPClient
+
 
 TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 EMPTY_TOOL_SCHEMA = {"type": "object", "additionalProperties": False}
@@ -46,6 +48,64 @@ class DemoMCPToolDiscoveryAdapter:
         if "trust" in name or "trust" in parsed.netloc or "trust" in parsed.path:
             return _trust_verified_tools(schema_variant)
         return _claims_support_tools(schema_variant)
+
+
+class HTTPMCPToolDiscoveryAdapter:
+    """Discover tools from a real MCP Streamable HTTP JSON-RPC endpoint."""
+
+    def __init__(self, client: MCPStreamableHTTPClient | None = None) -> None:
+        self.client = client or MCPStreamableHTTPClient()
+
+    def discover_tools(self, server: Any) -> list[dict[str, Any]]:
+        """Call `tools/list` and return raw MCP tool definitions."""
+
+        response = self.client.request(
+            str(server["endpoint_url"]),
+            "tools/list",
+            params={},
+            request_id=f"tools-list:{server['id']}",
+        )
+        result = response.result
+        tools = result.get("tools") if isinstance(result, dict) else result
+        if not isinstance(tools, list):
+            raise ValueError("MCP tools/list result must contain a tools list.")
+        normalized: list[dict[str, Any]] = []
+        for tool in tools:
+            if not isinstance(tool, dict):
+                raise ValueError("MCP tools/list entries must be objects.")
+            normalized.append(tool)
+        return normalized
+
+
+def select_mcp_tool_discovery_adapter(
+    server: Any,
+    *,
+    environment: str,
+) -> MCPToolDiscoveryAdapter:
+    """Select the discovery adapter for a registered MCP server."""
+
+    if uses_demo_mcp_adapter(server):
+        _ensure_demo_mcp_allowed(environment)
+        return DemoMCPToolDiscoveryAdapter()
+    return HTTPMCPToolDiscoveryAdapter()
+
+
+def uses_demo_mcp_adapter(server: Any) -> bool:
+    """Return true when a server is configured for local demo discovery."""
+
+    endpoint = str(server["endpoint_url"])
+    parsed = urlparse(endpoint)
+    query = parse_qs(parsed.query)
+    adapter = query.get("adapter", [""])[0].strip().lower()
+    if adapter == "demo":
+        return True
+    hostname = parsed.hostname or ""
+    return hostname.endswith(".local")
+
+
+def _ensure_demo_mcp_allowed(environment: str) -> None:
+    if environment.strip().lower() in {"prod", "production"}:
+        raise ValueError("Demo MCP adapter cannot be selected in production.")
 
 
 def normalize_tool_definition(definition: dict[str, Any]) -> NormalizedMCPToolDefinition:
@@ -175,4 +235,3 @@ def _trust_verified_tools(schema_variant: str) -> list[dict[str, Any]]:
             },
         },
     ]
-

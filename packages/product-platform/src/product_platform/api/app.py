@@ -288,7 +288,7 @@ from product_platform.mesh.repository import (
     protocol_bridge_route_response,
 )
 from product_platform.mesh.topology import MeshTopologyService
-from product_platform.mcp.discovery import DemoMCPToolDiscoveryAdapter, normalize_tool_definition
+from product_platform.mcp.discovery import normalize_tool_definition, select_mcp_tool_discovery_adapter
 from product_platform.mcp.models import (
     MCPApprovalDecisionRequest,
     MCPApprovalResponse,
@@ -8421,7 +8421,10 @@ def create_app(
                 server = repository.get_server(server_id)
                 if server is None:
                     raise MCPServerNotFoundError("MCP server not found.")
-                raw_tools = DemoMCPToolDiscoveryAdapter().discover_tools(server)
+                raw_tools = select_mcp_tool_discovery_adapter(
+                    server,
+                    environment=settings.environment,
+                ).discover_tools(server)
                 normalized_tools = [normalize_tool_definition(tool) for tool in raw_tools]
                 result = repository.persist_discovered_tools(server_id, normalized_tools)
                 for change in result.schema_changes:
@@ -8546,6 +8549,7 @@ def create_app(
                     scan_result = MCPScannerAdapter().scan_tools(tools)
                     for finding in scan_result.findings:
                         repository.create_finding(run.id, finding)
+                    repository.refresh_server_scan_gate_state(server_id)
                     summary = {
                         "tools_scanned": scan_result.tools_scanned,
                         "tools_flagged": scan_result.tools_flagged,
@@ -8836,8 +8840,16 @@ def create_app(
         context = _request_context_from_request(request)
         try:
             with _audit_database().transaction() as connection:
-                repository = MCPProxyRepository(connection, organization_id, environment_id)
-                row = MCPProxyDecisionService(repository).evaluate_and_record(
+                repository = MCPProxyRepository(
+                    connection,
+                    organization_id,
+                    environment_id,
+                    runtime_environment=settings.environment,
+                )
+                row = MCPProxyDecisionService(
+                    repository,
+                    runtime_environment=settings.environment,
+                ).evaluate_and_record(
                     body,
                     request_correlation_id=context.correlation_id,
                 )
@@ -8870,6 +8882,8 @@ def create_app(
                 return response
         except MCPProxyReferenceError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get(
         "/api/v1/mcp/traffic",
@@ -8947,25 +8961,38 @@ def create_app(
         organization_id = _require_organization_id(current_user)
         context = _request_context_from_request(request)
         try:
+            release_error: str | None = None
+            response: MCPApprovalResponse
             with _audit_database().transaction() as connection:
-                repository = MCPProxyRepository(connection, organization_id, environment_id)
+                repository = MCPProxyRepository(
+                    connection,
+                    organization_id,
+                    environment_id,
+                    runtime_environment=settings.environment,
+                )
                 row = repository.decide_approval(
                     approval_id,
                     status="approved",
                     actor_id=current_user.id,
                     reason=body.reason,
+                    idempotency_key=body.idempotency_key,
                 )
                 call_row = repository.get_tool_call(row["tool_call_id"])
                 response = mcp_approval_response(
                     row,
                     tool_call=mcp_tool_call_response(call_row) if call_row is not None else None,
                 )
+                event_type = {
+                    "approved": "mcp.approval.approved",
+                    "expired": "mcp.approval.expired",
+                    "denied": "mcp.approval.release_denied",
+                }.get(response.status, "mcp.approval.release_failed")
                 AuditEventRepository(connection).insert(
                     _mcp_approval_audit_event(
                         organization_id=organization_id,
                         environment_id=environment_id,
                         actor_id=current_user.id,
-                        event_type="mcp.approval.approved",
+                        event_type=event_type,
                         approval=response,
                         correlation_id=context.correlation_id,
                     )
@@ -8980,7 +9007,15 @@ def create_app(
                             correlation_id=context.correlation_id,
                         )
                     )
-                return response
+                if response.status != "approved":
+                    release_error = (
+                        response.release_error
+                        or response.decision_reason
+                        or "MCP approval could not be released."
+                    )
+            if release_error is not None:
+                raise MCPApprovalDecisionError(release_error)
+            return response
         except MCPApprovalNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except (MCPApprovalDecisionError, MCPProxyReferenceError) as exc:
@@ -9007,12 +9042,18 @@ def create_app(
         context = _request_context_from_request(request)
         try:
             with _audit_database().transaction() as connection:
-                repository = MCPProxyRepository(connection, organization_id, environment_id)
+                repository = MCPProxyRepository(
+                    connection,
+                    organization_id,
+                    environment_id,
+                    runtime_environment=settings.environment,
+                )
                 row = repository.decide_approval(
                     approval_id,
                     status="denied",
                     actor_id=current_user.id,
                     reason=body.reason,
+                    idempotency_key=body.idempotency_key,
                 )
                 call_row = repository.get_tool_call(row["tool_call_id"])
                 response = mcp_approval_response(

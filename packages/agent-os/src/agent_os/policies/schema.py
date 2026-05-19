@@ -38,6 +38,7 @@ class PolicyAction(str, Enum):
     DENY = "deny"
     AUDIT = "audit"
     BLOCK = "block"
+    REQUIRE_APPROVAL = "require_approval"
 
 
 class PolicyCondition(BaseModel):

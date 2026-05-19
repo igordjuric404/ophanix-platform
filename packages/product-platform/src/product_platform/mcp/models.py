@@ -276,9 +276,16 @@ class MCPToolCallResponse(BaseModel):
     reason: str
     matched_policy_id: str | None = None
     matched_policy_version_id: str | None = None
+    policy_binding_id: str | None = None
+    policy_action: str | None = None
+    policy_reason: str | None = None
+    policy_matched_rule: str | None = None
+    policy_input: dict[str, Any] | None = None
     trust_threshold_id: str | None = None
     trust_score: int | None = None
     gateway_stage: str | None = None
+    upstream_request: dict[str, Any] | None = None
+    upstream_response_metadata: dict[str, Any] | None = None
     response: dict[str, Any] | None = None
     sanitizer_action: str | None = None
     latency_ms: int
@@ -290,10 +297,11 @@ class MCPApprovalDecisionRequest(BaseModel):
     """Approve or deny a pending MCP proxy approval."""
 
     reason: str | None = None
+    idempotency_key: str | None = None
 
-    @field_validator("reason")
+    @field_validator("reason", "idempotency_key")
     @classmethod
-    def _strip_optional_reason(cls, value: str | None) -> str | None:
+    def _strip_optional_string(cls, value: str | None) -> str | None:
         if value is None:
             return None
         stripped = value.strip()
@@ -312,6 +320,11 @@ class MCPApprovalResponse(BaseModel):
     decision_reason: str | None = None
     requested_at: str
     decided_at: str | None = None
+    expires_at: str | None = None
+    payload_hash: str | None = None
+    release_status: str | None = None
+    released_at: str | None = None
+    release_error: str | None = None
     tool_call: MCPToolCallResponse | None = None
 
 
