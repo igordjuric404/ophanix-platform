@@ -1,0 +1,285 @@
+# Feature Audit: Integrations and Provider Secrets
+
+## 1. Scope
+
+This audit covers provider credentials, secret storage, secret references, integration health, OAuth/delegated authorization, Tool Gateway upstream auth, SDK/adapters, and third-party tool authorization. It inspects `product_platform/integrations`, `tool_gateway`, provider credential migrations, integration routes in `api/app.py`, Agent OS OpenAI adapters, and `ophanix-python-sdk`. Relevant benchmarks are AWS AgentCore Identity, Arcade authorization challenge, Composio managed OAuth/tool execution, OpenAI Agents SDK approval/MCP integrations, and enterprise secrets/BYOK patterns. Out of scope: generic API keys and human auth, covered in AUTH.
+
+## 2. Current Implementation Summary
+
+Provider credentials are stored through `0036_provider_credentials.up.sql` and repository code in `product_platform/integrations/repository.py`. Secret providers live in `integrations/secrets.py`, with in-memory and environment-variable-backed options. Health checks live in `integrations/health.py`. Integration routes appear around `api/app.py:11140` and `api/app.py:11178`. Tool Gateway upstream auth modes are modeled in `tool_gateway/models.py` and executed through Tool Gateway invocation. The Python SDK uses static/env gateway bearer token providers. Agent OS includes OpenAI integration/adapters that can record tool arguments in context.
+
+Current workflow: users can create/list provider credentials, use secret refs, run synthetic health checks, define upstream targets with API-key/bearer auth, and call tools through the gateway. There is no first-class OAuth authorization challenge, delegated user credential lifecycle, vault/KMS integration, or independent secret access audit.
+
+## 3. Benchmark Comparison
+
+| Benchmark Capability | Expected Behavior | Current Implementation | Status | Evidence | Priority |
+|---|---|---|---|---|---|
+| Environment/user-scoped credentials | Credentials bind org, env, user/provider account, scopes, expiry, revocation. | Provider credentials are organization-wide secret refs. | Risky | `0036_provider_credentials.up.sql:1`; `integrations/models.py:115` | P1 |
+| OAuth delegation | Authorization sessions, consent, token vault refs, refresh/revoke jobs. | Upstream auth modes are `none`, `api_key`, `bearer`. | Missing | `tool_gateway/models.py:20`; `sdk.py:150` | P0 |
+| Secrets management | Vault/KMS/BYOK, redacted metadata, secret access audit. | Default provider is in-memory; env refs; `secret_ref` exposed broadly. | Risky | `integrations/secrets.py:28`; `api/app.py:11140`; `repository.py:686` | P0 |
+| Provider health | Real provider/MCP/OAuth validation and provenance. | Health is synthetic/manual. | Risky | `integrations/health.py:20`; `integrations/repository.py:312` | P2 |
+| User-specific tool execution | Tool calls bind delegated user and approval state. | Gateway principal lacks user/delegated account. | Missing | `tool_gateway/auth.py:47`; `tool_gateway/decision.py:17` | P0 |
+| Adapter redaction | Third-party adapter contexts redact tool args/secrets. | OpenAI adapter records raw function arguments. | Risky | `agent_os/integrations/openai_adapter.py:596` | P1 |
+
+## 4. Findings
+
+### F-INT-001 [P1] [Authorization] Provider credentials are organization-wide secret references instead of environment/user/provider-account scoped records
+
+**Status:** Risky
+
+**Current implementation:**
+Provider credential records store organization, name, provider type, secret ref, status, creator, and timestamps. They lack environment, delegated user, provider account, credential type, scopes, expiry, rotation, and revocation metadata.
+
+**Expected implementation:**
+Credentials should be scoped by organization, environment, user or service account, provider account, provider type, scopes, expiry, rotation status, revocation status, and allowed tool bindings.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/db/migrations/0036_provider_credentials.up.sql`; `packages/product-platform/src/product_platform/integrations/repository.py`; `packages/product-platform/src/product_platform/integrations/models.py`
+
+**Affected symbols:**
+Provider credentials table, credential create/list/get methods, credential request/response models.
+
+**Evidence:**
+Credential schema stores org/name/provider_type/secret_ref/status/created_by/timestamps in `0036_provider_credentials.up.sql:1`; create/list/get are organization-scoped around `integrations/repository.py:105` and `repository.py:156`; API models expose secret fields but no scope/account/expiry/OAuth metadata around `integrations/models.py:115`.
+
+**Why this matters:**
+Organization-wide provider credentials encourage over-broad tool access and make user delegation impossible to audit.
+
+**Competitor benchmark:**
+AWS AgentCore Identity, Arcade user-specific tool authorization, Composio managed auth.
+
+**Recommended remediation:**
+1. Extend credential schema with environment, delegated subject, provider account, scopes, expiry, rotation, revocation.
+2. Bind credentials to allowed tools and policy rules.
+3. Add migration path for legacy org-wide credentials.
+4. Redact secret metadata in list responses.
+
+**Acceptance criteria:**
+1. Credentials can be limited to one environment and delegated user/provider account.
+2. Expired/revoked credentials cannot be selected for tool execution.
+3. Credential list responses do not expose sensitive refs to broad readers.
+
+**Suggested tests:**
+1. Cross-environment credential access denial test.
+2. Expired/revoked credential tool-call rejection test.
+3. Credential response redaction test.
+
+**Risk if ignored:**
+Agents may use broad credentials for actions that should be scoped to a user or environment.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-AUTH-004, F-AUTH-002
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-INT-002 [P0] [Authentication] OAuth authorization challenge and delegated credential lifecycle are missing
+
+**Status:** Missing
+
+**Current implementation:**
+Tool Gateway upstream auth modes are only `none`, `api_key`, and `bearer`. Provider credentials accept raw secret or secret ref. SDK auth is static/environment bearer token based.
+
+**Expected implementation:**
+Ophanix should support OAuth app metadata, authorization sessions, consent records, token vault refs, refresh/revoke jobs, and SDK/UI flows for starting, waiting for, and using delegated authorization.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/tool_gateway/models.py`; `packages/product-platform/src/product_platform/integrations/models.py`; `ophanix-python-sdk/src/ophanix_tool_gateway/sdk.py`; `ophanix-python-sdk/README.md`
+
+**Affected symbols:**
+Upstream auth mode enum, upstream target auth config, provider credential create model, SDK token providers.
+
+**Evidence:**
+Auth modes are `none`, `api_key`, `bearer` in `tool_gateway/models.py:20`; upstream targets accept auth config plus secret ref around `tool_gateway/models.py:206` and `tool_gateway/models.py:602`; provider credentials accept raw secret/ref around `integrations/models.py:115`; SDK token providers are static/env around `sdk.py:150`.
+
+**Why this matters:**
+Arcade and Composio differentiate on managed delegated auth. Without this, Ophanix cannot safely support user-specific external actions.
+
+**Competitor benchmark:**
+Arcade authorization challenge and Composio managed OAuth.
+
+**Recommended remediation:**
+1. Add OAuth app/provider configuration entities.
+2. Add authorization session and consent records.
+3. Store refresh/access tokens only as vault references.
+4. Add refresh, revoke, expiry, and failure workflows.
+5. Add SDK/UI helpers for authorization challenge.
+
+**Acceptance criteria:**
+1. Tool call can return pending authorization for missing user consent.
+2. Completed authorization binds user, agent, provider account, scopes, and expiry.
+3. Revoked/expired tokens cannot be used.
+
+**Suggested tests:**
+1. OAuth authorization start/callback/complete test.
+2. Tool call pending authorization test.
+3. Token refresh and revocation worker test.
+
+**Risk if ignored:**
+Ophanix cannot meet the product promise of governed user-specific tool access.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-AUTH-002, F-WRK-001
+
+**Blocks production readiness:** Yes
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-INT-003 [P0] [Security] Secret storage is demo/env-only, access is not independently audited, and `secret_ref` is exposed too broadly
+
+**Status:** Risky
+
+**Current implementation:**
+The default secret provider stores raw values in memory, production support is environment-variable references, listing credentials requires `COMPLIANCE_READ`, and responses include `secret_ref`. Health checks retrieve secrets directly.
+
+**Expected implementation:**
+Secrets should be stored in vault/KMS/BYOK-backed providers, returned only as redacted metadata, and every store/retrieve/rotate/revoke action should emit secret access audit events.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/integrations/secrets.py`; `packages/product-platform/src/product_platform/api/app.py`; `packages/product-platform/src/product_platform/api/rbac.py`; `packages/product-platform/src/product_platform/integrations/repository.py`
+
+**Affected symbols:**
+Secret provider classes, provider credential routes, RBAC permissions, credential response serializer, health test secret retrieval.
+
+**Evidence:**
+Default provider stores raw values in process memory around `integrations/secrets.py:28` and `secrets.py:84`; env var ref support around `secrets.py:109`; list route uses `COMPLIANCE_READ` around `api/app.py:11140`, which Viewer has in `rbac.py:36`; responses include `secret_ref` around `integrations/repository.py:686`; health test retrieves the secret around `api/app.py:11178`.
+
+**Why this matters:**
+Secret refs can reveal vault structure and over-broad access patterns. In-memory/env-only secrets are not enough for production governance.
+
+**Competitor benchmark:**
+AWS AgentCore Identity credential storage and enterprise KMS/BYOK expectations.
+
+**Recommended remediation:**
+1. Add vault/KMS/BYOK secret provider interface and production implementation.
+2. Gate secret ref visibility behind a dedicated permission.
+3. Redact secret refs by default in API responses.
+4. Emit audit events for secret store/retrieve/rotate/revoke.
+5. Add rotation and revocation APIs.
+
+**Acceptance criteria:**
+1. Viewer/Compliance readers cannot see raw `secret_ref` values.
+2. Secret retrieval emits audit evidence.
+3. Production mode rejects in-memory secret provider.
+
+**Suggested tests:**
+1. Viewer credential list redaction test.
+2. Secret retrieve audit test.
+3. Production config rejects in-memory secret provider test.
+
+**Risk if ignored:**
+Secrets governance will fail security review and may expose integration details to broad readers.
+
+**Remediation complexity:** Medium
+
+**Dependencies:** F-AUD-001, F-TST-003
+
+**Blocks production readiness:** Yes
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-INT-004 [P0] [Authorization] Tool Gateway execution is not user-delegated or approval-aware for ordinary external tools
+
+**Status:** Missing
+
+**Current implementation:**
+Gateway principals include organization, environment, agent, credential, and scopes, but not user or delegated provider account. Policy decisions are allow/deny; MCP approval queue is separate and ordinary external tools do not share that approval model.
+
+**Expected implementation:**
+External tool calls should bind user, agent, provider credential, delegated account, tool, scope, policy result, approval state, and audit/trace evidence.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/tool_gateway/auth.py`; `packages/product-platform/src/product_platform/tool_gateway/models.py`; `packages/product-platform/src/product_platform/tool_gateway/decision.py`; `packages/product-platform/src/product_platform/mcp/proxy.py`
+
+**Affected symbols:**
+`GatewayPrincipal`, tool grants, decision model, MCP approval queue.
+
+**Evidence:**
+`GatewayPrincipal` lacks user/delegated account in `tool_gateway/auth.py:47`; grants carry tool/scope/reason/expiry around `tool_gateway/models.py:411`; policy decisions are allow/deny in `tool_gateway/decision.py:17`; MCP approval queue exists separately around `mcp/proxy.py:95` and `mcp/proxy.py:677`.
+
+**Why this matters:**
+Most valuable integrations are user-specific. Agent-only authorization can over-grant access and misses consent requirements.
+
+**Competitor benchmark:**
+Arcade authorization challenge, Composio user sessions, OpenAI approvals.
+
+**Recommended remediation:**
+1. Add delegated user/provider account fields to gateway execution.
+2. Extend decisions to pending approval/pending authorization.
+3. Reuse approval model for ordinary external tools.
+4. Emit unified audit and trace evidence.
+
+**Acceptance criteria:**
+1. User-required tool calls fail or return pending auth without delegated consent.
+2. Approved calls record reviewer/user/provider credential.
+3. Policy can require approval for ordinary Tool Gateway tools.
+
+**Suggested tests:**
+1. Tool Gateway pending authorization test.
+2. Approval-required external tool test.
+3. Audit evidence test for user-agent-tool binding.
+
+**Risk if ignored:**
+External actions can run without the user consent and approval semantics buyers expect.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-INT-002, F-MCP-005
+
+**Blocks production readiness:** Yes
+
+**Affects stated Ophanix product promise:** Yes
+
+## 5. Missing Tests
+
+1. Test name: `test_provider_credential_environment_scope_enforced`
+   Test type: API/integration
+   What it should verify: credential cannot be used across environments.
+   Files likely affected: integrations repository and gateway credential selection.
+   Related finding ID: F-INT-001
+
+2. Test name: `test_oauth_authorization_challenge_lifecycle`
+   Test type: API/SDK integration
+   What it should verify: start, callback, consent, refresh, and revoke flows.
+   Files likely affected: integrations, Tool Gateway, SDK.
+   Related finding ID: F-INT-002
+
+3. Test name: `test_secret_ref_redacted_for_compliance_reader`
+   Test type: API/security
+   What it should verify: `secret_ref` is hidden without secret-admin permission.
+   Files likely affected: routes, RBAC, serializers.
+   Related finding ID: F-INT-003
+
+4. Test name: `test_tool_gateway_requires_delegated_user_for_user_tool`
+   Test type: integration
+   What it should verify: user-specific tool calls require delegated credential or pending auth.
+   Files likely affected: Tool Gateway auth/decision.
+   Related finding ID: F-INT-004
+
+## 6. Recommended Remediation Order
+
+P0:
+
+1. F-INT-003
+2. F-INT-002
+3. F-INT-004
+
+P1:
+
+1. F-INT-001
+
+P2:
+
+None.
+
+P3:
+
+None.
+
+## 7. Feature-Level Target State
+
+Integrations should treat every credential as a governed delegated capability: vault-backed, environment-scoped, user/provider-account aware, refreshable, revocable, auditable, and redacted. Tool execution should select credentials through policy and consent records, support pending authorization/approval, and emit linked audit/trace evidence. SDKs should include authorization challenge helpers. Health checks should verify real provider/OAuth/MCP state and label manual checks. Tests should cover credential scope, secret redaction, vault access audit, OAuth lifecycle, delegated tool calls, and adapter redaction.
+

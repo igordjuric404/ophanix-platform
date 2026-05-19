@@ -1,0 +1,282 @@
+# Feature Audit: AgentMesh and Trust
+
+## 1. Scope
+
+This audit covers AgentMesh handshakes, trust cards, trust scoring, mesh messages/handoffs, revocation/quarantine interactions, duplicated TypeScript services, and SDK support. It inspects `product_platform/trust`, `product_platform/mesh`, `packages/agentmesh`, `services/api`, and SDK package surfaces. Relevant benchmarks are Microsoft Agent 365 identity/quarantine, Temporal Nexus service contracts, Google Agent Gateway, AWS AgentCore Identity, and Agent Governance Toolkit runtime policy enforcement. Out of scope: base auth/API key behavior, covered in AUTH.
+
+## 2. Current Implementation Summary
+
+Product Platform has trust models and repositories in `packages/product-platform/src/product_platform/trust`, mesh models and persistence in `product_platform/mesh`, and UI pages for mesh/trust. Lower-level Python AgentMesh code includes handshake, credentials, trust cards, marketplace fallback, and CLI utilities under `ophanix-python-sdk/packages/agentmesh`. A separate TypeScript `services/api` tree contains in-memory registry/trust/handshake routes. Product mesh APIs persist messages and handoffs, including caller-supplied decision/result fields.
+
+Current workflow: agents and mesh entities can be represented, trust cards can be issued/verified in a demo-key mode, messages and handoffs can be recorded, and trust score pipelines can update records. The codebase has multiple trust ontologies and handshake paths, and policy enforcement is not consistently server-side.
+
+## 3. Benchmark Comparison
+
+| Benchmark Capability | Expected Behavior | Current Implementation | Status | Evidence | Priority |
+|---|---|---|---|---|---|
+| Signed handshakes | Server-issued challenge, nonce, audience, expiry, signature, and trust root validation. | Split MVP paths with simulated or client-supplied challenge flows. | Risky | `agentmesh/trust/handshake.py:166`; `services/api/src/routes/handshake.ts:12` | P1 |
+| Revocation/quarantine | Agent state immediately blocks mesh communication and credentials. | Lifecycle and mesh checks are inconsistent. | Incorrect | `agents/lifecycle.py:13`; `mesh/repository.py:570` | P0 |
+| Policy-aware communication | Mesh messages/handoffs are evaluated by policy before persistence/execution. | Decision fields are caller supplied. | Incorrect | `mesh/models.py:15`; `mesh/repository.py:65` | P0 |
+| Trust score consistency | One trust ontology and threshold model across languages. | Python product and TS services drift. | Inconsistent | `trust/models.py:9`; `services/api/src/types.ts:16` | P1 |
+| Trust card verification | Cards are verified against trusted issuers, validity, revocation, and key roots. | Demo key provider and partial checks. | Risky | `trust/cards.py:49`; `trust/cards.py:285` | P1 |
+
+## 4. Findings
+
+### F-AMT-001 [P1] [Authentication] Signed AgentMesh handshake is split across incompatible MVP paths
+
+**Status:** Inconsistent
+
+**Current implementation:**
+Python AgentMesh has Ed25519-like handshake code but simulates peer response in one path. Product trust handshake request models lack signature/nonce/audience/expiry. TypeScript `/handshake` verifies a client-supplied challenge rather than a server-issued challenge.
+
+**Expected implementation:**
+A canonical handshake should issue a server nonce/challenge, bind audience/environment/agent IDs, require expiry, verify signature against trusted identity material, and emit audit evidence.
+
+**Affected files:**
+`ophanix-python-sdk/packages/agentmesh/src/agentmesh/trust/handshake.py`; `packages/product-platform/src/product_platform/trust/models.py`; `ophanix-platform/services/api/src/routes/handshake.ts`
+
+**Affected symbols:**
+Handshake service/request models, TS handshake route, trust verification path.
+
+**Evidence:**
+`agentmesh/trust/handshake.py:166` includes signed handshake logic but `_get_peer_response()` simulates peer behavior. Product `TrustHandshakeRequest` around `trust/models.py:212` lacks signature/nonce/audience/expiry fields. TS route starts at `services/api/src/routes/handshake.ts:12`.
+
+**Why this matters:**
+Agent-to-agent trust depends on anti-replay, audience binding, and verifiable identity. Split handshake paths make it unclear which one is production.
+
+**Competitor benchmark:**
+AWS AgentCore Identity and Microsoft identity-first agent governance.
+
+**Recommended remediation:**
+1. Define one canonical handshake protocol.
+2. Add server-issued nonce/challenge and expiry.
+3. Bind handshake to tenant, environment, agent identity, and audience.
+4. Remove or mark demo/simulated paths as dev-only.
+
+**Acceptance criteria:**
+1. Replayed handshakes are rejected.
+2. Wrong audience/environment handshakes are rejected.
+3. Product and SDK use the same handshake contract.
+
+**Suggested tests:**
+1. Handshake replay rejection test.
+2. Cross-environment audience rejection test.
+3. Product/SDK contract compatibility test.
+
+**Risk if ignored:**
+AgentMesh trust can be spoofed or implemented inconsistently by clients.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-AIR-004, F-AUTH-001
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-AMT-002 [P0] [Authorization] Quarantine and revocation do not consistently block mesh and trust operations
+
+**Status:** Incorrect
+
+**Current implementation:**
+Agent lifecycle states do not include full quarantine/revocation semantics. Mesh repository checks require agent existence/tenant/environment/deleted status, but not a canonical revocation model. Credential verification does not consistently re-check agent lifecycle.
+
+**Expected implementation:**
+Quarantine and revocation should be global enforcement states that block mesh messages, handoffs, handshakes, trust-card issuance, credential verification, runtime sessions, and tool calls.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/agents/lifecycle.py`; `packages/product-platform/src/product_platform/mesh/repository.py`; `packages/product-platform/src/product_platform/agents/credentials.py`; `ophanix-platform/services/api/src/middleware/apiKey.ts`
+
+**Affected symbols:**
+Agent lifecycle states, `MeshRepository._require_agent`, credential verification, TS API key middleware.
+
+**Evidence:**
+Lifecycle states in `agents/lifecycle.py:13` omit restricted/quarantined/revoked/archived. `MeshRepository._require_agent` checks tenant/env/deleted around `mesh/repository.py:570`. `AgentCredentialRepository.verify_token` verifies credential state around `agents/credentials.py:585`.
+
+**Why this matters:**
+An agent may appear suspended in registry while still participating in mesh or trust flows.
+
+**Competitor benchmark:**
+Microsoft Agent 365 quarantine and enterprise access controls.
+
+**Recommended remediation:**
+1. Centralize lifecycle enforcement.
+2. Add mesh/trust checks for restricted/quarantined/revoked agents.
+3. Cascade lifecycle transitions to trust cards and credentials.
+4. Add tests across all communication surfaces.
+
+**Acceptance criteria:**
+1. Quarantined/revoked agents cannot handshake, send messages, create handoffs, or verify credentials.
+2. Trust cards for revoked agents are invalidated.
+3. All blocked attempts are audited.
+
+**Suggested tests:**
+1. Mesh handoff rejection for quarantined agent.
+2. Trust-card verification rejection after revocation.
+3. Credential rejection after agent suspension.
+
+**Risk if ignored:**
+Incident response cannot reliably isolate compromised agents.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-AIR-002, F-AIR-003
+
+**Blocks production readiness:** Yes
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-AMT-003 [P0] [Tool Governance] AgentMesh policy-aware communication is caller-supplied rather than enforced
+
+**Status:** Incorrect
+
+**Current implementation:**
+Mesh message and handoff models accept decision/result fields from the caller and persist them. The server does not appear to perform a canonical policy/trust evaluation before accepting the communication record.
+
+**Expected implementation:**
+The server should evaluate policy, trust, identity, environment, and rate rules before allowing mesh communication. Client-supplied decision fields should be ignored or treated only as client context.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/mesh/models.py`; `packages/product-platform/src/product_platform/mesh/repository.py`; `packages/product-platform/src/product_platform/api/app.py`; `packages/product-platform/src/product_platform/policies`
+
+**Affected symbols:**
+`MeshMessageCreateRequest`, `MeshHandoffCreateRequest`, `create_message`, mesh handoff creation.
+
+**Evidence:**
+`MeshMessageCreateRequest.decision` exists in `mesh/models.py:15`; `MeshHandoffCreateRequest.trust_result`, `policy_result`, and `status` exist in `mesh/models.py:65`; `create_message` persists the decision around `mesh/repository.py:65`.
+
+**Why this matters:**
+Runtime governance must be enforced at boundaries, not self-attested by clients. Otherwise malicious or buggy agents can label unsafe handoffs as allowed.
+
+**Competitor benchmark:**
+Agent Governance Toolkit, Galileo/Onyx control-plane middleware, Google Agent Gateway.
+
+**Recommended remediation:**
+1. Move mesh policy/trust evaluation server-side.
+2. Persist immutable decision records linked to policy version.
+3. Remove caller-supplied authoritative decision fields.
+4. Add allow/deny/approval outcomes.
+
+**Acceptance criteria:**
+1. Mesh messages and handoffs require server-side policy evaluation.
+2. Client-supplied allow decisions cannot bypass policy.
+3. Decision record links to policy version and trust score snapshot.
+
+**Suggested tests:**
+1. Client-supplied allow decision is ignored when policy denies.
+2. Handoff stores server-generated decision evidence.
+3. Policy version change affects subsequent handoffs.
+
+**Risk if ignored:**
+Agent-to-agent communication can bypass governance entirely.
+
+**Remediation complexity:** Medium
+
+**Dependencies:** F-MCP-002, F-AUD-001
+
+**Blocks production readiness:** Yes
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-AMT-004 [P1] [Maintainability] Trust scoring ontology drifts across Product Platform and TypeScript services
+
+**Status:** Inconsistent
+
+**Current implementation:**
+Product Platform, TS services, and lower-level AgentMesh code define different trust dimensions, thresholds, and update rules.
+
+**Expected implementation:**
+There should be one canonical trust score schema, threshold policy, update pipeline, and serialization contract shared across services and SDKs.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/trust/models.py`; `packages/product-platform/src/product_platform/trust/repository.py`; `packages/product-platform/src/product_platform/trust/pipeline.py`; `ophanix-platform/services/api/src/types.ts`; `ophanix-platform/services/api/src/services/trust.ts`
+
+**Affected symbols:**
+Trust score dimensions, threshold constants, recalculation pipeline, TS trust services.
+
+**Evidence:**
+Product dimensions start in `trust/models.py:9`; TS `TrustScore` is different in `services/api/src/types.ts:16`; thresholds differ between `trust/repository.py:80` and `services/api/src/services/trust.ts:5`; Product recalculator uses additive deltas in `trust/pipeline.py:115`.
+
+**Why this matters:**
+Trust decisions become non-reproducible if different services compute different scores.
+
+**Competitor benchmark:**
+Enterprise governance platforms require explainable, reproducible trust/risk scores.
+
+**Recommended remediation:**
+1. Define one trust score contract and version it.
+2. Generate language bindings or share schema definitions.
+3. Persist score explanations and input event versions.
+4. Deprecate in-memory TS duplicates or wire them to Product Platform.
+
+**Acceptance criteria:**
+1. Product and TS trust APIs serialize the same schema.
+2. Trust thresholds are configured in one place.
+3. Score changes are explainable from input events.
+
+**Suggested tests:**
+1. Cross-language schema snapshot test.
+2. Trust threshold consistency test.
+3. Score explanation test.
+
+**Risk if ignored:**
+Operators will see inconsistent trust results across UI/API/runtime surfaces.
+
+**Remediation complexity:** Medium
+
+**Dependencies:** F-TST-006
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+## 5. Missing Tests
+
+1. Test name: `test_agentmesh_handshake_rejects_replay`
+   Test type: unit/integration
+   What it should verify: nonce/audience/expiry are enforced.
+   Files likely affected: handshake modules.
+   Related finding ID: F-AMT-001
+
+2. Test name: `test_quarantined_agent_cannot_mesh_handoff`
+   Test type: API/integration
+   What it should verify: lifecycle state blocks mesh handoff.
+   Files likely affected: mesh repository, agent lifecycle.
+   Related finding ID: F-AMT-002
+
+3. Test name: `test_mesh_policy_decision_is_server_generated`
+   Test type: API/integration
+   What it should verify: client-supplied allow decision cannot bypass deny policy.
+   Files likely affected: mesh models/repository/routes.
+   Related finding ID: F-AMT-003
+
+4. Test name: `test_trust_score_schema_consistency`
+   Test type: contract
+   What it should verify: Product Platform and TS service trust score schemas match.
+   Files likely affected: trust models and TS types.
+   Related finding ID: F-AMT-004
+
+## 6. Recommended Remediation Order
+
+P0:
+
+1. F-AMT-002
+2. F-AMT-003
+
+P1:
+
+1. F-AMT-001
+2. F-AMT-004
+
+P2:
+
+None.
+
+P3:
+
+None.
+
+## 7. Feature-Level Target State
+
+AgentMesh should be a policy-enforced trust fabric. Handshakes should be signed, replay-safe, audience-bound, and backed by trusted agent identities. Mesh messages and handoffs should be evaluated server-side using identity, lifecycle, trust score, policy, environment, and rate limits. Trust scores should use one versioned schema with explainability. Revocation/quarantine should immediately block mesh operations and invalidate trust cards. SDKs should expose the same trust contracts rather than separate MVP surfaces. Tests should cover replay, revocation, server-side policy decisions, schema consistency, and audit evidence.
+

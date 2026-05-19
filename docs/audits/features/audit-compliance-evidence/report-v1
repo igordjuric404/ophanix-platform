@@ -1,0 +1,282 @@
+# Feature Audit: Audit Logs and Compliance Evidence
+
+## 1. Scope
+
+This audit covers audit event persistence, hash chaining, compliance evidence recomputation, exports, reports, evidence packs, runtime/tool audit integration, streaming/export readiness, and UI download behavior. It inspects `product_platform/audit`, `product_platform/compliance`, compliance migrations, artifact repositories, audit/compliance routes in `api/app.py`, and frontend compliance pages. Relevant benchmarks are Microsoft admin/security visibility, LangSmith/Galileo trace/evidence workflows, AWS auditability, JFrog artifact evidence, and enterprise SIEM/export expectations. Out of scope: trace-level observability, covered in OBS.
+
+## 2. Current Implementation Summary
+
+Audit events are persisted through `packages/product-platform/src/product_platform/audit/store.py`, with hash chaining in the same database table. Base audit/event tables are in `0001_base_schema.up.sql`. Compliance controls and evidence use `0044_compliance_controls.up.sql` and `product_platform/compliance/repository.py`. Audit export routes exist around `api/app.py:4521`, and a fixed-list SSE route around `api/app.py:4567`. Tool Gateway runtime action records are in `0055_tool_runtime_actions.up.sql` and `tool_gateway/runtime_audit.py`. The frontend compliance page includes report/download UI in `frontend/src/features/compliance/CompliancePage.tsx`.
+
+Current workflow: the system writes audit events, computes some compliance evidence, can export audit events, and surfaces compliance/report views. The hash chain is useful but not immutable or externally anchored. Compliance recomputation uses fixed limits, evidence packs are summaries, and runtime/tool audit data is not fully unified with compliance exports.
+
+## 3. Benchmark Comparison
+
+| Benchmark Capability | Expected Behavior | Current Implementation | Status | Evidence | Priority |
+|---|---|---|---|---|---|
+| Tamper-evident audit | Append-only events with immutable storage or external anchoring. | Same-DB hash chain in mutable rows. | Risky | `audit/store.py:47`; `0001_base_schema.up.sql:76` | P0 |
+| Complete evidence | Recompute/export covers full event history without silent limits. | Recompute scans fixed 500 event windows; export caps rows. | Incorrect | `compliance/repository.py:612`; `repository.py:163` | P0 |
+| Auditor-verifiable evidence | Evidence links to source event hash, controls, artifacts, and policy versions. | Evidence items are summaries. | Partially Implemented | `0044_compliance_controls.up.sql:36`; `repository.py:1024` | P1 |
+| Runtime audit unification | Tool/runtime events join compliance, audit export, and traces. | Tool runtime actions are separate. | Partially Implemented | `0055_tool_runtime_actions.up.sql`; `api/app.py:3794` | P1 |
+| SIEM/export | Live streaming, async export, subscriptions, and integrity metadata. | Subscriptions table unused; export is synchronous. | Partially Implemented | `0001_base_schema.up.sql:115`; `api/app.py:4521` | P1 |
+
+## 4. Findings
+
+### F-AUD-001 [P0] [Security] Audit hash chain is tamper-evident but not immutable or externally anchored
+
+**Status:** Risky
+
+**Current implementation:**
+Audit events include a hash chain generated in the repository, but event rows and hash metadata live in ordinary mutable database tables. There is no observed append-only trigger, WORM storage, signed checkpoint, Merkle root, or external ledger anchoring.
+
+**Expected implementation:**
+Production audit trails should be append-only, protected from normal application mutation, periodically anchored externally, and verifiable during export.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/audit/store.py`; `packages/product-platform/src/product_platform/db/migrations/0001_base_schema.up.sql`; `packages/product-platform/src/product_platform/api/app.py`
+
+**Affected symbols:**
+`AuditEventRepository.insert`, audit event table, audit export route.
+
+**Evidence:**
+Hash chaining happens in `audit/store.py:47`; audit table is an ordinary database table around `0001_base_schema.up.sql:76`.
+
+**Why this matters:**
+Hash chains detect tampering only if attackers cannot rewrite rows and recompute hashes. Enterprise audit evidence needs stronger immutability.
+
+**Competitor benchmark:**
+Microsoft security visibility and enterprise compliance evidence expectations.
+
+**Recommended remediation:**
+1. Add append-only database protections and deny updates/deletes for audit rows.
+2. Periodically anchor hash checkpoints to immutable storage or signed external evidence.
+3. Include chain proofs in exports.
+4. Add tamper verification tooling.
+
+**Acceptance criteria:**
+1. Application cannot update/delete audit rows through normal paths.
+2. Export includes verifiable hash chain metadata.
+3. Tamper verification detects modified or missing rows.
+
+**Suggested tests:**
+1. Audit row update/delete rejection test.
+2. Hash chain verification test.
+3. Export integrity proof test.
+
+**Risk if ignored:**
+Audit trails may not satisfy security or compliance buyers after an incident.
+
+**Remediation complexity:** High
+
+**Dependencies:** None.
+
+**Blocks production readiness:** Yes
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-AUD-002 [P0] [Scalability] Compliance recomputation and exports silently miss events at scale
+
+**Status:** Incorrect
+
+**Current implementation:**
+Compliance recomputation and violation refresh scan fixed windows, and audit export defaults/caps event counts. Large environments can have evidence computed from partial event sets without explicit incomplete status.
+
+**Expected implementation:**
+Evidence recomputation and export should paginate through all relevant events, run asynchronously for large ranges, and mark partial/incomplete outputs clearly.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/compliance/repository.py`; `packages/product-platform/src/product_platform/api/app.py`; `packages/product-platform/frontend/src/features/compliance/CompliancePage.tsx`
+
+**Affected symbols:**
+`ComplianceRepository.recompute_evidence`, `refresh_violations`, audit export content, compliance report download.
+
+**Evidence:**
+`recompute_evidence` and `refresh_violations` query `limit=500` around `compliance/repository.py:612` and `repository.py:643`; export defaults/caps around `repository.py:163`; UI export uses current filters around `CompliancePage.tsx:367`.
+
+**Why this matters:**
+Silent truncation undermines compliance evidence and can hide violations.
+
+**Competitor benchmark:**
+Enterprise compliance evidence exports and LangSmith/Galileo operational evidence workflows.
+
+**Recommended remediation:**
+1. Make recomputation paginate or run as an async job.
+2. Persist recomputation cursor and source event range.
+3. Include completeness metadata in evidence/report exports.
+4. Add warnings for capped UI exports.
+
+**Acceptance criteria:**
+1. Evidence recompute processes all matching events for a requested range.
+2. Large exports run asynchronously and indicate completeness.
+3. Partial exports are explicitly marked and audited.
+
+**Suggested tests:**
+1. Recompute test with more than 500 relevant events.
+2. Async export pagination test.
+3. UI/report completeness metadata test.
+
+**Risk if ignored:**
+Compliance reports may be materially false in larger deployments.
+
+**Remediation complexity:** Medium
+
+**Dependencies:** F-WRK-001
+
+**Blocks production readiness:** Yes
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-AUD-003 [P1] [Compliance] Evidence packs are summaries, not auditor-verifiable evidence objects
+
+**Status:** Partially Implemented
+
+**Current implementation:**
+Evidence items store summary-like data but do not consistently include source event hashes, control mapping version, predicate snapshot, artifact checksum, trace IDs, or chain proof.
+
+**Expected implementation:**
+Evidence packs should be reproducible and verifiable: source event IDs/hashes, policy/control version, artifact digest, trace/run IDs, signer, timestamp, and export proof.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/db/migrations/0044_compliance_controls.up.sql`; `packages/product-platform/src/product_platform/compliance/repository.py`; `packages/product-platform/src/product_platform/artifacts/repository.py`
+
+**Affected symbols:**
+`evidence_items`, `_upsert_evidence`, report serialization, artifact attestations.
+
+**Evidence:**
+`evidence_items` lacks source event hash/control mapping version fields around `0044_compliance_controls.up.sql:36`; `_upsert_evidence` builds text summaries from events around `compliance/repository.py:1024`; report serialization around `repository.py:900` omits chain proof.
+
+**Why this matters:**
+Auditors need to verify how evidence was produced. Summaries are useful UI artifacts but weak compliance records.
+
+**Competitor benchmark:**
+JFrog artifact evidence and enterprise compliance evidence packs.
+
+**Recommended remediation:**
+1. Add evidence source links with event hashes and artifact digests.
+2. Version control mappings and predicates.
+3. Include trace/run/tool/policy IDs where relevant.
+4. Export evidence with verification manifest.
+
+**Acceptance criteria:**
+1. Evidence item can be traced to source audit/runtime events.
+2. Evidence export includes verification data.
+3. Recomputed evidence is reproducible for a fixed input range.
+
+**Suggested tests:**
+1. Evidence item source hash test.
+2. Evidence export verification manifest test.
+3. Recompute determinism test.
+
+**Risk if ignored:**
+Evidence may be persuasive in UI but weak in formal audits.
+
+**Remediation complexity:** Medium
+
+**Dependencies:** F-AUD-001, F-OBS-002
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-AUD-004 [P1] [Observability] Tool Gateway runtime audit is not unified with compliance and export flows
+
+**Status:** Partially Implemented
+
+**Current implementation:**
+Tool runtime actions are stored separately and gateway writes rows, but compliance scans and audit exports focus on `audit_events`. SDK telemetry does not always carry request/correlation detail before raising errors.
+
+**Expected implementation:**
+Runtime/tool actions should be part of a unified evidence graph with audit events, traces, artifacts, policy decisions, and exports.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/db/migrations/0055_tool_runtime_actions.up.sql`; `packages/product-platform/src/product_platform/api/app.py`; `packages/product-platform/src/product_platform/compliance/repository.py`; `ophanix-python-sdk/src/ophanix_tool_gateway/sdk.py`
+
+**Affected symbols:**
+Tool runtime action persistence, gateway call route, compliance event scan, SDK error telemetry.
+
+**Evidence:**
+`tool_runtime_actions` are defined in `0055_tool_runtime_actions.up.sql`; gateway writes rows around `api/app.py:3794`; compliance scans audit events around `compliance/repository.py:605`; audit export route around `api/app.py:4542` focuses on audit events.
+
+**Why this matters:**
+Governed tool execution is a core product claim. Its runtime evidence must appear in compliance and audit exports.
+
+**Competitor benchmark:**
+LangSmith/Galileo trace evidence and AWS Gateway auditing.
+
+**Recommended remediation:**
+1. Link tool runtime actions to audit events and trace IDs.
+2. Include runtime actions in compliance evidence recompute.
+3. Add export filters for runtime actions and policy decisions.
+4. Ensure SDK emits correlation/trace IDs on errors.
+
+**Acceptance criteria:**
+1. Tool call evidence appears in compliance reports.
+2. Audit export includes linked runtime action and policy decision IDs.
+3. SDK error paths preserve request/correlation IDs.
+
+**Suggested tests:**
+1. Gateway call to compliance evidence integration test.
+2. Audit export includes runtime action test.
+3. SDK error telemetry correlation test.
+
+**Risk if ignored:**
+Sensitive tool actions may be missing from compliance evidence.
+
+**Remediation complexity:** Medium
+
+**Dependencies:** F-OBS-002, F-MCP-002
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+## 5. Missing Tests
+
+1. Test name: `test_audit_hash_chain_tamper_detection`
+   Test type: integration
+   What it should verify: modified/missing audit rows are detected.
+   Files likely affected: `audit/store.py`.
+   Related finding ID: F-AUD-001
+
+2. Test name: `test_compliance_recompute_paginates_all_events`
+   Test type: integration
+   What it should verify: more than 500 events are fully processed.
+   Files likely affected: `compliance/repository.py`.
+   Related finding ID: F-AUD-002
+
+3. Test name: `test_evidence_export_contains_source_hashes`
+   Test type: integration
+   What it should verify: evidence export includes source event hashes and control versions.
+   Files likely affected: compliance export code.
+   Related finding ID: F-AUD-003
+
+4. Test name: `test_tool_runtime_action_appears_in_compliance_evidence`
+   Test type: integration
+   What it should verify: governed tool call contributes to compliance evidence.
+   Files likely affected: Tool Gateway, compliance repository.
+   Related finding ID: F-AUD-004
+
+## 6. Recommended Remediation Order
+
+P0:
+
+1. F-AUD-001
+2. F-AUD-002
+
+P1:
+
+1. F-AUD-004
+2. F-AUD-003
+
+P2:
+
+None.
+
+P3:
+
+None.
+
+## 7. Feature-Level Target State
+
+Audit and compliance should form a verifiable evidence graph. Audit events should be append-only, hash-chained, externally anchored, and exportable with proofs. Evidence recomputation should be complete, asynchronous at scale, and tied to source event hashes, policy/control versions, traces, runtime actions, artifacts, and signatures. Tool calls, MCP calls, plugin installs, credential access, and runtime sessions should feed the same evidence model. UI should clearly show export completeness and verification status. Tests should prove tamper detection, pagination, evidence reproducibility, and runtime/tool inclusion.
+

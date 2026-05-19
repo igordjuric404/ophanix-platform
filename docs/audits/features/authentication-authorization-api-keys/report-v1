@@ -1,0 +1,282 @@
+# Feature Audit: Authentication, Authorization, and API Keys
+
+## 1. Scope
+
+This audit covers human authentication, RBAC, API keys, agent credentials, token/session behavior, environment scoping, frontend permission drift, and SDK authentication ergonomics. It inspects `product_platform/api/auth.py`, `api/rbac.py`, API-key models/routes/repositories, Tool Gateway auth, frontend RBAC, and SDK token providers. Relevant benchmarks are Microsoft enterprise access controls, AWS AgentCore Identity, Google IAM integration, Arcade/Composio user-specific authorization, and OpenAI approval patterns. Out of scope: provider credential storage, which is covered in INT.
+
+## 2. Current Implementation Summary
+
+The backend has local token issuance and validation in `packages/product-platform/src/product_platform/api/auth.py`, RBAC constants in `api/rbac.py`, tenancy/environment middleware in `api/app.py`, API key tables in `0001_base_schema.up.sql`, and environment scope migration `0064_api_key_environment_scope.up.sql`. API key hashing uses PBKDF2 plus pepper in `api/api_keys.py:169`. Tool Gateway principal resolution uses agent credentials in `tool_gateway/auth.py` and supports bearer-token based SDK calls. The Python SDK has static and environment token providers in `ophanix-python-sdk/src/ophanix_tool_gateway/sdk.py`.
+
+Current workflow: users authenticate with local HMAC-style tokens, roles are enforced through backend permission constants, API keys can be created/revoked, agent credentials can authenticate gateway calls, and frontend route guards use a separate permission map. Enterprise IdP fields exist in settings but there is no observed OIDC/JWKS/SAML validation path.
+
+## 3. Benchmark Comparison
+
+| Benchmark Capability | Expected Behavior | Current Implementation | Status | Evidence | Priority |
+|---|---|---|---|---|---|
+| Enterprise IdP | OIDC/SAML/JWKS validation with issuer/audience checks, group mapping, and session lifecycle. | Settings exist, runtime auth is local HMAC token service. | Missing | `api/settings.py:125`; `api/auth.py:60` | P0 |
+| User-delegated tool auth | Tool execution is bound to user, agent, tool, scopes, approval, and credential lifecycle. | Tool Gateway principal lacks user delegation. | Missing | `tool_gateway/auth.py:47`; `tool_gateway/decision.py:333` | P0 |
+| API key security | Keys are hashed, scoped, rotated, revoked, audited, and environment bound. | Hashing exists; rotation/reason/audit lifecycle incomplete. | Partially Implemented | `api_keys.py:169`; `api/app.py:4361`; `0064_api_key_environment_scope.up.sql` | P1 |
+| Environment-scoped authorization | Human and machine access are constrained per environment. | API key env restriction exists; human memberships are organization-wide. | Partially Implemented | `api/app.py:1295`; `0001_base_schema.up.sql:39` | P1 |
+| Session revocation | Logout and incident response invalidate active tokens. | Stateless tokens have no `jti`/server revocation lookup. | Risky | `api/auth.py:78`; `api/app.py:3632` | P1 |
+
+## 4. Findings
+
+### F-AUTH-001 [P0] [Authentication] Enterprise IdP configuration exists but runtime auth remains local-token based
+
+**Status:** Missing
+
+**Current implementation:**
+Settings expose IdP fields, but authentication is implemented as a local HMAC/dev-token style service. There is no observed OIDC/JWKS/SAML validation path, enterprise group mapping, or IdP session lifecycle integration.
+
+**Expected implementation:**
+Production auth should validate external IdP tokens with issuer, audience, expiry, signature, key rotation, group/role mapping, and environment scoping. Local/dev tokens should be explicitly non-production.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/api/auth.py`; `packages/product-platform/src/product_platform/api/settings.py`; `packages/product-platform/src/product_platform/api/app.py`; `packages/product-platform/src/product_platform/api/rbac.py`
+
+**Affected symbols:**
+Auth token service, `idp_issuer_url`, `idp_audience`, RBAC mapping, auth middleware.
+
+**Evidence:**
+`api/auth.py:60` implements local HMAC token behavior. `api/settings.py:125` contains IdP issuer/audience configuration without a corresponding production validation path.
+
+**Why this matters:**
+Enterprise customers expect SSO, group-driven access, token claim validation, and revocation. A local token service cannot meet Microsoft/Google/AWS benchmark expectations.
+
+**Competitor benchmark:**
+Microsoft Agent 365 enterprise access controls, Google IAM integration, AWS AgentCore Identity.
+
+**Recommended remediation:**
+1. Add a production OIDC/JWKS validator with issuer/audience/expiry/key rotation checks.
+2. Map IdP groups/claims to backend roles and environment memberships.
+3. Gate local auth behind a development-only configuration.
+4. Add session and audit records tied to IdP subject identifiers.
+
+**Acceptance criteria:**
+1. Invalid issuer, audience, signature, expiry, or key ID tokens are rejected.
+2. Role and environment access derive from verified claims or explicit membership.
+3. Production config cannot start with dev-token auth enabled.
+
+**Suggested tests:**
+1. OIDC/JWKS integration tests with valid and invalid tokens.
+2. RBAC mapping tests for IdP groups.
+3. Startup configuration tests rejecting dev auth in production.
+
+**Risk if ignored:**
+Production deployments will depend on non-enterprise auth and may grant access outside intended identity controls.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-AUTH-004, F-TST-003
+
+**Blocks production readiness:** Yes
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-AUTH-002 [P0] [Authorization] User-delegated OAuth and per-user tool authorization are missing
+
+**Status:** Missing
+
+**Current implementation:**
+Tool Gateway authorization is based on organization, environment, agent, credential, and scopes. It does not bind execution to an end user, delegated provider account, OAuth consent, or approval state.
+
+**Expected implementation:**
+Tool calls should be authorized against agent identity, human user, delegated provider account, requested scope, environment, policy decision, approval state, and audit record.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/tool_gateway/auth.py`; `packages/product-platform/src/product_platform/tool_gateway/decision.py`; `packages/product-platform/src/product_platform/tool_gateway/models.py`; `ophanix-python-sdk/src/ophanix_tool_gateway/sdk.py`
+
+**Affected symbols:**
+`GatewayPrincipal`, `ToolPolicyDecisionService`, gateway grant models, SDK token providers.
+
+**Evidence:**
+`GatewayPrincipal` has org/env/agent/credential/scopes but no user/delegated account at `tool_gateway/auth.py:47`. SDK token providers are static/environment bearer based in `sdk.py:150`.
+
+**Why this matters:**
+Arcade and Composio compete on user-specific tool authorization. Without delegation, Ophanix cannot safely govern agents acting on behalf of users.
+
+**Competitor benchmark:**
+Arcade authorization challenge, Composio managed OAuth, OpenAI approval patterns.
+
+**Recommended remediation:**
+1. Add delegated user identity and provider-account binding to gateway principals.
+2. Introduce OAuth authorization sessions and consent records.
+3. Extend policy decisions to allow, deny, require approval, and pending authorization.
+4. Add SDK helpers for authorization challenge and approval polling.
+
+**Acceptance criteria:**
+1. Tool calls can require a user-specific authorization challenge.
+2. Calls with missing or expired delegated credentials are blocked or returned as pending authorization.
+3. Audit records include user, agent, credential, tool, scope, policy, and approval state.
+
+**Suggested tests:**
+1. Gateway test for user-bound tool authorization.
+2. SDK test handling pending authorization response.
+3. Audit test proving user-agent-tool binding is recorded.
+
+**Risk if ignored:**
+Agents may use organization-wide credentials for actions that should require user consent.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-INT-002, F-INT-005
+
+**Blocks production readiness:** Yes
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-AUTH-003 [P1] [API Keys] API keys are hashed but lifecycle management is incomplete
+
+**Status:** Partially Implemented
+
+**Current implementation:**
+API keys are hashed with PBKDF2 and pepper, and environment scope support exists. The lifecycle lacks first-class rotation, revoke reason/metadata, audit coverage for all key events, and mandatory expiry.
+
+**Expected implementation:**
+API keys should have mandatory expiry or policy-controlled lifetime, rotation, revoke reason, created-by/revoked-by evidence, last-used metadata, environment scope, and audit events.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/api/api_keys.py`; `packages/product-platform/src/product_platform/api/app.py`; `packages/product-platform/src/product_platform/db/migrations/0001_base_schema.up.sql`; `packages/product-platform/src/product_platform/db/migrations/0064_api_key_environment_scope.up.sql`
+
+**Affected symbols:**
+API key create/revoke routes, API key repository, `api_keys` table.
+
+**Evidence:**
+PBKDF2+pepper hashing is implemented in `api_keys.py:169`; `expires_at` is optional; create/revoke routes around `api/app.py:4361` do not expose a full rotation workflow.
+
+**Why this matters:**
+Long-lived keys without rotation and strong audit trails become durable secrets. Startup teams often accumulate these risks quickly.
+
+**Competitor benchmark:**
+AWS AgentCore Identity and enterprise API-key governance patterns.
+
+**Recommended remediation:**
+1. Add rotate endpoint that creates replacement and revokes old key atomically.
+2. Require expiry by policy for production keys.
+3. Record revoke reason, actor, last use, and environment.
+4. Emit audit events for create, rotate, revoke, failed use, and scope violation.
+
+**Acceptance criteria:**
+1. Keys can be rotated without downtime.
+2. Revoked keys include actor and reason.
+3. Expired/revoked/out-of-scope keys are rejected and audited.
+
+**Suggested tests:**
+1. API key rotation integration test.
+2. Expired key rejection test.
+3. Audit event tests for create/revoke/scope violation.
+
+**Risk if ignored:**
+Compromised or stale keys may remain useful longer than intended.
+
+**Remediation complexity:** Medium
+
+**Dependencies:** F-AUD-001
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-AUTH-004 [P1] [Authorization] Human tenant authorization is organization-wide rather than environment-scoped
+
+**Status:** Partially Implemented
+
+**Current implementation:**
+The middleware validates organization/environment context, and API keys have environment restrictions, but human memberships are organization-wide in the base schema.
+
+**Expected implementation:**
+Human authorization should support organization roles plus explicit environment membership, policy exceptions, and scoped admin roles.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/api/app.py`; `packages/product-platform/src/product_platform/api/rbac.py`; `packages/product-platform/src/product_platform/db/migrations/0001_base_schema.up.sql`; `packages/product-platform/frontend/src/lib/rbac.ts`
+
+**Affected symbols:**
+Tenant context middleware, `organization_memberships`, frontend route permissions, backend permission constants.
+
+**Evidence:**
+Tenant/environment validation starts around `api/app.py:1295`, API-key environment restriction branch around `api/app.py:1324`, and `organization_memberships` in `0001_base_schema.up.sql:39` lacks environment binding.
+
+**Why this matters:**
+Production agent control planes separate dev/staging/prod access. Organization-wide roles make production actions too broad.
+
+**Competitor benchmark:**
+Microsoft enterprise access controls and Google IAM integration.
+
+**Recommended remediation:**
+1. Add environment membership or role assignment model.
+2. Update middleware to require both organization and environment access.
+3. Align frontend RBAC with backend permissions.
+4. Add explicit break-glass roles with audit requirements.
+
+**Acceptance criteria:**
+1. Users without environment membership cannot access environment-scoped resources.
+2. API keys and human users follow the same environment model.
+3. Frontend hides actions that backend would reject.
+
+**Suggested tests:**
+1. Environment access denial API tests.
+2. Frontend route guard tests matching backend permissions.
+3. Break-glass access audit tests.
+
+**Risk if ignored:**
+Users with broad organization roles may accidentally or maliciously affect production environments.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-AUTH-001
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+## 5. Missing Tests
+
+1. Test name: `test_oidc_jwks_validation_rejects_bad_claims`
+   Test type: integration
+   What it should verify: issuer, audience, expiry, signature, and key rotation are enforced.
+   Files likely affected: `api/auth.py`, `api/settings.py`.
+   Related finding ID: F-AUTH-001
+
+2. Test name: `test_gateway_requires_user_delegation_for_user_tool`
+   Test type: API/integration
+   What it should verify: tool calls requiring user consent are blocked without delegated auth.
+   Files likely affected: `tool_gateway/auth.py`, `tool_gateway/decision.py`.
+   Related finding ID: F-AUTH-002
+
+3. Test name: `test_api_key_rotation_and_revoke_audit`
+   Test type: API/integration
+   What it should verify: rotation revokes old key and writes audit evidence.
+   Files likely affected: `api/api_keys.py`, `api/app.py`.
+   Related finding ID: F-AUTH-003
+
+4. Test name: `test_human_user_without_environment_membership_is_denied`
+   Test type: API/integration
+   What it should verify: org membership alone is not enough for environment-scoped operations.
+   Files likely affected: tenancy middleware and RBAC.
+   Related finding ID: F-AUTH-004
+
+## 6. Recommended Remediation Order
+
+P0:
+
+1. F-AUTH-001
+2. F-AUTH-002
+
+P1:
+
+1. F-AUTH-004
+2. F-AUTH-003
+
+P2:
+
+None.
+
+P3:
+
+None.
+
+## 7. Feature-Level Target State
+
+Authentication should be enterprise-first: OIDC/JWKS or SAML-backed human auth, environment-scoped RBAC, audited API-key lifecycle, and user-delegated tool authorization. API models should represent user, agent, environment, credential, provider account, approval, policy, and scope in the same decision chain. The SDK should expose token providers plus authorization challenge helpers. UI and backend permission maps should come from one source of truth. Tests should prove IdP validation, environment scoping, key rotation, session revocation, and delegated tool access.
+

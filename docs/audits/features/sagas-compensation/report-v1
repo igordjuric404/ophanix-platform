@@ -1,0 +1,282 @@
+# Feature Audit: Sagas and Compensation
+
+## 1. Scope
+
+This audit covers saga definitions, execution, compensation, retries, checkpoints, state machines, UI support, and worker integration. It inspects `packages/product-platform/src/product_platform/runtime/sagas.py`, `saga_executor.py`, `saga_actions.py`, `0021_saga_builder.up.sql`, saga routes in `api/app.py`, `packages/agent-hypervisor/src/hypervisor/saga`, and runtime UI. Relevant benchmarks are Temporal workflows, LangGraph durable execution, and enterprise compensation/recovery patterns. Out of scope: general worker queue reliability, covered in WRK.
+
+## 2. Current Implementation Summary
+
+Product Platform has saga builder persistence in `0021_saga_builder.up.sql`, saga models in `runtime/models.py`, a limited executable state model in `runtime/sagas.py`, demo-safe action execution in `runtime/saga_executor.py`, and predefined demo actions in `runtime/saga_actions.py`. API routes support validation, execution, monitor data, and compensation around `api/app.py:9278` to `api/app.py:9364`. The frontend runtime page renders saga forms and execution views. The older hypervisor package has `SagaOrchestrator` and checkpoint scaffolding under `packages/agent-hypervisor/src/hypervisor/saga`.
+
+Current workflow: users define saga-like workflows, execute demo-safe actions, see status, and trigger compensation for supported records. The flow does not provide deterministic replay, persisted checkpoints, reliable compensation queues, or a production activity boundary.
+
+## 3. Benchmark Comparison
+
+| Benchmark Capability | Expected Behavior | Current Implementation | Status | Evidence | Priority |
+|---|---|---|---|---|---|
+| Durable saga state | Saga history survives process crashes and supports replay. | Product uses DB drafts plus in-memory execution paths. | Incorrect | `runtime/saga_executor.py:112`; `agent-hypervisor/.../orchestrator.py:48` | P0 |
+| Checkpoints | Completed steps are checkpointed and not repeated. | Checkpoint manager is stubbed. | Missing | `agent-hypervisor/.../checkpoint.py:69` | P0 |
+| Compensation state machine | Compensation has clear pending/running/succeeded/failed/manual states. | Product and hypervisor states drift. | Inconsistent | `runtime/sagas.py:20`; `orchestrator.py:108` | P1 |
+| Idempotent retries | Retries avoid duplicated external effects. | Retry counters exist without durable idempotency semantics. | Risky | `runtime/models.py:203`; `orchestrator.py:108` | P1 |
+| Activity/task boundary | Side effects run through reliable workers/activities. | Execution uses hardcoded demo actions. | Missing | `runtime/saga_actions.py:6`; `runtime/saga_executor.py:44` | P1 |
+
+## 4. Findings
+
+### F-SAG-001 [P0] [Durable Execution] Saga execution state is split between in-memory engines and draft database records
+
+**Status:** Incorrect
+
+**Current implementation:**
+The hypervisor `SagaOrchestrator` stores saga state in memory, while Product Platform stores draft saga definitions and executes through a demo-safe product executor. The product executor creates a new in-memory orchestration path per request.
+
+**Expected implementation:**
+Saga execution should have one authoritative persisted state machine with event history, step attempts, activity results, compensation attempts, leases, and recovery semantics.
+
+**Affected files:**
+`packages/agent-hypervisor/src/hypervisor/saga/orchestrator.py`; `packages/product-platform/src/product_platform/runtime/saga_executor.py`; `packages/product-platform/src/product_platform/runtime/sagas.py`; `packages/product-platform/src/product_platform/db/migrations/0021_saga_builder.up.sql`
+
+**Affected symbols:**
+`SagaOrchestrator._sagas`, product saga executor, saga status fields, saga routes.
+
+**Evidence:**
+`SagaOrchestrator._sagas` is in-memory at `orchestrator.py:48`; Product creates a fresh in-memory orchestrator path in `runtime/saga_executor.py:112`; only draft executable statuses exist in `runtime/sagas.py:23`.
+
+**Why this matters:**
+Compensation and recovery are only trustworthy if state survives restarts and concurrent workers. In-memory orchestration cannot provide production guarantees.
+
+**Competitor benchmark:**
+Temporal workflow history and LangGraph durable execution.
+
+**Recommended remediation:**
+1. Choose a single product saga engine or integrate Temporal.
+2. Persist saga execution history, attempts, and compensation records.
+3. Make workers lease steps and resume from persisted state.
+4. Deprecate or explicitly mark in-memory hypervisor saga code as non-production.
+
+**Acceptance criteria:**
+1. Saga execution state survives process restart.
+2. Completed steps are not repeated after restart.
+3. Product and hypervisor semantics are either unified or clearly separated.
+
+**Suggested tests:**
+1. Crash/restart saga recovery test.
+2. Multi-worker step lease contention test.
+3. Regression test proving in-memory state is not required for resume.
+
+**Risk if ignored:**
+Sagas may duplicate external side effects or lose compensation state under normal failures.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-RDE-002, F-WRK-001
+
+**Blocks production readiness:** Yes
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-SAG-002 [P0] [Checkpoints] Checkpoints and replay are documented concepts but not implemented
+
+**Status:** Missing
+
+**Current implementation:**
+Checkpoint code exists but returns placeholder results, and product saga execution does not persist usable checkpoints.
+
+**Expected implementation:**
+Every external side-effect boundary should record checkpoint data, activity result, policy snapshot, idempotency key, and resume cursor.
+
+**Affected files:**
+`packages/agent-hypervisor/src/hypervisor/saga/checkpoint.py`; `packages/product-platform/src/product_platform/runtime/saga_executor.py`; `packages/product-platform/src/product_platform/runtime/models.py`
+
+**Affected symbols:**
+`CheckpointManager`, saga step checkpoint fields, replay/resume logic.
+
+**Evidence:**
+`CheckpointManager.is_achieved` returns false, `get_checkpoint` returns none, and replay effectively reruns steps around `checkpoint.py:69`.
+
+**Why this matters:**
+Without checkpoints, compensation cannot reliably know which steps completed or which side effects need undoing.
+
+**Competitor benchmark:**
+LangGraph checkpoints and Temporal replay/activity result history.
+
+**Recommended remediation:**
+1. Add persisted checkpoint records for each saga step.
+2. Store immutable activity results and input hashes.
+3. Use checkpoints during retry and replay.
+4. Add integrity checks and audit events.
+
+**Acceptance criteria:**
+1. Checkpoints are created after each successful step.
+2. Replay reads checkpoint state and skips completed side effects.
+3. Corrupted or missing checkpoints fail closed.
+
+**Suggested tests:**
+1. Checkpoint persistence unit test.
+2. Replay-from-checkpoint integration test.
+3. Corrupted checkpoint rejection test.
+
+**Risk if ignored:**
+Retry and replay can cause duplicate charges, duplicate plugin installs, or inconsistent workflow state.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-RDE-003
+
+**Blocks production readiness:** Yes
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-SAG-003 [P1] [Transactions] Retry and compensation behavior is not idempotency-safe
+
+**Status:** Risky
+
+**Current implementation:**
+Retry counters and failed-step resets exist, but saga steps do not model durable idempotency keys, activity result reuse, or external side-effect fences.
+
+**Expected implementation:**
+Each activity should require a deterministic idempotency key and record whether side effects were attempted, completed, compensated, or require manual repair.
+
+**Affected files:**
+`packages/agent-hypervisor/src/hypervisor/saga/orchestrator.py`; `packages/product-platform/src/product_platform/runtime/models.py`; `packages/product-platform/src/product_platform/runtime/saga_executor.py`
+
+**Affected symbols:**
+Step retry counters, failed-step reset logic, compensation action fields.
+
+**Evidence:**
+Hypervisor resets failed or timed-out steps to pending in `orchestrator.py:108`; product saga steps include `retry_count` but no durable idempotency contract in `runtime/models.py:203`.
+
+**Why this matters:**
+Agent workflows commonly call external APIs. Retrying without idempotency can create duplicate irreversible actions.
+
+**Competitor benchmark:**
+Temporal Activities, retries, and idempotent side-effect boundaries.
+
+**Recommended remediation:**
+1. Require idempotency keys for side-effecting actions.
+2. Persist attempt records with external operation identifiers.
+3. Reuse activity results during replay.
+4. Escalate non-idempotent failures to manual compensation.
+
+**Acceptance criteria:**
+1. Duplicate worker attempts use the same idempotency key.
+2. Completed activity results are reused instead of re-executed.
+3. Non-idempotent retries are blocked unless explicitly approved.
+
+**Suggested tests:**
+1. Duplicate attempt idempotency test.
+2. Retry-after-timeout test using stored operation ID.
+3. Non-idempotent activity rejection test.
+
+**Risk if ignored:**
+Production workflows can create duplicate external actions and inconsistent audit trails.
+
+**Remediation complexity:** Medium
+
+**Dependencies:** F-RDE-002, F-WRK-003
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-SAG-004 [P1] [Services] Saga execution is demo-safe rather than an activity/task execution model
+
+**Status:** Partially Implemented
+
+**Current implementation:**
+Execution is limited to hardcoded demo actions and inline product API routes. Worker modules exist elsewhere but are not a general saga activity runtime.
+
+**Expected implementation:**
+Saga steps should dispatch to durable activity workers through queues/task leases, with typed action definitions, retries, timeouts, compensation handlers, and policy checks.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/runtime/saga_actions.py`; `packages/product-platform/src/product_platform/runtime/saga_executor.py`; `packages/product-platform/src/product_platform/api/app.py`; `packages/product-platform/src/product_platform/worker/store.py`
+
+**Affected symbols:**
+`DemoSafeActionRunner`, `saga_actions`, saga execution routes, worker job store.
+
+**Evidence:**
+`saga_actions.py:6` defines six demo actions; `saga_executor.py:44` runs through `DemoSafeActionRunner`; saga route code is inline around `api/app.py:9339`.
+
+**Why this matters:**
+Demo-safe execution is useful for pilots, but production sagas need isolated, observable, retriable side-effect execution.
+
+**Competitor benchmark:**
+Temporal Activities and task queues.
+
+**Recommended remediation:**
+1. Define activity registry and typed action contracts.
+2. Dispatch activities through persistent jobs or Temporal workers.
+3. Add timeouts, heartbeats, retries, and compensation handlers.
+4. Add policy checks before step execution and compensation.
+
+**Acceptance criteria:**
+1. Saga steps execute through workers, not inline demo action maps.
+2. Activity failures are retried or compensated according to policy.
+3. Step execution emits trace and audit events.
+
+**Suggested tests:**
+1. Worker-backed saga step integration test.
+2. Activity timeout and retry test.
+3. Compensation handler failure test.
+
+**Risk if ignored:**
+Sagas will not scale beyond controlled demos and can block API request paths.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-WRK-001, F-WRK-004
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+## 5. Missing Tests
+
+1. Test name: `test_saga_execution_survives_process_restart`
+   Test type: integration/e2e
+   What it should verify: saga state and completed steps survive restart.
+   Files likely affected: saga executor, worker, persistence.
+   Related finding ID: F-SAG-001
+
+2. Test name: `test_saga_checkpoint_replay_skips_completed_step`
+   Test type: integration
+   What it should verify: replay uses persisted checkpoint data.
+   Files likely affected: checkpoint manager and saga executor.
+   Related finding ID: F-SAG-002
+
+3. Test name: `test_saga_activity_retry_uses_idempotency_key`
+   Test type: integration
+   What it should verify: duplicate attempts do not duplicate external side effects.
+   Files likely affected: saga models, worker execution.
+   Related finding ID: F-SAG-003
+
+4. Test name: `test_saga_step_executes_through_worker_activity`
+   Test type: integration
+   What it should verify: saga activity execution is leased, observable, and retriable.
+   Files likely affected: worker and saga execution code.
+   Related finding ID: F-SAG-004
+
+## 6. Recommended Remediation Order
+
+P0:
+
+1. F-SAG-001
+2. F-SAG-002
+
+P1:
+
+1. F-SAG-003
+2. F-SAG-004
+
+P2:
+
+None.
+
+P3:
+
+None.
+
+## 7. Feature-Level Target State
+
+Sagas should use a single durable state machine with persisted event history, checkpoints, idempotent activities, compensation attempts, worker leases, and manual repair states. Data models should represent steps, attempts, compensation records, checkpoints, and external operation IDs. APIs should expose state and repair actions without executing side effects inline. Workers should execute typed activities with retry, heartbeat, and timeout semantics. UI should show step timeline, compensation status, and manual intervention tasks. Tests should prove crash recovery, replay, idempotency, and compensation failure handling.
+

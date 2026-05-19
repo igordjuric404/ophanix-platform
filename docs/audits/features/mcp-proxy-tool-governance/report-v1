@@ -1,0 +1,342 @@
+# Feature Audit: MCP Proxy and Tool Governance
+
+## 1. Scope
+
+This audit covers MCP server/tool registry, MCP proxy calls, approval flow, policy bindings, rate limits, scan gating, Tool Gateway policy decisions, SDK coverage, and audit redaction. It inspects `product_platform/mcp`, `product_platform/tool_gateway`, MCP-related migrations, routes in `api/app.py`, `packages/agent-mesh/packages/mcp-proxy`, `agent-mcp-governance`, and `ophanix-python-sdk`. Relevant benchmarks are OpenAI Agents SDK MCP tools and approvals, AWS AgentCore Gateway, Google Agent Gateway, JFrog MCP Registry/Agent Guard, Arcade/Composio authorization, Galileo, and Onyx. Out of scope: plugin catalog governance, covered in PLG.
+
+## 2. Current Implementation Summary
+
+Product Platform has MCP registry tables in `0014_mcp_registry.up.sql`, security scans in `0016_mcp_security_scans.up.sql`, proxy traffic and approval tables in `0017_mcp_proxy_traffic.up.sql`, MCP models in `mcp/models.py`, repository logic in `mcp/repository.py`, discovery in `mcp/discovery.py`, and proxy evaluation/approval logic in `mcp/proxy.py`. API routes around `api/app.py:7186`, `api/app.py:7583`, and `api/app.py:7800` expose discovery, proxy call, and rate-limit management. A separate TypeScript proxy wraps stdio MCP `tools/call` in `packages/agent-mesh/packages/mcp-proxy/src/proxy.ts`, but it is not wired into Product Platform. Tool Gateway HTTP invocation is more complete and lives in `tool_gateway/invocation.py`, `tool_gateway/decision.py`, and related routes. The Python SDK exposes Tool Gateway calls only.
+
+Current workflow: operators can register/discover MCP-like tools, record proxy calls, create approvals/rate-limit configs, and call governed HTTP tools through Tool Gateway. Product MCP execution itself is demo-backed and policy enforcement is not yet inline at real MCP boundaries.
+
+## 3. Benchmark Comparison
+
+| Benchmark Capability | Expected Behavior | Current Implementation | Status | Evidence | Priority |
+|---|---|---|---|---|---|
+| Real MCP mediation | Proxy mediates `tools/list`, `tools/call`, request/result policy, and upstream transport. | Product proxy uses demo adapters/responses. | Incorrect | `api/app.py:7583`; `mcp/proxy.py:70`; `mcp/proxy.py:795` | P0 |
+| Inline policy enforcement | Policy bindings are enforced before tool list/call/result. | Bindings are resolved but effective checks are name heuristics. | Incorrect | `mcp/proxy.py:236`; `mcp/proxy.py:641`; `mcp/proxy.py:770` | P0 |
+| Supply-chain scan gate | Calls require active server/tool and clean scan/provenance status. | `not_scanned`/unknown tools can be called. | Risky | `mcp/repository.py:241`; `mcp/proxy.py:190` | P1 |
+| Rate limiting | MCP limits are enforced in proxy path. | MCP limits are stored/listed but runtime limiter covers gateway routes. | Missing | `mcp/models.py:318`; `api/app.py:882`; `api/app.py:1260` | P1 |
+| Approval replay | Approvals escrow original payload, expire, revalidate, and audit reviewer state. | Approval stores reason and replays demo response from summary. | Incorrect | `mcp/models.py:289`; `mcp/proxy.py:490` | P0 |
+| SDK support | SDK supports MCP client/proxy approval polling and OpenAI integration. | SDK is Tool Gateway-only. | Missing | `ophanix-python-sdk/src/ophanix_tool_gateway/sdk.py:67` | P2 |
+
+## 4. Findings
+
+### F-MCP-001 [P0] [Tool Governance] Product MCP proxy is a demo recorder, not a real MCP data plane
+
+**Status:** Incorrect
+
+**Current implementation:**
+The product MCP proxy accepts a platform JSON request and records a proxy call, but discovery and execution use demo adapters and `_demo_tool_response`. A separate TS stdio proxy exists but is not integrated into Product Platform.
+
+**Expected implementation:**
+Product MCP should mediate real MCP transports, including Streamable HTTP/SSE and local stdio guard mode. It should intercept `tools/list`, `tools/call`, tool results, and errors with policy and audit controls.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/api/app.py`; `packages/product-platform/src/product_platform/mcp/discovery.py`; `packages/product-platform/src/product_platform/mcp/proxy.py`; `packages/agent-mesh/packages/mcp-proxy/src/proxy.ts`
+
+**Affected symbols:**
+`create_mcp_proxy_call`, `DemoMCPToolDiscoveryAdapter`, `DemoMCPGatewayAdapter`, `_demo_tool_response`, TS MCP proxy.
+
+**Evidence:**
+`create_mcp_proxy_call` accepts product JSON at `api/app.py:7583`; discovery uses `DemoMCPToolDiscoveryAdapter` around `api/app.py:7186` and `mcp/discovery.py:35`; execution uses `DemoMCPGatewayAdapter` in `mcp/proxy.py:70` and `_demo_tool_response` in `mcp/proxy.py:795`; TS stdio wrapping exists at `mcp-proxy/src/proxy.ts:138`.
+
+**Why this matters:**
+The core MCP product promise is inline mediation. Recording demo calls does not protect real MCP tool execution.
+
+**Competitor benchmark:**
+AWS AgentCore Gateway, Google Agent Gateway, OpenAI MCP tools, JFrog Agent Guard.
+
+**Recommended remediation:**
+1. Replace demo adapters with real MCP transport adapters.
+2. Integrate local stdio guard and hosted HTTP/SSE proxy modes.
+3. Intercept `tools/list`, `tools/call`, and tool result boundaries.
+4. Keep demo mode explicit and unavailable in production.
+
+**Acceptance criteria:**
+1. Product proxy can call a real MCP server and mediate `tools/list` and `tools/call`.
+2. Demo adapter cannot be selected in production.
+3. Calls are audited with real upstream request/result metadata.
+
+**Suggested tests:**
+1. Real local MCP server integration test.
+2. Streamable HTTP/SSE proxy test.
+3. Production config test rejecting demo adapter.
+
+**Risk if ignored:**
+Ophanix can appear to govern MCP while real clients bypass the product data plane.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-PLG-004, F-OBS-002
+
+**Blocks production readiness:** Yes
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-MCP-002 [P0] [Tool Governance] MCP policy bindings are linked but not enforced before execution
+
+**Status:** Incorrect
+
+**Current implementation:**
+The proxy resolves policy link IDs, but evaluation passes the ID as a policy name and uses heuristic checks based on tool names for deny/approval decisions. Binding tests validate resolver/evaluator behavior out of band, not real proxy enforcement.
+
+**Expected implementation:**
+Policy bindings should compile to an enforceable decision bundle and run before tool listing, before tool call, and before returning tool results to agents.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/mcp/proxy.py`; `packages/product-platform/src/product_platform/policies`; `packages/product-platform/tests/test_policy_bindings_overall.py`
+
+**Affected symbols:**
+`MCPProxyRepository.resolve_policy_link`, `evaluate_and_record`, `_requires_approval`, `_is_denied_tool_name`, policy binding tests.
+
+**Evidence:**
+`resolve_policy_link` is around `mcp/proxy.py:236`; `evaluate_and_record` passes ID as `policy_name` around `mcp/proxy.py:641`; heuristic methods are around `mcp/proxy.py:770`; tests validate separately at `test_policy_bindings_overall.py:115`.
+
+**Why this matters:**
+Competitors enforce policies at the action boundary. Advisory or heuristic policy checks create a security theater risk.
+
+**Competitor benchmark:**
+Agent Governance Toolkit, JFrog Agent Guard, Galileo/Onyx runtime policy enforcement.
+
+**Recommended remediation:**
+1. Compile policy bindings into deterministic decision inputs.
+2. Evaluate policies before upstream MCP execution.
+3. Persist policy version, input snapshot, outcome, and reasons.
+4. Add tests through the actual proxy call endpoint.
+
+**Acceptance criteria:**
+1. Bound deny policy blocks a real `tools/call`.
+2. Bound approval policy creates pending approval before execution.
+3. Decision record includes policy version and evaluated input.
+
+**Suggested tests:**
+1. End-to-end proxy deny policy test.
+2. End-to-end proxy require-approval policy test.
+3. Policy-version evidence test.
+
+**Risk if ignored:**
+Unsafe tool calls can execute despite configured policy bindings.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-MCP-001, F-AUD-001
+
+**Blocks production readiness:** Yes
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-MCP-003 [P1] [Security] MCP supply-chain scan state does not gate calls
+
+**Status:** Risky
+
+**Current implementation:**
+New or changed tools can be persisted with unknown risk and `not_scanned` versions. Proxy lookup does not require active server/tool status or clean scan state before accepting a proxy call.
+
+**Expected implementation:**
+MCP invocation should require approved server, approved tool, known version, clean scan/provenance state, endpoint allowlist/TLS/SSRF checks, and no blocking findings.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/mcp/repository.py`; `packages/product-platform/src/product_platform/mcp/proxy.py`; `packages/product-platform/src/product_platform/mcp/models.py`; `packages/product-platform/src/product_platform/db/migrations/0016_mcp_security_scans.up.sql`
+
+**Affected symbols:**
+Tool discovery, tool version scan status, endpoint validation, proxy lookup.
+
+**Evidence:**
+New/changed tools are persisted with `risk_level="unknown"` and `status="discovered"` around `mcp/repository.py:241`; versions use `scan_status="not_scanned"` around `mcp/repository.py:282`; proxy lookup around `mcp/proxy.py:190` and `mcp/proxy.py:202` does not enforce clean scan state.
+
+**Why this matters:**
+MCP servers are supply-chain artifacts. Calling unknown/unscanned tools undermines the registry/guard promise.
+
+**Competitor benchmark:**
+JFrog MCP Registry and Xray-style scanning.
+
+**Recommended remediation:**
+1. Add call gate for server/tool status and scan status.
+2. Add endpoint allowlist and SSRF hardening.
+3. Block changed/unscanned tools until review.
+4. Link findings to call decisions and audit evidence.
+
+**Acceptance criteria:**
+1. `not_scanned`, `changed`, disabled, or blocked tools cannot execute.
+2. Endpoint validation rejects private/unsafe targets according to policy.
+3. Blocking findings are visible in call denial reasons.
+
+**Suggested tests:**
+1. Proxy call rejects `not_scanned` tool.
+2. Proxy call rejects disabled server/tool.
+3. Endpoint SSRF rejection test.
+
+**Risk if ignored:**
+Untrusted or changed tool servers can execute in governed environments.
+
+**Remediation complexity:** Medium
+
+**Dependencies:** F-PLG-003
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-MCP-004 [P1] [Scalability] MCP rate limits are configuration-only
+
+**Status:** Missing
+
+**Current implementation:**
+MCP rate-limit models and tables exist, and APIs can create/list configuration. The runtime limiter covers `/api/v1/gateway/*` and `/api/v1/tools/*/invoke`, not the MCP proxy path.
+
+**Expected implementation:**
+MCP proxy calls should enforce rate limits by tenant, environment, agent, user, server, tool, policy, and cost budget using shared state across app instances.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/mcp/models.py`; `packages/product-platform/src/product_platform/db/migrations/0017_mcp_proxy_traffic.up.sql`; `packages/product-platform/src/product_platform/api/app.py`; `packages/product-platform/tests/test_mcp_proxy_traffic_phase4.py`
+
+**Affected symbols:**
+`MCPRateLimit`, MCP rate-limit routes, app rate limiter, MCP proxy call endpoint.
+
+**Evidence:**
+Models/tables exist around `mcp/models.py:318` and `0017_mcp_proxy_traffic.up.sql:53`; create/list API around `api/app.py:7800`; runtime limiter covers gateway/tool invoke around `api/app.py:882` and `api/app.py:1260`; tests only assert create/list around `test_mcp_proxy_traffic_phase4.py:43`.
+
+**Why this matters:**
+Agents can create runaway tool traffic and cost. Configuration without enforcement does not protect production systems.
+
+**Competitor benchmark:**
+AWS/Google gateway governance and cost/rate controls.
+
+**Recommended remediation:**
+1. Apply MCP rate limits in the proxy decision path.
+2. Use shared storage suitable for multi-instance deployments.
+3. Include cost budget and burst controls.
+4. Add denial audit and response metadata.
+
+**Acceptance criteria:**
+1. Exceeding configured limit blocks MCP calls.
+2. Limits work across app instances.
+3. Denials are audited with limit identity and reset time.
+
+**Suggested tests:**
+1. MCP proxy rate-limit enforcement test.
+2. Multi-instance/shared-store rate-limit test.
+3. Cost budget denial test.
+
+**Risk if ignored:**
+Runaway agents can exhaust upstream services or budgets.
+
+**Remediation complexity:** Medium
+
+**Dependencies:** F-MCP-001
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-MCP-005 [P0] [Approval Patterns] MCP approvals are not execution-grade
+
+**Status:** Incorrect
+
+**Current implementation:**
+Approval requests store minimal reason/context, lack expiry/replay token/original payload escrow/policy snapshot, and approval release replays a demo response using summarized params rather than the original request.
+
+**Expected implementation:**
+Approval should escrow the original request, hash payloads, expire safely, revalidate policy at release, require reviewer identity, enforce idempotency, and audit the full decision chain with redaction.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/mcp/models.py`; `packages/product-platform/src/product_platform/db/migrations/0017_mcp_proxy_traffic.up.sql`; `packages/product-platform/src/product_platform/mcp/proxy.py`; `packages/product-platform/src/product_platform/api/app.py`
+
+**Affected symbols:**
+Approval request model, approval table, approval release path, audit payload generation.
+
+**Evidence:**
+Approval request input is only `reason` in `mcp/models.py:289`; approval table lacks expiry/replay token/original payload escrow in `0017_mcp_proxy_traffic.up.sql:37`; approval release replays `_demo_tool_response` using `params_summary_json` around `mcp/proxy.py:490`.
+
+**Why this matters:**
+Approval systems are security boundaries. Without original payload escrow and revalidation, approval can authorize something different from what was reviewed.
+
+**Competitor benchmark:**
+OpenAI MCP approvals, Arcade authorization challenge, enterprise human-in-the-loop controls.
+
+**Recommended remediation:**
+1. Store encrypted/redacted original payload and payload hash.
+2. Add approval expiry, reviewer identity, and replay token.
+3. Revalidate policy and scan state at release.
+4. Add idempotency and TOCTOU tests.
+
+**Acceptance criteria:**
+1. Approved call executes only the reviewed payload.
+2. Expired approvals cannot be released.
+3. Policy changes between request and release are re-evaluated.
+
+**Suggested tests:**
+1. Approval payload tamper test.
+2. Expired approval release rejection test.
+3. Policy-change revalidation test.
+
+**Risk if ignored:**
+Attackers or bugs can turn an approved request into a different execution.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-MCP-001, F-AUD-001
+
+**Blocks production readiness:** Yes
+
+**Affects stated Ophanix product promise:** Yes
+
+## 5. Missing Tests
+
+1. Test name: `test_real_mcp_tools_call_is_mediated`
+   Test type: integration
+   What it should verify: Product proxy mediates a real MCP `tools/call`.
+   Files likely affected: MCP proxy adapters and routes.
+   Related finding ID: F-MCP-001
+
+2. Test name: `test_mcp_bound_policy_denies_proxy_call`
+   Test type: API/integration
+   What it should verify: policy binding blocks call before upstream execution.
+   Files likely affected: `mcp/proxy.py`, policy engine.
+   Related finding ID: F-MCP-002
+
+3. Test name: `test_mcp_call_requires_clean_scan_state`
+   Test type: API/integration
+   What it should verify: unscanned/changed/disabled tools cannot execute.
+   Files likely affected: `mcp/repository.py`, `mcp/proxy.py`.
+   Related finding ID: F-MCP-003
+
+4. Test name: `test_mcp_proxy_rate_limit_enforced`
+   Test type: integration
+   What it should verify: MCP rate limit config blocks calls at runtime.
+   Files likely affected: rate limiter and proxy route.
+   Related finding ID: F-MCP-004
+
+5. Test name: `test_mcp_approval_release_revalidates_payload_policy`
+   Test type: integration
+   What it should verify: approval release uses original payload and rechecks policy.
+   Files likely affected: approval models and proxy release path.
+   Related finding ID: F-MCP-005
+
+## 6. Recommended Remediation Order
+
+P0:
+
+1. F-MCP-001
+2. F-MCP-002
+3. F-MCP-005
+
+P1:
+
+1. F-MCP-003
+2. F-MCP-004
+
+P2:
+
+None.
+
+P3:
+
+None.
+
+## 7. Feature-Level Target State
+
+MCP governance should be a real data plane: approved tools are exposed through a proxy that enforces policy, scan state, lifecycle, approvals, rate/cost budgets, and audit logging before upstream execution. Data models should represent server/tool versions, scan findings, policy decision snapshots, approval payload hashes, rate-limit counters, and trace IDs. SDKs should support MCP proxy mode, approval polling, and OpenAI Agents SDK integration. Tests should prove real MCP mediation, policy denial, scan gates, approvals, rate limits, redaction, and trace-linked evidence.
+

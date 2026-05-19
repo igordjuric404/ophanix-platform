@@ -1,0 +1,283 @@
+# Feature Audit: Observability, Runtime Events, and Artifacts
+
+## 1. Scope
+
+This audit covers observability APIs, runtime events, trace propagation, OpenTelemetry support, cost/SLO/incident data, artifacts, attestations, and evaluation readiness. It inspects `product_platform/observability`, `product_platform/runtime`, `product_platform/artifacts`, Tool Gateway runtime audit, Agent OS observability module, frontend observability pages, docs, and the Python SDK. Relevant benchmarks are LangSmith tracing/evaluation, AWS AgentCore Observability, Google ADK traces/evals, CrewAI tracing/OTel export, OpenTelemetry GenAI semantic conventions, and Phoenix/Braintrust/Galileo-style eval loops. Out of scope: compliance evidence export, covered in AUD.
+
+## 2. Current Implementation Summary
+
+Product observability routes start around `packages/product-platform/src/product_platform/api/app.py:11451` and focus on SLO objectives, cost events, incidents, chaos experiments, and rollouts. Frontend API types live in `frontend/src/api/observability.ts`, and UI in `frontend/src/features/observability/ObservabilityPage.tsx`. Runtime models expose sessions/actions with latency and correlation IDs. Tool Gateway runtime events are appended in `tool_gateway/runtime_audit.py`. Artifacts live in `product_platform/artifacts/repository.py` and artifact attestations in `0049_artifact_attestations.up.sql`. Agent OS has an alpha observability module under `packages/agent-os/modules/observability`.
+
+Current workflow: operators can manually ingest SLO/cost/incident data, view dashboards, and inspect some runtime/action records. The system does not yet expose a first-class trace/run/span/eval model or W3C trace propagation across SDK, API, Tool Gateway, runtime, and artifacts.
+
+## 3. Benchmark Comparison
+
+| Benchmark Capability | Expected Behavior | Current Implementation | Status | Evidence | Priority |
+|---|---|---|---|---|---|
+| Trace/run model | Sessions, runs, spans, model calls, tool calls, artifacts, evals, and feedback. | Observability APIs are SLO/cost/incident/chaos/rollout focused. | Missing | `api/app.py:11451`; `observability.ts:8`; `ObservabilityPage.tsx:128` | P1 |
+| Context propagation | W3C `traceparent`/`tracestate`, trace ID, span ID, parent ID. | Correlation ID only. | Missing | `api/app.py:670`; `sdk.py:473`; `0018_runtime_sessions.up.sql:26` | P1 |
+| Runtime timeline | Runtime events form an execution span graph. | Runtime actions are audit/status records. | Partially Implemented | `runtime/models.py:146`; `runtime_audit.py:278` | P1 |
+| OTel export | Product emits OTel/OpenInference/GenAI spans to collectors. | Agent OS module is alpha and isolated. | Partially Implemented | `agent-os/modules/observability/README.md:7`; `tracer.py:36` | P2 |
+| Artifact evidence | Artifacts link to runtime actions, traces, spans, evals, and provenance. | Link targets exclude runtime/trace/eval concepts. | Missing | `artifacts/repository.py:24`; `0049_artifact_attestations.up.sql:1` | P1 |
+| Derived SLO/cost | SLOs/costs derive from runtime telemetry. | Manual POST ingestion. | Risky | `observability/repository.py:159`; `repository.py:322` | P2 |
+
+## 4. Findings
+
+### F-OBS-001 [P1] [Observability] Product observability has no first-class trace, run, or eval surface
+
+**Status:** Missing
+
+**Current implementation:**
+Observability backend routes and frontend types focus on SLOs, costs, incidents, chaos experiments, and rollouts. There is no product trace/run/span/eval API comparable to LangSmith or Google ADK.
+
+**Expected implementation:**
+Ophanix should expose traces, runs, spans, tool calls, model calls, policy decisions, artifacts, eval results, datasets, annotations, and feedback loops.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/api/app.py`; `packages/product-platform/frontend/src/api/observability.ts`; `packages/product-platform/frontend/src/features/observability/ObservabilityPage.tsx`; `packages/product-platform/src/product_platform/observability`
+
+**Affected symbols:**
+Observability routes, frontend observability API types, Observability page panels.
+
+**Evidence:**
+Backend observability routes are SLO, chaos, rollout, cost, and incidents starting around `api/app.py:11451`; frontend types stop at `SloObjective`, `CostEvent`, `Incident`, `ChaosExperiment`, and `Rollout` in `observability.ts:8`; page copy says SLO/cost/incident/chaos/rollout in `ObservabilityPage.tsx:128`.
+
+**Why this matters:**
+Audit logs alone are not operational observability. Production agent teams need execution trajectories and eval feedback loops.
+
+**Competitor benchmark:**
+LangSmith tracing/evaluation, Google ADK traces/evals, AWS AgentCore Observability.
+
+**Recommended remediation:**
+1. Define canonical trace/run/span/eval models.
+2. Add ingestion and query APIs for spans and eval results.
+3. Link runtime sessions, Tool Gateway calls, MCP calls, artifacts, and policy decisions.
+4. Build trace waterfall/timeline UI before expanding dashboards.
+
+**Acceptance criteria:**
+1. A governed tool call creates queryable trace/span records.
+2. UI can navigate agent to session to run to span to artifact/eval.
+3. Eval results can link to traces and datasets.
+
+**Suggested tests:**
+1. Trace ingestion/query API test.
+2. Runtime-to-tool-call trace linkage test.
+3. Eval result linked to trace test.
+
+**Risk if ignored:**
+Operators cannot debug, evaluate, or improve agent behavior at benchmark parity.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-RDE-001, F-AUD-004
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-OBS-002 [P1] [Observability] Distributed context propagation is correlation-id only
+
+**Status:** Missing
+
+**Current implementation:**
+API request context reads `X-Request-ID` and `X-Correlation-ID`; SDK `call_tool` accepts/sends `correlation_id`; runtime and tool action schemas store correlation IDs but no trace ID, span ID, or parent span.
+
+**Expected implementation:**
+The platform should propagate W3C `traceparent`/`tracestate` and persist `trace_id`, `span_id`, `parent_span_id`, baggage, and correlation IDs across SDK, API, gateway, runtime, worker, MCP, and artifacts.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/api/app.py`; `ophanix-python-sdk/src/ophanix_tool_gateway/sdk.py`; `packages/product-platform/src/product_platform/db/migrations/0018_runtime_sessions.up.sql`; `packages/product-platform/src/product_platform/db/migrations/0055_tool_runtime_actions.up.sql`
+
+**Affected symbols:**
+Request context middleware, SDK `call_tool`, runtime session/action schema, tool runtime action schema.
+
+**Evidence:**
+Request context reads request/correlation IDs around `api/app.py:670`; SDK `call_tool` sends `X-Correlation-ID` around `sdk.py:473`; runtime sessions store correlation ID around `0018_runtime_sessions.up.sql:26`; tool runtime actions in `0055_tool_runtime_actions.up.sql` do not model trace/span IDs.
+
+**Why this matters:**
+Without trace context, runtime, audit, cost, artifact, and policy data cannot be reliably joined.
+
+**Competitor benchmark:**
+OpenTelemetry GenAI spans, CrewAI OTel export, LangSmith traces.
+
+**Recommended remediation:**
+1. Accept and emit W3C trace context in SDK and API.
+2. Persist trace/span IDs across all runtime/tool/action records.
+3. Add parent-child span handling for nested tool/model calls.
+4. Preserve trace context through workers and async jobs.
+
+**Acceptance criteria:**
+1. SDK call with `traceparent` creates records sharing the same trace ID.
+2. Tool calls record parent span relationships.
+3. Worker-executed jobs preserve trace context.
+
+**Suggested tests:**
+1. SDK-to-gateway trace propagation test.
+2. Runtime action parent span test.
+3. Worker trace context continuation test.
+
+**Risk if ignored:**
+Observability and compliance evidence will remain fragmented.
+
+**Remediation complexity:** Medium
+
+**Dependencies:** F-TST-007
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-OBS-003 [P1] [Artifacts] Artifacts are not runtime, trace, or eval evidence objects
+
+**Status:** Missing
+
+**Current implementation:**
+Artifact link targets exclude runtime sessions/actions, tool runtime actions, traces, spans, and evals. Artifact storage is local upload/download with base64 API flow, and attestations store statements plus optional signature reference.
+
+**Expected implementation:**
+Artifacts should support runtime/eval linkage, object storage metadata, digest, provenance, content type, retention, redaction, and signed attestations.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/artifacts/repository.py`; `packages/product-platform/src/product_platform/db/migrations/0049_artifact_attestations.up.sql`; `packages/product-platform/src/product_platform/workflows/worker.py`
+
+**Affected symbols:**
+Artifact link target registry, artifact storage, artifact attestations, workflow output artifact linkage.
+
+**Evidence:**
+Supported artifact link targets exclude runtime/trace/eval concepts in `artifacts/repository.py:24`; storage base64/local flow starts around `repository.py:59`; attestations schema is in `0049_artifact_attestations.up.sql:1`; workflow output links only to `workflow_run` around `workflows/worker.py:193`.
+
+**Why this matters:**
+Production agent systems need artifacts as evidence objects: prompts, outputs, traces, files, screenshots, evals, and decisions.
+
+**Competitor benchmark:**
+LangSmith run artifacts/evals and JFrog provenance/evidence patterns.
+
+**Recommended remediation:**
+1. Add artifact link targets for runtime sessions/actions, tool actions, traces, spans, and evals.
+2. Store digest, size, object storage URI, retention, and redaction classification.
+3. Bind attestations to artifact digest and signer.
+4. Expose artifact evidence in trace UI and compliance export.
+
+**Acceptance criteria:**
+1. Runtime tool call can create/link an artifact.
+2. Artifact digest is verified on download/export.
+3. Compliance export includes linked runtime artifacts.
+
+**Suggested tests:**
+1. Runtime action artifact linkage test.
+2. Artifact digest verification test.
+3. Compliance export artifact inclusion test.
+
+**Risk if ignored:**
+Key operational evidence remains detached from the runtime history.
+
+**Remediation complexity:** Medium
+
+**Dependencies:** F-AUD-003, F-OBS-001
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-OBS-004 [P2] [Performance] SLO, cost, and incident data are manually ingested rather than derived from runtime telemetry
+
+**Status:** Risky
+
+**Current implementation:**
+SLO measurements and cost events are posted manually and then summarized. Tests manually post SLO/cost data and insert audit events.
+
+**Expected implementation:**
+SLO, cost, incident, and budget data should derive from runtime traces, model calls, tool calls, token usage, latency, errors, policy denials, and worker telemetry, while manual imports remain explicit overrides.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/observability/repository.py`; `packages/product-platform/tests/test_observability_overall.py`; `packages/product-platform/frontend/src/features/observability/ObservabilityPage.tsx`
+
+**Affected symbols:**
+SLO measurement ingestion, cost event ingestion, incident calculations, observability tests.
+
+**Evidence:**
+SLO measurements are posted and evaluated around `observability/repository.py:159`; cost events are posted and summed around `repository.py:322`; tests manually post data around `test_observability_overall.py:45`.
+
+**Why this matters:**
+Manual observability data will drift from actual runtime behavior and weaken operational decisions.
+
+**Competitor benchmark:**
+AWS/GCP observability and LangSmith/CrewAI trace-derived monitoring.
+
+**Recommended remediation:**
+1. Derive latency/error/cost/token metrics from trace records.
+2. Keep manual ingestion as an explicit external import source.
+3. Add anomaly detection and budget enforcement hooks.
+4. Add data freshness indicators in UI.
+
+**Acceptance criteria:**
+1. Tool/model calls automatically update SLO/cost metrics.
+2. Manual data is labeled as imported/manual.
+3. Incidents can be generated from telemetry threshold breaches.
+
+**Suggested tests:**
+1. Tool call updates latency SLO test.
+2. Model call token/cost attribution test.
+3. Incident generation from telemetry test.
+
+**Risk if ignored:**
+Dashboards can show healthy status while runtime is degraded or expensive.
+
+**Remediation complexity:** Medium
+
+**Dependencies:** F-OBS-001, F-OBS-002
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+## 5. Missing Tests
+
+1. Test name: `test_trace_ingestion_query_and_timeline`
+   Test type: API/integration
+   What it should verify: trace/span records can be ingested and queried.
+   Files likely affected: observability models/routes.
+   Related finding ID: F-OBS-001
+
+2. Test name: `test_w3c_traceparent_propagates_sdk_to_gateway`
+   Test type: SDK/API integration
+   What it should verify: SDK, API, gateway, and runtime share trace ID.
+   Files likely affected: SDK, API middleware, runtime/tool schemas.
+   Related finding ID: F-OBS-002
+
+3. Test name: `test_artifact_links_to_runtime_span_and_eval`
+   Test type: integration
+   What it should verify: artifact can link to runtime trace/eval and export correctly.
+   Files likely affected: artifact repository and observability models.
+   Related finding ID: F-OBS-003
+
+4. Test name: `test_slo_cost_derived_from_runtime_telemetry`
+   Test type: integration
+   What it should verify: telemetry updates SLO and cost metrics automatically.
+   Files likely affected: observability repository.
+   Related finding ID: F-OBS-004
+
+## 6. Recommended Remediation Order
+
+P0:
+
+None.
+
+P1:
+
+1. F-OBS-002
+2. F-OBS-001
+3. F-OBS-003
+
+P2:
+
+1. F-OBS-004
+
+P3:
+
+None.
+
+## 7. Feature-Level Target State
+
+Observability should become a native execution timeline and OTel-compatible export surface. Data models should include traces, spans, runs, sessions, steps, tool calls, model calls, policy decisions, artifacts, eval results, costs, and incidents. APIs should ingest/query spans and evals. Workers and SDKs should propagate W3C trace context. UI should show waterfall/timeline views and link artifacts/evidence. SLOs and costs should derive from telemetry. Tests should prove trace propagation, runtime linkage, artifact evidence, OTel export, and metric derivation.
+

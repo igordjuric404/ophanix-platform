@@ -1,0 +1,340 @@
+# Feature Audit: Plugin Marketplace and Plugin Security
+
+## 1. Scope
+
+This audit covers plugin catalog, versions, manifest normalization, signatures, install policy, review, lifecycle, supply-chain scanning, runtime policy linkage, UI behavior, and AgentMesh/SDK marketplace surfaces. It inspects `product_platform/marketplace`, marketplace migrations, marketplace UI, `agent-marketplace`, AgentMesh fallback marketplace, and plugin-related runtime kill switch code. Relevant benchmarks are JFrog MCP Registry/AI Catalog, OpenAI tool approval patterns, Arcade/Composio tool governance, and enterprise software supply-chain controls. Out of scope: MCP proxy runtime behavior, covered in MCP.
+
+## 2. Current Implementation Summary
+
+Product Platform has marketplace catalog migrations, including plugin versions and installs in `0023_marketplace_catalog.up.sql`, policy results in `0024_marketplace_policy_results.up.sql`, and installations in `0025_marketplace_installations.up.sql`. Models, policy, quality scoring, signing, and repository logic live under `packages/product-platform/src/product_platform/marketplace`. The frontend marketplace page lives in `frontend/src/features/marketplace/MarketplacePage.tsx`. The Python SDK repo includes `packages/agent-marketplace` with Ed25519 signing helpers and `packages/agentmesh` fallback marketplace code. Runtime kill-switch models mention plugin targets.
+
+Current workflow: plugins can be imported, reviewed, checked by policy, signed in a demo manner in Product Platform, installed, and shown in UI. Install policy is permissive by default, package provenance is not verified, and runtime enforcement is not generated from approved plugin manifests.
+
+## 3. Benchmark Comparison
+
+| Benchmark Capability | Expected Behavior | Current Implementation | Status | Evidence | Priority |
+|---|---|---|---|---|---|
+| Install policy | Environment-scoped policy and approval fail closed before install. | Default check is permissive and advisory. | Risky | `marketplace/models.py:80`; `repository.py:304` | P0 |
+| Signature verification | Package signatures use trusted key roots/provenance and fail closed. | Product signing is demo HMAC-like and can trust arbitrary non-empty signatures. | Incorrect | `marketplace/signing.py:1`; `marketplace/models.py:337` | P0 |
+| Package scanning | SBOM, license, vuln, malware, provenance, and digest gates before install. | `package_ref` is a string; no scan gate. | Missing | `marketplace/models.py:267`; `0023_marketplace_catalog.up.sql:20` | P0 |
+| Tool-level policy | Approved plugin manifests generate runtime tool allow/deny rules. | Marketplace and Tool Gateway/MCP policies are separate. | Missing | `marketplace/policy.py:29`; `tool_gateway/decision.py:333` | P1 |
+| Lifecycle kill switch | Deprecated/disabled/revoked plugins disable active installs and runtime grants. | Install does not check plugin status; plugin kill-switch branch is thin. | Partially Implemented | `marketplace/repository.py:318`; `runtime/kill_switch.py:171` | P1 |
+| UI install gate | UI matches backend policy result enum. | Backend returns `allow`; UI checks `allowed`. | Incorrect | `test_marketplace_catalog_phase3.py:64`; `MarketplacePage.tsx:538` | P2 |
+
+## 4. Findings
+
+### F-PLG-001 [P0] [Security] Product install policy is advisory and defaults open
+
+**Status:** Risky
+
+**Current implementation:**
+`PluginPolicyCheckRequest` defaults `require_signature` to false and lacks first-class environment/type/capability constraints. If no prior policy result exists, install auto-runs a permissive check and blocks only exact deny results.
+
+**Expected implementation:**
+Production plugin installation should fail closed using persisted organization/environment install policy, reviewer approval, signature/provenance status, scan results, and runtime capability policy.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/marketplace/models.py`; `packages/product-platform/src/product_platform/marketplace/repository.py`; `packages/product-platform/src/product_platform/marketplace/policy.py`
+
+**Affected symbols:**
+`PluginPolicyCheckRequest`, install repository path, marketplace policy evaluator.
+
+**Evidence:**
+`PluginPolicyCheckRequest` defaults are around `marketplace/models.py:80`; install auto-runs permissive check around `marketplace/repository.py:304` and blocks deny around `repository.py:323`.
+
+**Why this matters:**
+A governed marketplace must prevent unreviewed or unsigned plugins from entering production. Advisory checks do not provide governance.
+
+**Competitor benchmark:**
+JFrog MCP Registry and enterprise artifact governance.
+
+**Recommended remediation:**
+1. Add persisted environment-scoped install policies.
+2. Require policy result and reviewer approval before install.
+3. Fail closed when policy evidence is missing or stale.
+4. Bind installation to policy result, signature key, artifact digest, and reviewer.
+
+**Acceptance criteria:**
+1. Missing policy result blocks production install.
+2. Unsigned/unapproved plugins cannot install where policy requires signature/review.
+3. Install row stores policy and approval evidence.
+
+**Suggested tests:**
+1. Unsigned plugin install denied by default production policy.
+2. Stale policy result cannot be reused.
+3. Install stores policy result and reviewer identity.
+
+**Risk if ignored:**
+Untrusted plugins can be installed despite governance settings.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-AUTH-004, F-AUD-001
+
+**Blocks production readiness:** Yes
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-PLG-002 [P0] [Security] Product plugin signatures are demo-grade and forgeable
+
+**Status:** Incorrect
+
+**Current implementation:**
+Product signing helpers are explicitly demo helpers and use an HMAC-style approach where `public_key` is treated as secret material. Manifest normalization can classify any non-empty signature as signed when no signing keys are configured.
+
+**Expected implementation:**
+Plugin signatures should use verifiable public-key or Sigstore-style provenance with trusted key roots, revocation, timestamping, digest binding, and fail-closed behavior.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/marketplace/signing.py`; `packages/product-platform/src/product_platform/marketplace/models.py`; `packages/product-platform/src/product_platform/marketplace/repository.py`; `ophanix-python-sdk/packages/agent-marketplace/src/agent_marketplace/signing.py`
+
+**Affected symbols:**
+Product signing helpers, manifest signature normalization, signing key verification, SDK Ed25519 signing helpers.
+
+**Evidence:**
+`marketplace/signing.py:1` says demo plugin signature helpers; verification uses HMAC-like behavior around `signing.py:11`; any non-empty signature can become `signed` around `marketplace/models.py:337`; Product and agent-marketplace differ, with Ed25519 in `agent_marketplace/signing.py:22`.
+
+**Why this matters:**
+Signature verification is a supply-chain security boundary. Demo signatures can give operators false trust.
+
+**Competitor benchmark:**
+JFrog MCP Registry provenance and artifact integrity controls.
+
+**Recommended remediation:**
+1. Replace Product demo signing with Ed25519/Sigstore-compatible verification.
+2. Require digest binding to immutable package artifact.
+3. Configure trusted key roots per organization/environment.
+4. Treat unknown/demo signatures as untrusted.
+
+**Acceptance criteria:**
+1. Forged or arbitrary signatures are rejected.
+2. Trusted key revocation invalidates future installs.
+3. Product and SDK marketplace use the same signature semantics.
+
+**Suggested tests:**
+1. Forged signature rejection test.
+2. Trusted key revocation test.
+3. Cross-package signature compatibility test.
+
+**Risk if ignored:**
+Malicious plugins can appear signed and trusted.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-PLG-003
+
+**Blocks production readiness:** Yes
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-PLG-003 [P0] [Security] Plugin installation has no package provenance, SBOM, license, vulnerability, or malware gate
+
+**Status:** Missing
+
+**Current implementation:**
+`package_ref` is only a non-empty string, plugin versions store manifest/package/signature status, and install records are created without artifact digest, provenance, SBOM, vulnerability, malware, or license state.
+
+**Expected implementation:**
+Every installable plugin version should be an immutable artifact with digest, provenance attestation, SBOM, license policy result, vulnerability scan result, malware scan result, and review status.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/marketplace/models.py`; `packages/product-platform/migrations/0023_marketplace_catalog.up.sql`; `packages/product-platform/src/product_platform/marketplace/repository.py`; `packages/product-platform/src/product_platform/artifacts/repository.py`
+
+**Affected symbols:**
+`package_ref`, `plugin_versions`, marketplace installation path, artifact attestation support.
+
+**Evidence:**
+`package_ref` is validated only as a non-empty string around `marketplace/models.py:267`; `plugin_versions` schema around `0023_marketplace_catalog.up.sql:20` lacks digest/provenance/SBOM/scan fields; installation records are created around `repository.py:340`.
+
+**Why this matters:**
+JFrog-style competitors treat MCP/plugins as supply-chain artifacts. Without scanning and provenance, marketplace governance is incomplete.
+
+**Competitor benchmark:**
+JFrog AI Catalog/MCP Registry and Xray scanning.
+
+**Recommended remediation:**
+1. Promote package refs to immutable artifact records with digest.
+2. Add SBOM, license, vulnerability, malware, and provenance scan entities.
+3. Gate installation on clean required scan states.
+4. Link artifact attestations to plugin versions and installs.
+
+**Acceptance criteria:**
+1. Plugin install requires immutable digest and required scan statuses.
+2. Vulnerable/malicious/license-blocked plugins cannot install.
+3. Evidence view shows artifact, scans, signature, reviewer, and install policy.
+
+**Suggested tests:**
+1. Install rejection for missing digest/SBOM.
+2. Install rejection for blocking vulnerability/malware finding.
+3. Evidence export includes plugin artifact provenance.
+
+**Risk if ignored:**
+The marketplace can distribute unknown or malicious code under a governed brand.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-PLG-002, F-AUD-003
+
+**Blocks production readiness:** Yes
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-PLG-004 [P1] [Tool Governance] Marketplace policy is not tool-level and is not wired into runtime enforcement
+
+**Status:** Missing
+
+**Current implementation:**
+Marketplace policy checks plugin type, signature status, capabilities, organization, and review. Agent-marketplace policy checks signatures, plugin type, and MCP server names. Runtime Tool Gateway and MCP policy engines are separate.
+
+**Expected implementation:**
+Approved plugin manifests should generate environment-scoped runtime policy grants for specific tools, capabilities, scopes, permissions, and risk classes.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/marketplace/policy.py`; `ophanix-python-sdk/packages/agent-marketplace/src/agent_marketplace/marketplace_policy.py`; `packages/product-platform/src/product_platform/mcp/proxy.py`; `packages/product-platform/src/product_platform/tool_gateway/decision.py`
+
+**Affected symbols:**
+Marketplace policy evaluator, agent-marketplace policy, MCP proxy policy, Tool Gateway decision service.
+
+**Evidence:**
+Product policy checks are in `marketplace/policy.py:29`; agent-marketplace tool policy is limited around `marketplace_policy.py:203`; MCP/Tool Gateway decisions live separately in `mcp/proxy.py:236` and `tool_gateway/decision.py:333`.
+
+**Why this matters:**
+Install approval is only useful if it constrains runtime behavior. Otherwise an installed plugin can expose tools beyond reviewed intent.
+
+**Competitor benchmark:**
+JFrog tool policies and Agent Guard; Arcade/Composio tool-call governance.
+
+**Recommended remediation:**
+1. Parse plugin manifests into explicit tool/capability grants.
+2. Compile approved installs into runtime policy bundles.
+3. Enforce grants in MCP proxy and Tool Gateway.
+4. Revoke grants when install status changes.
+
+**Acceptance criteria:**
+1. Installed plugin exposes only approved tools/scopes.
+2. Runtime denies tools not present in approved manifest.
+3. Plugin uninstall/disable revokes runtime grants.
+
+**Suggested tests:**
+1. Runtime denies unapproved plugin tool.
+2. Install creates expected tool policy grants.
+3. Disable plugin revokes tool access.
+
+**Risk if ignored:**
+Marketplace approval will not control actual tool execution.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-MCP-002, F-MCP-003
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-PLG-005 [P2] [Admin UX] Marketplace UI policy result enum drifts from backend
+
+**Status:** Incorrect
+
+**Current implementation:**
+Backend policy results use `allow`/`deny`, and tests assert `allow`. The UI checks for `allowed`, which can prevent install controls from reflecting the real backend result.
+
+**Expected implementation:**
+Frontend and backend should share a generated or contract-tested enum for policy decisions.
+
+**Affected files:**
+`packages/product-platform/tests/test_marketplace_catalog_phase3.py`; `packages/product-platform/frontend/src/features/marketplace/MarketplacePage.tsx`
+
+**Affected symbols:**
+Marketplace policy response rendering and install-gate logic.
+
+**Evidence:**
+Backend tests assert `allow` in `test_marketplace_catalog_phase3.py:64`; UI checks `allowed` in `MarketplacePage.tsx:538` and `MarketplacePage.tsx:891`.
+
+**Why this matters:**
+UI drift can block legitimate installs or misrepresent policy state.
+
+**Competitor benchmark:**
+CrewAI/enterprise admin UX consistency expectations.
+
+**Recommended remediation:**
+1. Generate frontend types from backend schema or add contract test.
+2. Normalize policy enum values.
+3. Add UI tests against real backend fixtures.
+
+**Acceptance criteria:**
+1. UI uses backend `allow` result correctly.
+2. Contract test fails on enum drift.
+3. Install button state matches backend decision.
+
+**Suggested tests:**
+1. Marketplace UI integration test with real `allow`.
+2. API schema snapshot test.
+3. Type-level frontend enum test.
+
+**Risk if ignored:**
+Operators may be unable to install approved plugins or may see confusing policy states.
+
+**Remediation complexity:** Low
+
+**Dependencies:** None.
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** No
+
+## 5. Missing Tests
+
+1. Test name: `test_marketplace_install_fails_closed_without_policy`
+   Test type: API/integration
+   What it should verify: production install requires explicit policy result and approval.
+   Files likely affected: marketplace repository/policy.
+   Related finding ID: F-PLG-001
+
+2. Test name: `test_plugin_signature_verification_rejects_forgery`
+   Test type: unit/integration
+   What it should verify: arbitrary non-empty signatures are rejected.
+   Files likely affected: marketplace signing.
+   Related finding ID: F-PLG-002
+
+3. Test name: `test_plugin_install_requires_artifact_scans`
+   Test type: API/integration
+   What it should verify: install is blocked without digest/SBOM/clean scans.
+   Files likely affected: marketplace/artifacts.
+   Related finding ID: F-PLG-003
+
+4. Test name: `test_plugin_install_generates_runtime_tool_policy`
+   Test type: integration
+   What it should verify: approved plugin grants only reviewed tools.
+   Files likely affected: marketplace, MCP, Tool Gateway.
+   Related finding ID: F-PLG-004
+
+5. Test name: `test_marketplace_ui_accepts_allow_policy_result`
+   Test type: frontend integration
+   What it should verify: UI handles backend `allow` enum.
+   Files likely affected: `MarketplacePage.tsx`.
+   Related finding ID: F-PLG-005
+
+## 6. Recommended Remediation Order
+
+P0:
+
+1. F-PLG-002
+2. F-PLG-003
+3. F-PLG-001
+
+P1:
+
+1. F-PLG-004
+
+P2:
+
+1. F-PLG-005
+
+P3:
+
+None.
+
+## 7. Feature-Level Target State
+
+The marketplace should behave like a governed supply-chain registry. Plugin versions should be immutable signed artifacts with digest, provenance, SBOM, vulnerability, malware, and license scan state. Install policy should be environment-scoped and fail closed. Approved installs should generate runtime tool/capability policy grants and revoke them on disable/uninstall/revocation. UI should expose evidence, risk, policy, install status, and lifecycle controls. Tests should prove signature verification, scan gates, install policy, runtime grant enforcement, lifecycle cascade, and frontend/backend contract consistency.
+

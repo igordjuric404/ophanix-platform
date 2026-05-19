@@ -1,0 +1,282 @@
+# Feature Audit: Runtime Sessions and Durable Execution
+
+## 1. Scope
+
+This audit covers runtime sessions, runtime actions, durable execution claims, session binding, checkpoints, memory/session separation, isolation metadata, runtime observability, and SDK support. It inspects `product_platform/runtime`, runtime migrations, runtime routes in `api/app.py`, `agent-hypervisor` checkpoint code, `agent-runtime`, frontend runtime pages, and the Python SDK. Relevant benchmarks are AWS Bedrock AgentCore Runtime, LangGraph threads/runs/checkpoints, LangSmith runs, Google session/memory separation, and Temporal durable execution semantics. Out of scope: saga-specific compensation detail, covered in SAG.
+
+## 2. Current Implementation Summary
+
+Runtime records exist in `packages/product-platform/src/product_platform/db/migrations/0018_runtime_sessions.up.sql`, with `runtime_sessions` and `runtime_actions`. Models live in `packages/product-platform/src/product_platform/runtime/models.py`; repository logic in `runtime/repository.py`; sandbox validation in `runtime/sandbox.py`; saga execution in `runtime/saga_executor.py`. Runtime API routes exist around `api/app.py:8902` and saga execution routes around `api/app.py:9278`. UI calls are in `frontend/src/api/runtime.ts`, with runtime screens in `frontend/src/features/runtime/RuntimePage.tsx`.
+
+The runtime currently persists session/action status, metadata, latency, and correlation IDs. It validates some agent state before creating sessions. Durable execution is represented mainly by saga builder/executor records and demo-safe action execution, not by replayable event history or persisted step checkpoints. The Python SDK focuses on Tool Gateway calls and has no first-class session/run/checkpoint API.
+
+## 3. Benchmark Comparison
+
+| Benchmark Capability | Expected Behavior | Current Implementation | Status | Evidence | Priority |
+|---|---|---|---|---|---|
+| Runtime sessions | Sessions bind user, agent, environment, memory, runs, and actions. | Session/action records exist but are thin and not fully user-bound. | Partially Implemented | `0018_runtime_sessions.up.sql`; `runtime/models.py:20` | P1 |
+| Durable execution | Persisted history, replay, checkpoints, retries, and recovery after worker restart. | Demo-safe saga execution and status tracking. | Incorrect | `runtime/saga_executor.py:112`; `0021_saga_builder.up.sql` | P0 |
+| Checkpoints | Step-level checkpoints can be persisted and resumed. | Checkpoint manager stubs return false/none. | Missing | `agent-hypervisor/.../checkpoint.py:69` | P0 |
+| Isolation | Runtime isolation is explicit and enforced. | Isolation is mostly declarative/demo validation. | Partially Implemented | `runtime/models.py:10`; `runtime/sandbox.py:341` | P1 |
+| SDK runtime API | SDK can start sessions, create runs, stream events, and resume. | SDK exposes Tool Gateway only. | Missing | `ophanix-python-sdk/src/ophanix_tool_gateway/sdk.py:67` | P2 |
+
+## 4. Findings
+
+### F-RDE-001 [P1] [Runtime Sessions] Runtime sessions are thin control records, not complete session/thread/run models
+
+**Status:** Partially Implemented
+
+**Current implementation:**
+The platform persists runtime sessions and actions with status, metadata, latency, and correlation IDs. It does not model a first-class thread/run/step hierarchy, user-session binding, memory references, model/tool spans, or durable run history.
+
+**Expected implementation:**
+Runtime sessions should bind user, agent, environment, memory scope, run, steps, tool calls, policy decisions, artifacts, traces, and recovery state.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/db/migrations/0018_runtime_sessions.up.sql`; `packages/product-platform/src/product_platform/runtime/models.py`; `packages/product-platform/src/product_platform/runtime/repository.py`; `packages/product-platform/src/product_platform/api/app.py`
+
+**Affected symbols:**
+`runtime_sessions`, `runtime_actions`, runtime session request/response models, runtime routes.
+
+**Evidence:**
+Runtime request model starts around `runtime/models.py:20`; response/action models around `runtime/models.py:146`; schema stores correlation metadata but no run/thread/span/checkpoint hierarchy.
+
+**Why this matters:**
+LangGraph and LangSmith set expectations around threads, runs, checkpoints, traces, and evaluation. Thin records cannot support replay, trace analysis, or compliance evidence.
+
+**Competitor benchmark:**
+LangGraph Platform threads/runs/checkpoints and AWS AgentCore Runtime sessions.
+
+**Recommended remediation:**
+1. Define session, run, step, tool call, model call, checkpoint, and artifact entities.
+2. Bind sessions to user, agent, environment, and memory scope.
+3. Persist parent/child relationships and state transitions.
+4. Add API routes for run inspection and recovery.
+
+**Acceptance criteria:**
+1. Every runtime session has a user/agent/environment binding.
+2. Runs and steps can be queried with parent-child history.
+3. Tool/model/policy/artifact records link to the same run.
+
+**Suggested tests:**
+1. Runtime session creation test requiring user/agent/environment context.
+2. Run timeline query integration test.
+3. Trace linkage test across session/action/tool records.
+
+**Risk if ignored:**
+Runtime will remain a status dashboard rather than a production execution model.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-OBS-001, F-AUTH-002
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-RDE-002 [P0] [Durable Execution] Durable execution is demo-safe saga execution rather than replayable durable execution
+
+**Status:** Incorrect
+
+**Current implementation:**
+The platform has saga builder tables and routes, but execution uses a fresh in-memory orchestrator/demo-safe runner for actions. This records status but does not provide deterministic event history, activity replay, or crash recovery semantics.
+
+**Expected implementation:**
+Durable execution should either integrate with Temporal/LangGraph or define an Ophanix-native subset with persisted event history, idempotent activities, checkpoints, retries, leases, replay behavior, and recovery after process failure.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/db/migrations/0021_saga_builder.up.sql`; `packages/product-platform/src/product_platform/runtime/saga_executor.py`; `packages/product-platform/src/product_platform/runtime/sagas.py`; `packages/product-platform/src/product_platform/api/app.py`; `packages/product-platform/src/product_platform/workflows/worker.py`
+
+**Affected symbols:**
+Saga execution routes, `DemoSafeActionRunner`, saga state records, workflow worker execution.
+
+**Evidence:**
+Saga execution routes occur around `api/app.py:9278`, `api/app.py:9297`, and `api/app.py:9364`; `runtime/saga_executor.py:112` creates execution through an in-memory/demo-safe path.
+
+**Why this matters:**
+Temporal and LangGraph define durable execution very precisely. If Ophanix claims durable execution but cannot recover after crash, the product promise is misleading and dangerous.
+
+**Competitor benchmark:**
+Temporal durable workflows and LangGraph durable execution.
+
+**Recommended remediation:**
+1. Publish exact durable-execution guarantees.
+2. Add persisted event history and activity result records.
+3. Make step execution idempotent and resumable.
+4. Add worker recovery logic and crash-restart tests.
+5. Consider Temporal integration for production-grade semantics.
+
+**Acceptance criteria:**
+1. A failed process can resume a partially completed run without redoing completed side effects.
+2. Activity results are persisted and replayed.
+3. Durable guarantees are documented and tested.
+
+**Suggested tests:**
+1. Crash-after-step integration test with restart and resume.
+2. Replay test proving completed activities are not re-executed.
+3. Idempotency test across duplicate worker attempts.
+
+**Risk if ignored:**
+Users will trust workflows that can duplicate or lose side effects under normal production failures.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-SAG-001, F-WRK-001
+
+**Blocks production readiness:** Yes
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-RDE-003 [P0] [Checkpoints] Checkpoint support is stubbed and not wired to product runtime
+
+**Status:** Missing
+
+**Current implementation:**
+The hypervisor checkpoint manager has placeholder behavior and does not persist or retrieve real checkpoints. Product runtime execution is not wired to that manager.
+
+**Expected implementation:**
+Checkpoints should persist step inputs, outputs, side-effect boundaries, policy snapshot, tool calls, errors, and replay metadata so failed execution can resume from a safe point.
+
+**Affected files:**
+`packages/agent-hypervisor/src/hypervisor/saga/checkpoint.py`; `packages/product-platform/src/product_platform/runtime/saga_executor.py`; `packages/product-platform/src/product_platform/runtime/models.py`
+
+**Affected symbols:**
+`CheckpointManager`, saga checkpoint methods, runtime execution state.
+
+**Evidence:**
+`CheckpointManager.is_achieved` returns false and `get_checkpoint` returns none around `checkpoint.py:69`; the product saga executor does not use durable checkpoints.
+
+**Why this matters:**
+Without checkpoints, retries can re-run side effects or require manual repair. This blocks Temporal/LangGraph-grade recovery.
+
+**Competitor benchmark:**
+LangGraph checkpoints and Temporal event history/activity replay.
+
+**Recommended remediation:**
+1. Add checkpoint tables linked to sessions/runs/steps.
+2. Persist checkpoint payloads with hashes and schema versions.
+3. Resume from checkpoint after worker restart.
+4. Add audit evidence for checkpoint creation and use.
+
+**Acceptance criteria:**
+1. Checkpoints are persisted and retrievable by run/step.
+2. Resume uses checkpoint data instead of redoing completed side effects.
+3. Checkpoint integrity is verified before replay.
+
+**Suggested tests:**
+1. Unit tests for checkpoint create/read/integrity failure.
+2. Integration test for resume from checkpoint after simulated crash.
+3. Audit test for checkpoint restore event.
+
+**Risk if ignored:**
+Runtime recovery will be unreliable and unsafe for long-running workflows.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-RDE-002, F-SAG-002
+
+**Blocks production readiness:** Yes
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-RDE-004 [P1] [SDK] Python SDK lacks runtime session and durable tracking APIs
+
+**Status:** Missing
+
+**Current implementation:**
+The standalone Python SDK exposes Tool Gateway operations such as `call_tool` and `list_tools`; it does not expose runtime session, run, checkpoint, or event-stream APIs.
+
+**Expected implementation:**
+The SDK should provide ergonomic helpers to start sessions, attach user/agent context, invoke governed tools within a run, stream runtime events, resume failed runs, and inspect checkpoints.
+
+**Affected files:**
+`ophanix-python-sdk/src/ophanix_tool_gateway/sdk.py`; `ophanix-python-sdk/README.md`; `ophanix-python-sdk/examples`
+
+**Affected symbols:**
+Endpoint constants, `call_tool`, SDK client classes, examples.
+
+**Evidence:**
+Endpoint constants are gateway-only around `sdk.py:67`; `call_tool` starts around `sdk.py:473` and has no session/run/checkpoint contract.
+
+**Why this matters:**
+Developer-first competitors make runtime primitives easy to adopt. Ophanix currently exposes the tool layer but not the runtime control plane.
+
+**Competitor benchmark:**
+LangGraph SDK/runtime ergonomics and OpenAI Agents SDK tracing/tool ergonomics.
+
+**Recommended remediation:**
+1. Add SDK methods for sessions, runs, events, checkpoints, and artifacts.
+2. Thread correlation/trace/session identifiers through tool calls.
+3. Add examples for durable runtime workflows.
+4. Keep Tool Gateway-only mode as a narrow client profile.
+
+**Acceptance criteria:**
+1. SDK can create a runtime session and run a governed tool call inside it.
+2. SDK exposes run status and event streaming.
+3. SDK examples match product API behavior.
+
+**Suggested tests:**
+1. Mocked SDK tests for session/run/checkpoint endpoints.
+2. Live gateway/product contract test for runtime session creation.
+3. Example smoke test.
+
+**Risk if ignored:**
+The platform will be harder to integrate than LangGraph/OpenAI SDK workflows.
+
+**Remediation complexity:** Medium
+
+**Dependencies:** F-RDE-001, F-TST-006
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+## 5. Missing Tests
+
+1. Test name: `test_runtime_session_requires_user_agent_environment_binding`
+   Test type: API/integration
+   What it should verify: sessions cannot be created without explicit user, agent, and environment context.
+   Files likely affected: `runtime/repository.py`, runtime routes.
+   Related finding ID: F-RDE-001
+
+2. Test name: `test_durable_run_recovers_after_worker_restart`
+   Test type: integration/e2e
+   What it should verify: a partially completed run resumes without duplicating completed steps.
+   Files likely affected: `runtime/saga_executor.py`, worker code.
+   Related finding ID: F-RDE-002
+
+3. Test name: `test_checkpoint_resume_uses_persisted_checkpoint`
+   Test type: integration
+   What it should verify: checkpoint data is persisted and used during resume.
+   Files likely affected: checkpoint manager and runtime persistence.
+   Related finding ID: F-RDE-003
+
+4. Test name: `test_sdk_runtime_session_contract`
+   Test type: SDK contract
+   What it should verify: standalone SDK can create/query runtime sessions once APIs exist.
+   Files likely affected: `ophanix-python-sdk/src/ophanix_tool_gateway/sdk.py`.
+   Related finding ID: F-RDE-004
+
+## 6. Recommended Remediation Order
+
+P0:
+
+1. F-RDE-002
+2. F-RDE-003
+
+P1:
+
+1. F-RDE-001
+
+P2:
+
+1. F-RDE-004
+
+P3:
+
+None.
+
+## 7. Feature-Level Target State
+
+Runtime should expose a coherent durable execution model: sessions bind user, agent, environment, memory, runs, steps, tool calls, model calls, checkpoints, artifacts, and traces. Persistence should record event history and activity results. Workers should recover after process failure and avoid duplicated side effects. APIs and SDKs should make session/run operations first class. Observability should show timeline, status, replay, checkpoint, policy, and artifact evidence in one view. Tests should prove crash recovery, replay, idempotency, and trace linkage.
+

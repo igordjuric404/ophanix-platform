@@ -1,0 +1,349 @@
+# Feature Audit: Tests, Documentation, and Production Readiness
+
+## 1. Scope
+
+This audit covers CI, test coverage shape, deployment readiness docs, image/build workflows, security/supply-chain gates, SDK contract tests, production auth documentation, runtime governance tests, and whether the repo evidence supports benchmark-level production claims. It inspects both `ophanix-platform` and `ophanix-python-sdk`, including GitHub workflows, product tests, frontend scripts, deployment docs, package metadata, and SDK tests. Relevant benchmarks are Temporal production reliability, LangSmith/LangGraph deployment and eval readiness, JFrog supply-chain gates, Microsoft/AWS/Google enterprise readiness, and OpenAI/Arcade SDK ergonomics. Out of scope: individual feature implementation details, covered in the other feature reports.
+
+## 2. Current Implementation Summary
+
+Product Platform has substantial Python tests under `packages/product-platform/tests`, frontend scripts for unit/e2e/validation in `frontend/package.json`, deployment docs under `packages/product-platform/deploy/cloud`, image workflows in `.github/workflows/product-platform-images.yml`, general CI in `.github/workflows/ci.yml`, dependency/supply-chain workflows, and SBOM workflow. Product docs honestly describe controlled internal/design partner SDK pilot readiness rather than full enterprise certification. The standalone SDK has tests using `httpx.MockTransport`, package metadata in `ophanix-python-sdk/pyproject.toml`, and publish workflow in `.github/workflows/publish.yml`.
+
+Current workflow: many unit/integration tests validate product behavior, but CI coverage for product frontend, Postgres-backed product tests, images, live SDK contract, OIDC/JWKS, runtime crash recovery, plugin/MCP provenance, and deployment smoke is incomplete or uneven.
+
+## 3. Benchmark Comparison
+
+| Benchmark Capability | Expected Behavior | Current Implementation | Status | Evidence | Priority |
+|---|---|---|---|---|---|
+| Reproducible CI | CI provisions dependencies, runs backend/frontend/e2e/image smoke with coverage gates. | Product Python CI lacks explicit Postgres; frontend omitted from matrix. | Risky | `.github/workflows/ci.yml:207`; `frontend/package.json:6`; `ci.yml:503` | P1 |
+| Runtime reliability tests | Crash/restart, replay, checkpoint, DLQ, multi-worker, policy persistence. | Tests cover demo/in-process saga and worker state transitions. | Partially Implemented | `test_saga_builder_and_monitor_phase3.py:173`; `test_worker_phase2.py:73` | P1 |
+| Enterprise auth tests | OIDC/JWKS, group mapping, session lifecycle, SAML/SCIM readiness. | Docs describe security; checks validate setting presence. | Missing | `deploy/cloud/security.md:1`; `deployment/security.py:17`; `api/auth.py:54` | P1 |
+| Plugin/MCP supply-chain gates | Real signature, SBOM, scan, provenance, install policy tests. | Tests validate demo signing/review/trust scoring. | Partially Implemented | `marketplace/signing.py:1`; `test_plugin_review_signing_trust_phase4.py:57` | P1 |
+| Production deployment certification | Image provenance, container scan, smoke, backup/restore, readiness drills. | Pilot docs and image build exist; smoke not wired into CI. | Partially Implemented | `PILOT_READINESS.md:5`; `smoke-images.sh:29`; `product-platform-images.yml:27` | P1 |
+| SDK contract | Standalone SDK live gateway contract matches platform expectations. | Platform tests installed SDK contract; standalone SDK uses mocks. | Inconsistent | `test_tool_gateway_installed_sdk_contract.py:140`; `test_sdk_behavior.py:431` | P2 |
+| Supply-chain CI | Dependency review, SBOM, provenance, pinned deps for platform and SDK. | Gates are uneven/conditional; broad Python ranges. | Risky | `pyproject.toml:15`; `dependency-review.yml:23`; `publish.yml:38` | P2 |
+
+## 4. Findings
+
+### F-TST-001 [P1] [Production Readiness] CI does not yet prove the Product Platform production path
+
+**Status:** Risky
+
+**Current implementation:**
+Product Platform tests rely on Postgres helpers, but inspected CI Python job runs `pytest tests/` without an explicit Postgres service. Product frontend has validation scripts, but CI TypeScript/npm matrices omit the product frontend. Image workflow builds images and disables provenance.
+
+**Expected implementation:**
+CI should reproducibly run Product Platform backend tests with services, frontend lint/typecheck/unit/e2e, migration checks, image smoke, coverage gates, and provenance.
+
+**Affected files:**
+`ophanix-platform/.github/workflows/ci.yml`; `ophanix-platform/.github/workflows/product-platform-images.yml`; `packages/product-platform/src/product_platform/db/testing.py`; `packages/product-platform/frontend/package.json`
+
+**Affected symbols:**
+CI Python test job, npm/TS matrices, frontend scripts, image build workflow, DB test helper.
+
+**Evidence:**
+Postgres helper is in `db/testing.py:14`; CI Python job runs pytest around `.github/workflows/ci.yml:207`; frontend scripts exist in `frontend/package.json:6`; inspected CI filters/matrix omit product frontend around `ci.yml:72` and `ci.yml:503`; image build disables provenance around `product-platform-images.yml:27`.
+
+**Why this matters:**
+Production readiness requires repeatable gates. If CI does not run the same paths operators rely on, regressions can ship unnoticed.
+
+**Competitor benchmark:**
+Enterprise platform release gates from Microsoft/AWS/Google and deployment readiness expectations from LangSmith/CrewAI.
+
+**Recommended remediation:**
+1. Add explicit Postgres service and migrations to CI.
+2. Run product frontend lint/typecheck/unit/e2e in CI.
+3. Add image smoke test for API/worker/readiness.
+4. Enable image provenance and coverage thresholds.
+
+**Acceptance criteria:**
+1. CI provisions Postgres and runs product migrations/tests.
+2. Product frontend validation runs on every PR.
+3. Built images pass smoke tests before publish.
+
+**Suggested tests:**
+1. CI job for migration plus backend tests.
+2. Frontend Playwright smoke job.
+3. Docker image smoke job invoking `/health`, `/ready`, and worker loop.
+
+**Risk if ignored:**
+Mainline can pass while the product cannot boot, migrate, or run frontend/workers reliably.
+
+**Remediation complexity:** Medium
+
+**Dependencies:** None.
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-TST-002 [P1] [Reliability] Runtime governance tests prove demo/in-process behavior, not durable execution claims
+
+**Status:** Partially Implemented
+
+**Current implementation:**
+Saga tests cover successful demo-safe execution, audit emission, and compensation. Worker tests cover basic state transitions and retries. They do not prove crash recovery, replay/checkpoint recovery, DLQs, multi-worker contention, or policy enforcement across resumed runs.
+
+**Expected implementation:**
+Tests should prove the production durable-execution contract under failure: restart, replay, checkpoint, duplicate attempts, DLQ, compensation failure, and policy decision persistence.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/runtime/saga_executor.py`; `packages/product-platform/src/product_platform/runtime/saga_actions.py`; `packages/product-platform/tests/test_saga_builder_and_monitor_phase3.py`; `packages/product-platform/tests/test_worker_phase2.py`
+
+**Affected symbols:**
+Demo-safe saga executor, demo saga actions, saga tests, worker tests.
+
+**Evidence:**
+`saga_executor.py:1` is demo-safe; hardcoded demo actions start at `saga_actions.py:6`; saga tests cover execution around `test_saga_builder_and_monitor_phase3.py:173` and compensation around `:263`; worker tests cover transitions around `test_worker_phase2.py:73`.
+
+**Why this matters:**
+The benchmark explicitly calls for Temporal/LangGraph-grade clarity. Tests must prove the subset Ophanix claims.
+
+**Competitor benchmark:**
+Temporal durable workflows and LangGraph checkpoints.
+
+**Recommended remediation:**
+1. Define named durable execution guarantees.
+2. Add failure-mode integration tests for each guarantee.
+3. Add multi-worker and idempotency tests.
+4. Add policy decision persistence tests after resume.
+
+**Acceptance criteria:**
+1. Crash/restart test passes without duplicate side effects.
+2. Checkpoint resume and DLQ behavior are covered.
+3. Policy decisions remain linked after replay.
+
+**Suggested tests:**
+1. Crash-after-step restart test.
+2. Multi-worker contention test.
+3. DLQ and manual replay test.
+
+**Risk if ignored:**
+Tests can pass while production durability claims remain unproven.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-RDE-002, F-SAG-001, F-WRK-001
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-TST-003 [P1] [Security] Enterprise auth and readiness documentation are ahead of implementation tests
+
+**Status:** Missing
+
+**Current implementation:**
+Cloud security docs describe IdP, TLS, network, and CORS setup. Production checks validate setting presence, and tests assert those checks. Runtime auth remains local HMAC/dev-token based.
+
+**Expected implementation:**
+Enterprise auth docs should be backed by OIDC/JWKS/SAML/SCIM integration tests, RBAC group mapping tests, session expiration/revocation tests, and production config rejection tests.
+
+**Affected files:**
+`packages/product-platform/deploy/cloud/security.md`; `packages/product-platform/src/product_platform/deployment/security.py`; `packages/product-platform/tests/test_mvp_cloud_deployment_phase3.py`; `packages/product-platform/src/product_platform/api/auth.py`
+
+**Affected symbols:**
+Cloud security docs, deployment security checks, MVP deployment tests, auth service.
+
+**Evidence:**
+Security docs start at `deploy/cloud/security.md:1`; checks live in `deployment/security.py:17`; tests assert setting checks in `test_mvp_cloud_deployment_phase3.py:13`; runtime auth service starts around `api/auth.py:54`.
+
+**Why this matters:**
+Enterprise buyers will test IdP behavior, not only doc presence.
+
+**Competitor benchmark:**
+Microsoft/Google enterprise identity and AWS AgentCore Identity readiness.
+
+**Recommended remediation:**
+1. Add OIDC/JWKS validation tests.
+2. Add group-to-role/environment mapping tests.
+3. Add SSO session expiry/revocation tests.
+4. Tie docs to verified configuration examples.
+
+**Acceptance criteria:**
+1. CI covers valid/invalid enterprise tokens.
+2. Production config fails without real IdP settings.
+3. Docs reflect implemented auth behavior exactly.
+
+**Suggested tests:**
+1. OIDC token validation integration test.
+2. RBAC group mapping test.
+3. Production config auth-mode rejection test.
+
+**Risk if ignored:**
+Documentation can overpromise enterprise readiness.
+
+**Remediation complexity:** Medium
+
+**Dependencies:** F-AUTH-001
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-TST-004 [P1] [Security] Plugin and MCP security tests do not prove real provenance or scanning
+
+**Status:** Partially Implemented
+
+**Current implementation:**
+Marketplace tests validate revoked keys, policy gates, and trust scoring using demo signing/manifest-based quality. They do not prove real package signature chain, SBOM validation, malware/vulnerability scanning, provenance attestations, or environment install gates.
+
+**Expected implementation:**
+Release gates should test signed artifact provenance, SBOM, vulnerability/malware/license policy, MCP tool scan status, install policy, and runtime enforcement.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/marketplace/signing.py`; `packages/product-platform/src/product_platform/marketplace/quality.py`; `packages/product-platform/tests/test_plugin_review_signing_trust_phase2.py`; `packages/product-platform/tests/test_plugin_review_signing_trust_phase4.py`
+
+**Affected symbols:**
+Plugin signing tests, quality scoring, marketplace policy gates, trust score recomputation.
+
+**Evidence:**
+Product signing is demo in `marketplace/signing.py:1` and HMAC-like around `signing.py:11`; quality scoring is manifest-based around `quality.py:56`; tests cover revoked keys and trust scoring around `test_plugin_review_signing_trust_phase2.py:80` and `test_plugin_review_signing_trust_phase4.py:57`.
+
+**Why this matters:**
+Supply-chain features are security-critical. Tests should prove real artifact controls, not only manifest metadata.
+
+**Competitor benchmark:**
+JFrog MCP Registry and Xray scanning.
+
+**Recommended remediation:**
+1. Add fixtures for signed immutable plugin packages.
+2. Add SBOM/vulnerability/malware/license scan fixtures.
+3. Test install gating and runtime grant generation.
+4. Add MCP scan-state call gate tests.
+
+**Acceptance criteria:**
+1. Forged package signature test fails install.
+2. Blocking vulnerability/malware/license scan blocks install/call.
+3. Clean signed package with approval installs and grants expected tools.
+
+**Suggested tests:**
+1. Signed artifact provenance test.
+2. SBOM/vulnerability/malware gate tests.
+3. MCP unscanned tool denial test.
+
+**Risk if ignored:**
+Security features can regress while tests remain green.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-PLG-002, F-PLG-003, F-MCP-003
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-TST-005 [P2] [Developer Experience] SDK package identity and contract coverage are split
+
+**Status:** Inconsistent
+
+**Current implementation:**
+The standalone repo publishes `ophanix-python-sdk`, while Product Platform references/tests `ophanix-tool-gateway-sdk`. Platform has live gateway contract tests; standalone SDK tests use `httpx.MockTransport`.
+
+**Expected implementation:**
+The public SDK package identity should be clear, and standalone SDK CI should include live contract tests against a product gateway or shared contract fixtures.
+
+**Affected files:**
+`ophanix-python-sdk/pyproject.toml`; `packages/product-platform/README.md`; `packages/product-platform/tests/test_tool_gateway_installed_sdk_contract.py`; `ophanix-python-sdk/tests/test_sdk_behavior.py`
+
+**Affected symbols:**
+SDK package metadata, platform README SDK section, installed SDK contract tests, SDK mock tests.
+
+**Evidence:**
+Standalone package name is in `ophanix-python-sdk/pyproject.toml:6`; Product Platform references SDK around `packages/product-platform/README.md:155`; installed SDK contract test runs around `test_tool_gateway_installed_sdk_contract.py:140`; standalone SDK behavior tests use `httpx.MockTransport` around `test_sdk_behavior.py:431`.
+
+**Why this matters:**
+Developers need one clear installation and compatibility story.
+
+**Competitor benchmark:**
+OpenAI Agents SDK and Arcade SDK ergonomics.
+
+**Recommended remediation:**
+1. Decide canonical package name/scope.
+2. Align Product Platform docs and SDK metadata.
+3. Add shared live contract tests to standalone SDK CI.
+4. Add README snippet smoke tests.
+
+**Acceptance criteria:**
+1. Public docs mention one canonical package identity or clearly separate profiles.
+2. Standalone SDK CI runs live/contract tests.
+3. README examples are executable.
+
+**Suggested tests:**
+1. SDK package metadata/docs consistency test.
+2. Standalone live gateway contract test.
+3. README example smoke test.
+
+**Risk if ignored:**
+External developers may install the wrong package or miss platform compatibility guarantees.
+
+**Remediation complexity:** Medium
+
+**Dependencies:** F-UXD-004
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+## 5. Missing Tests
+
+1. Test name: `ci_product_platform_backend_with_postgres`
+   Test type: CI/integration
+   What it should verify: migrations and backend tests run with explicit Postgres service.
+   Files likely affected: `.github/workflows/ci.yml`.
+   Related finding ID: F-TST-001
+
+2. Test name: `ci_product_frontend_validate_and_playwright`
+   Test type: CI/frontend e2e
+   What it should verify: product frontend lint/typecheck/unit/e2e run in CI.
+   Files likely affected: CI and frontend package scripts.
+   Related finding ID: F-TST-001
+
+3. Test name: `test_runtime_crash_replay_and_dlq`
+   Test type: integration/e2e
+   What it should verify: runtime recovers from crash, replays safely, and DLQs exhausted work.
+   Files likely affected: runtime, saga, worker.
+   Related finding ID: F-TST-002
+
+4. Test name: `test_enterprise_oidc_rbac_session_lifecycle`
+   Test type: security integration
+   What it should verify: OIDC/JWKS, role mapping, session expiry/revocation.
+   Files likely affected: auth and deployment security code.
+   Related finding ID: F-TST-003
+
+5. Test name: `test_plugin_mcp_supply_chain_release_gate`
+   Test type: integration/release gate
+   What it should verify: signatures, SBOM, scans, and install policy block unsafe packages/tools.
+   Files likely affected: marketplace, MCP, CI.
+   Related finding ID: F-TST-004
+
+6. Test name: `test_standalone_sdk_live_gateway_contract`
+   Test type: SDK contract
+   What it should verify: standalone SDK behavior matches platform gateway.
+   Files likely affected: `ophanix-python-sdk` tests and CI.
+   Related finding ID: F-TST-005
+
+## 6. Recommended Remediation Order
+
+P0:
+
+None.
+
+P1:
+
+1. F-TST-001
+2. F-TST-003
+3. F-TST-002
+4. F-TST-004
+
+P2:
+
+1. F-TST-005
+
+P3:
+
+None.
+
+## 7. Feature-Level Target State
+
+Production readiness should be evidence-driven. Every major product promise should map to unit, integration, e2e, CI, release gate, and operational drill coverage. CI should run backend with Postgres/migrations, frontend validation/e2e, live SDK contracts, image smoke, dependency review, SBOM, provenance, and security scans. Runtime tests should prove crash recovery, replay, idempotency, DLQ, and policy persistence. Auth tests should prove enterprise IdP behavior. Plugin/MCP tests should prove real provenance and scan gates. Docs should state only verified guarantees and link to tests or readiness checks.
+

@@ -1,0 +1,282 @@
+# Feature Audit: Workers and Background Jobs
+
+## 1. Scope
+
+This audit covers persistent background jobs, workflow workers, retries, leasing, scheduling, idempotency, readiness probes, operational visibility, and worker deployment wiring. It inspects `product_platform/worker`, `product_platform/workflows/worker.py`, `api/app.py`, `cli.py`, `docker-compose.demo.yml`, job migrations, and frontend workflow views. Relevant benchmarks are Temporal task queues/workers, AWS AgentCore async runtime patterns, and CrewAI deployment/monitoring workflows. Out of scope: saga-specific compensation semantics, covered in SAG.
+
+## 2. Current Implementation Summary
+
+The platform has job tables in the base schema, API models in `worker/api_models.py`, a job store in `worker/store.py`, scheduling logic in `worker/scheduler.py`, workflow execution in `workflows/worker.py`, and API routes around `api/app.py:9530`. Workflow run creation can enqueue jobs around `api/app.py:1824`. The CLI exposes a worker command in `cli.py`, but the shipped loop runs a no-op worker path. `docker-compose.demo.yml` repeats the demo/no-op worker wiring. The frontend has workflow pages but not a full job operations console.
+
+Current workflow: jobs can be created and listed, schedules can produce jobs, some workflow worker code can claim and process workflow jobs, and tests cover basic state transitions. Production queue routing, worker heartbeats, DLQs, idempotency, and operational dashboards are incomplete.
+
+## 3. Benchmark Comparison
+
+| Benchmark Capability | Expected Behavior | Current Implementation | Status | Evidence | Priority |
+|---|---|---|---|---|---|
+| Worker consumption | Persistent jobs are consumed by deployed worker processes. | Shipped CLI/demo worker loop runs no-op jobs. | Incorrect | `cli.py:118`; `docker-compose.demo.yml:89`; `workflows/worker.py:58` | P0 |
+| Retries and DLQ | Failed jobs retry with backoff and terminal state/dead letter visibility. | Retry methods exist but are not consistently used. | Partially Implemented | `worker/store.py:237`; `workflows/worker.py:171` | P1 |
+| Idempotency | Background jobs dedupe by logical operation. | Generic jobs lack idempotency/uniqueness. | Missing | `worker/api_models.py:17`; `0001_base_schema.up.sql:142` | P1 |
+| Queue routing/leasing | Jobs have queue, priority, lease, heartbeat, worker identity, and scheduled guards. | Claim filters are basic. | Partially Implemented | `worker/store.py:138` | P1 |
+| Ops visibility | Operators can inspect queues, workers, stuck jobs, retries, and lag. | Readiness probe is superficial and UI is workflow-oriented. | Partially Implemented | `api/dependencies.py:386`; `api/app.py:9530` | P2 |
+
+## 4. Findings
+
+### F-WRK-001 [P0] [Scalability] Persistent jobs are created but the shipped worker loop does not consume the production queue
+
+**Status:** Incorrect
+
+**Current implementation:**
+Workflow API paths can enqueue persistent jobs and a database-backed workflow worker exists, but the CLI/demo deployment path runs a no-op worker job loop instead of the real production job consumer.
+
+**Expected implementation:**
+The shipped worker process should claim persistent jobs, execute registered handlers, heartbeat leases, retry failures, and report readiness based on queue connectivity.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/api/app.py`; `packages/product-platform/src/product_platform/workflows/worker.py`; `packages/product-platform/src/product_platform/cli.py`; `packages/product-platform/docker-compose.demo.yml`
+
+**Affected symbols:**
+Queued workflow run creation, workflow worker loop, CLI worker command, demo compose worker service.
+
+**Evidence:**
+Workflow job enqueueing occurs around `api/app.py:1824`; real DB worker exists at `workflows/worker.py:58`; the shipped loop runs `_run_noop_worker_job()` in `cli.py:118`; `docker-compose.demo.yml:89` mirrors the no-op path.
+
+**Why this matters:**
+A background job table without a real deployed consumer creates false confidence. Queued workflows may never execute in the expected deployment shape.
+
+**Competitor benchmark:**
+Temporal task queues and AWS AgentCore async runtime.
+
+**Recommended remediation:**
+1. Wire CLI and deployment manifests to the real worker implementation.
+2. Register job handlers explicitly by job type.
+3. Add readiness checks for DB and job-claim capability.
+4. Keep demo/no-op mode behind an explicit dev flag.
+
+**Acceptance criteria:**
+1. A job created through API is consumed by the shipped worker process.
+2. Docker/demo worker executes the same code path as production worker.
+3. Worker readiness fails when the job store cannot be reached.
+
+**Suggested tests:**
+1. CLI worker smoke test with a queued job.
+2. Docker compose smoke test proving job consumption.
+3. Readiness test for worker DB failure.
+
+**Risk if ignored:**
+Production deployments can accumulate queued jobs that never run.
+
+**Remediation complexity:** Medium
+
+**Dependencies:** F-TST-001
+
+**Blocks production readiness:** Yes
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-WRK-002 [P1] [Reliability] Retry and terminal failure behavior is modeled but not operationalized consistently
+
+**Status:** Partially Implemented
+
+**Current implementation:**
+Retry fields and store methods exist, but workflow jobs are often created with a single attempt and worker failure paths can mark terminal failure without robust backoff/DLQ behavior.
+
+**Expected implementation:**
+All job types should share retry policy, backoff, max attempts, dead-letter handling, failure reason, alerting, and manual replay semantics.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/worker/api_models.py`; `packages/product-platform/src/product_platform/worker/store.py`; `packages/product-platform/src/product_platform/workflows/worker.py`; `packages/product-platform/src/product_platform/api/app.py`
+
+**Affected symbols:**
+`max_attempts`, `requeue_for_retry`, workflow job creation, terminal failure handling.
+
+**Evidence:**
+`max_attempts` exists in `worker/api_models.py:22`; `requeue_for_retry` exists in `worker/store.py:237`; workflow jobs are created with `max_attempts=1` around `api/app.py:1837`; terminal failure path is in `workflows/worker.py:171`.
+
+**Why this matters:**
+Background jobs are how durable workflows survive transient failures. One-shot jobs weaken reliability and hide recoverable failures.
+
+**Competitor benchmark:**
+Temporal retries, task queues, and operational visibility.
+
+**Recommended remediation:**
+1. Define default retry policies per job type.
+2. Add exponential backoff and jitter.
+3. Add DLQ/manual replay states.
+4. Emit metrics and alerts for retry exhaustion.
+
+**Acceptance criteria:**
+1. Transient failures retry according to configured policy.
+2. Exhausted jobs enter a queryable DLQ state.
+3. Operators can replay or cancel failed jobs.
+
+**Suggested tests:**
+1. Retry backoff integration test.
+2. DLQ transition test after max attempts.
+3. Manual replay test.
+
+**Risk if ignored:**
+Recoverable outages become permanent workflow failures.
+
+**Remediation complexity:** Medium
+
+**Dependencies:** F-WRK-001
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-WRK-003 [P1] [Idempotency] Background jobs lack generic idempotency and dedupe guarantees
+
+**Status:** Missing
+
+**Current implementation:**
+Generic job requests do not require idempotency keys and base job tables do not enforce logical uniqueness. Some scheduler dedupe is app-side, and Tool Gateway has separate idempotency support.
+
+**Expected implementation:**
+Job creation should support idempotency keys, operation identity, uniqueness constraints, and duplicate-safe enqueue semantics.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/worker/api_models.py`; `packages/product-platform/src/product_platform/db/migrations/0001_base_schema.up.sql`; `packages/product-platform/src/product_platform/worker/scheduler.py`; `packages/product-platform/src/product_platform/db/migrations/0059_tool_gateway_idempotency.up.sql`
+
+**Affected symbols:**
+Job request model, background jobs table, scheduler dedupe logic, Tool Gateway idempotency table.
+
+**Evidence:**
+Request model lacks an idempotency field in `worker/api_models.py:17`; base job table around `0001_base_schema.up.sql:142` lacks logical uniqueness; schedule dedupe is app-side in `worker/scheduler.py:204`.
+
+**Why this matters:**
+Duplicate job submissions can cause duplicate workflow actions, repeated provider calls, and noisy audit events.
+
+**Competitor benchmark:**
+Temporal activity idempotency and task queue reliability.
+
+**Recommended remediation:**
+1. Add job idempotency key and operation type fields.
+2. Add uniqueness constraints scoped by org/env/job type/key.
+3. Return existing job on duplicate enqueue.
+4. Reuse the pattern with Tool Gateway idempotency.
+
+**Acceptance criteria:**
+1. Duplicate enqueue with same key returns one job.
+2. Duplicate worker claim cannot create duplicate side effects.
+3. Idempotency behavior is documented per job type.
+
+**Suggested tests:**
+1. Duplicate enqueue API test.
+2. Scheduler race test.
+3. Worker duplicate claim idempotency test.
+
+**Risk if ignored:**
+Retries and client resubmits can create duplicate work.
+
+**Remediation complexity:** Medium
+
+**Dependencies:** F-SAG-003
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-WRK-004 [P1] [Scalability] Queue routing and leases are too thin for multi-worker production operation
+
+**Status:** Partially Implemented
+
+**Current implementation:**
+Job claiming filters mainly by status and job type. There is no first-class queue name, priority, worker identity, lease timeout enforcement, heartbeat, scheduled-at guard, or concurrency limit model.
+
+**Expected implementation:**
+Workers should claim jobs by queue, priority, schedule, lease, worker identity, and concurrency policy. Stale leases should be recoverable and observable.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/worker/store.py`; `packages/product-platform/src/product_platform/worker/api_models.py`; `packages/product-platform/src/product_platform/api/dependencies.py`
+
+**Affected symbols:**
+Job claim logic, worker readiness probe, job status fields.
+
+**Evidence:**
+Claim logic is centered around status/job_type in `worker/store.py:138`; readiness worker probe returns healthy in `api/dependencies.py:386`.
+
+**Why this matters:**
+Multi-worker deployments need predictable routing and stale-job recovery. Thin leases create contention and stuck-job risks.
+
+**Competitor benchmark:**
+Temporal task queues, rate limits, concurrency limits, and worker heartbeats.
+
+**Recommended remediation:**
+1. Add queue, priority, scheduled_at, lease_until, claimed_by, heartbeat_at, and concurrency fields.
+2. Add stale lease recovery.
+3. Add per-queue metrics and readiness checks.
+4. Add operator APIs for pause/resume/reassign.
+
+**Acceptance criteria:**
+1. Multiple workers can safely claim jobs without duplication.
+2. Stale leases are recovered after timeout.
+3. Queue lag and worker heartbeat are visible.
+
+**Suggested tests:**
+1. Concurrent worker claim race test.
+2. Stale lease recovery test.
+3. Queue priority ordering test.
+
+**Risk if ignored:**
+Scaling workers can introduce duplicate processing or stuck jobs.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-WRK-001
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+## 5. Missing Tests
+
+1. Test name: `test_cli_worker_consumes_persistent_job`
+   Test type: integration/smoke
+   What it should verify: shipped worker consumes queued job.
+   Files likely affected: `cli.py`, `workflows/worker.py`.
+   Related finding ID: F-WRK-001
+
+2. Test name: `test_job_retries_then_enters_dlq`
+   Test type: integration
+   What it should verify: retry policy and terminal DLQ behavior.
+   Files likely affected: `worker/store.py`, worker handlers.
+   Related finding ID: F-WRK-002
+
+3. Test name: `test_duplicate_job_idempotency_key_returns_existing_job`
+   Test type: API/integration
+   What it should verify: duplicate enqueue does not duplicate work.
+   Files likely affected: job models and store.
+   Related finding ID: F-WRK-003
+
+4. Test name: `test_stale_worker_lease_is_recovered`
+   Test type: integration
+   What it should verify: stale leases can be reclaimed safely.
+   Files likely affected: `worker/store.py`.
+   Related finding ID: F-WRK-004
+
+## 6. Recommended Remediation Order
+
+P0:
+
+1. F-WRK-001
+
+P1:
+
+1. F-WRK-004
+2. F-WRK-002
+3. F-WRK-003
+
+P2:
+
+None.
+
+P3:
+
+None.
+
+## 7. Feature-Level Target State
+
+Workers should operate as a production queue system: durable jobs, typed handlers, queues, priorities, leases, heartbeats, retries, DLQs, idempotency, and operational visibility. The CLI and deployment manifests should run the real worker. APIs should expose queue status, stuck jobs, replay, cancel, and worker health. Runtime and saga execution should dispatch side effects through this worker layer or a proven durable backend. Tests should cover multi-worker races, restart recovery, retry exhaustion, and deployment smoke.
+

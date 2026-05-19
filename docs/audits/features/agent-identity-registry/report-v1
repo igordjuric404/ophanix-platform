@@ -1,0 +1,284 @@
+# Feature Audit: Agent Identity and Registry
+
+## 1. Scope
+
+This audit covers the agent registry, identity records, lifecycle states, credentials, agent onboarding UI, discovery-to-registration flow, and Python SDK support. It inspects `ophanix-platform/packages/product-platform/src/product_platform/agents`, agent-related migrations, routes in `product_platform/api/app.py`, frontend agent pages, and the standalone `ophanix-python-sdk`. Relevant benchmarks are Microsoft Agent 365 agent registry/quarantine, AWS AgentCore Identity, Google Agent Registry, and enterprise admin visibility patterns. Out of scope: full API key authentication details, which are covered in AUTH.
+
+## 2. Current Implementation Summary
+
+The platform has substantial registry scaffolding. `packages/product-platform/src/product_platform/db/migrations/0002_agent_registry.up.sql` defines `agents`, `agent_identities`, `agent_capabilities`, `agent_protocols`, `agent_lifecycle_events`, and `agent_heartbeats`. `0003_agent_credentials.up.sql` adds agent credential tables. Domain models live in `packages/product-platform/src/product_platform/agents/models.py`; persistence and lifecycle services live in `agents/repository.py`, `agents/identity.py`, `agents/lifecycle.py`, and `agents/credentials.py`.
+
+The API exposes agent registry and credential routes in `packages/product-platform/src/product_platform/api/app.py` around the agent registry section near line 9667 and credential routes near line 9862. The Tool Gateway rejects inactive agents in `packages/product-platform/src/product_platform/tool_gateway/auth.py:147`, and runtime sessions require active agents in `packages/product-platform/src/product_platform/runtime/repository.py:62`. Discovery can create draft registrations around `api/app.py:8401`. The frontend agent UI lives in `packages/product-platform/frontend/src/features/agents/AgentsPage.tsx`, with client calls in `frontend/src/api/agents.ts`. The Python SDK is Tool Gateway focused and the README tells users to register/select active agents externally at `ophanix-python-sdk/README.md:279`.
+
+Current workflow: operators can create drafts, register agents with identity/capability information, view lifecycle data, issue credentials, and see some agent status. The flow is not yet a complete enterprise identity lifecycle with quarantine, revocation, workload identity binding, or end-to-end onboarding from SDK to platform.
+
+## 3. Benchmark Comparison
+
+| Benchmark Capability | Expected Behavior | Current Implementation | Status | Evidence | Priority |
+|---|---|---|---|---|---|
+| Agent registry | Agents have unique identities, owners, lifecycle, capabilities, and admin visibility. | Registry tables, models, routes, and UI exist. | Partially Implemented | `0002_agent_registry.up.sql`; `agents/repository.py`; `AgentsPage.tsx` | P1 |
+| Quarantine and revocation | Unsanctioned or compromised agents can be quarantined/revoked and blocked everywhere. | Lifecycle lacks quarantine/revocation and suspension does not cascade to credentials. | Missing | `agents/lifecycle.py:13`; `agents/repository.py:272`; `api/app.py:10531` | P0 |
+| Workload identity | Agent identity binds to issuer, key material, proof, environment, and trust roots. | Identity table is DID/fingerprint/bootstrap oriented. | Partially Implemented | `agent_identities` in `0002_agent_registry.up.sql`; `agents/identity.py` | P1 |
+| Admin onboarding | Admin can discover, register, approve, activate, revoke, and inspect agents. | UI has draft forms and placeholder tabs/actions. | Partially Implemented | `AgentsPage.tsx:48`, `AgentsPage.tsx:399`, `AgentsPage.tsx:636` | P1 |
+| SDK onboarding | SDK supports first-class agent registration and credential lifecycle. | SDK delegates agent registration outside the package. | Missing | `ophanix-python-sdk/README.md:279` | P2 |
+
+## 4. Findings
+
+### F-AIR-001 [P1] [Admin UX] UI onboarding cannot complete the advertised registration workflow
+
+**Status:** Partially Implemented
+
+**Current implementation:**
+`AgentsPage.tsx` presents a multi-step onboarding experience, but the submit path calls `createAgentRegistrationDraft` instead of the full registration workflow. Backend registration expects identity and requested capabilities that the UI does not fully collect.
+
+**Expected implementation:**
+The UI should drive a complete workflow: discover/import agent, collect identity proof, capabilities, protocols, owner, environment, policy bindings, requested credentials, review, and activation.
+
+**Affected files:**
+`packages/product-platform/frontend/src/features/agents/AgentsPage.tsx`; `packages/product-platform/src/product_platform/api/app.py`; `packages/product-platform/src/product_platform/agents/models.py`
+
+**Affected symbols:**
+`AgentsPage`, `createAgentRegistrationDraft`, agent registration routes, agent registration request models.
+
+**Evidence:**
+Wizard steps are defined in `AgentsPage.tsx:48`; submit calls `createAgentRegistrationDraft` at `AgentsPage.tsx:92`; backend submission requires identity plus requested capabilities around `api/app.py:10340`.
+
+**Why this matters:**
+The registry is a core product promise. A half-onboarding flow creates ungoverned drafts and forces operators into manual API work before policy, credential, or runtime enforcement can begin.
+
+**Competitor benchmark:**
+Microsoft Agent 365 and Google Agent Registry emphasize complete admin inventory and registration workflows.
+
+**Recommended remediation:**
+1. Align frontend registration forms with backend request models.
+2. Add a review/approval step before activation.
+3. Surface validation errors for missing identity, capability, and policy fields.
+4. Add an activation step that creates audit evidence.
+
+**Acceptance criteria:**
+1. A user can register a new agent from UI draft to active state without manual API calls.
+2. Required identity and capability fields are validated client-side and server-side.
+3. Activation emits lifecycle and audit events.
+
+**Suggested tests:**
+1. UI integration test for draft to submitted to activated agent.
+2. API test rejecting incomplete identity/capability submissions.
+3. Audit test verifying lifecycle evidence on activation.
+
+**Risk if ignored:**
+Agent inventory remains incomplete and operators may bypass governance controls to get agents running.
+
+**Remediation complexity:** Medium
+
+**Dependencies:** F-AUTH-001, F-AUTH-004
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-AIR-002 [P0] [Agent Lifecycle] Agent lifecycle lacks quarantine and revocation states with enforcement consequences
+
+**Status:** Missing
+
+**Current implementation:**
+Lifecycle states are narrower than enterprise control-plane needs and do not include restricted, quarantined, revoked, or archived states. Downstream checks mostly reason about active/inactive status.
+
+**Expected implementation:**
+Agents should support a lifecycle state machine with draft, pending review, active, restricted, quarantined, suspended, revoked, decommissioned, and archived states. Quarantine/revocation must block discovery, credential verification, mesh communication, runtime sessions, MCP/tool execution, and plugin installs.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/agents/lifecycle.py`; `packages/product-platform/src/product_platform/agents/repository.py`; `packages/product-platform/src/product_platform/tool_gateway/auth.py`; `packages/product-platform/src/product_platform/runtime/repository.py`; `packages/product-platform/src/product_platform/mesh/repository.py`
+
+**Affected symbols:**
+Agent lifecycle state constants, `transition_status`, Tool Gateway principal resolution, runtime session creation, mesh agent lookup.
+
+**Evidence:**
+Valid lifecycle states in `agents/lifecycle.py:13` do not include quarantine/revocation variants. Tool Gateway rejects inactive agents at `tool_gateway/auth.py:147`, but there is no richer enterprise status model.
+
+**Why this matters:**
+Microsoft Agent 365-style quarantine is an enforcement feature, not only a label. Without it, a compromised or unsanctioned agent may continue to use credentials or participate in runtime flows.
+
+**Competitor benchmark:**
+Microsoft Agent 365 agent registry, quarantine, access controls, and admin/security visibility.
+
+**Recommended remediation:**
+1. Define canonical lifecycle states and allowed transitions.
+2. Add enforcement mapping for every runtime boundary.
+3. Record reason, actor, evidence, and effective time for quarantine/revocation.
+4. Update UI and API filters to expose lifecycle risk status.
+
+**Acceptance criteria:**
+1. Quarantined/revoked agents cannot authenticate, call tools, open runtime sessions, or send mesh handoffs.
+2. Lifecycle transition attempts are validated by a single state machine.
+3. All quarantine/revocation actions emit audit events and appear in admin UI.
+
+**Suggested tests:**
+1. API tests for allowed and forbidden lifecycle transitions.
+2. Tool Gateway test proving quarantined agents are rejected.
+3. Runtime and mesh tests proving revoked agents are blocked.
+
+**Risk if ignored:**
+Agent identity becomes inventory-only and cannot support incident response.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-AUTH-003, F-AMT-002
+
+**Blocks production readiness:** Yes
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-AIR-003 [P0] [Credential Lifecycle] Suspending or decommissioning an agent does not revoke credentials or identities
+
+**Status:** Incorrect
+
+**Current implementation:**
+Agent lifecycle transitions update agent status and lifecycle events, but they do not cascade to agent credentials or identity state. Credential verification checks credential state but not the latest agent lifecycle state.
+
+**Expected implementation:**
+Suspension, quarantine, revocation, and decommissioning should immediately invalidate active credentials, mark identities unusable, stop pending runtime work where appropriate, and emit audit evidence.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/agents/repository.py`; `packages/product-platform/src/product_platform/agents/credentials.py`; `packages/product-platform/src/product_platform/api/app.py`; `packages/product-platform/src/product_platform/tool_gateway/auth.py`
+
+**Affected symbols:**
+`transition_status`, `suspend_agent` route, `AgentCredentialRepository.verify_token`, credential status fields.
+
+**Evidence:**
+`transition_status` updates status/event in `agents/repository.py:272`; the suspend route around `api/app.py:10531` does not revoke credentials; `AgentCredentialRepository.verify_token` verifies credential status in `agents/credentials.py:585`.
+
+**Why this matters:**
+Revocation is only useful if all credentials stop working. Otherwise an agent can remain operational after the registry says it is suspended.
+
+**Competitor benchmark:**
+Microsoft Agent 365 revocation/quarantine and AWS AgentCore Identity credential lifecycle.
+
+**Recommended remediation:**
+1. Introduce credential cascade policies per lifecycle transition.
+2. Recheck agent lifecycle during credential verification.
+3. Add background revocation jobs for long-running sessions and leases.
+4. Add audit events linking lifecycle transition to credential revocation.
+
+**Acceptance criteria:**
+1. Suspended, quarantined, revoked, and decommissioned agents cannot authenticate with previously valid credentials.
+2. Credential status changes are persisted and auditable.
+3. Runtime sessions and Tool Gateway calls fail closed after agent status changes.
+
+**Suggested tests:**
+1. End-to-end test: create credential, suspend agent, verify token rejected.
+2. Audit test for lifecycle-to-credential revocation chain.
+3. Runtime session rejection test after decommission.
+
+**Risk if ignored:**
+Incident response and access control reports will be misleading.
+
+**Remediation complexity:** Medium
+
+**Dependencies:** F-AIR-002, F-AUTH-003
+
+**Blocks production readiness:** Yes
+
+**Affects stated Ophanix product promise:** Yes
+
+### F-AIR-004 [P1] [Agent Identity] Identity records are too thin for enterprise workload identity
+
+**Status:** Partially Implemented
+
+**Current implementation:**
+Agent identity records store identity attributes such as DID/fingerprint/key type/status/bootstrap information, but they do not model issuer, audience, IdP binding, SPIFFE/SPIRE, KMS key reference, certificate chain, proof metadata, or trusted root version.
+
+**Expected implementation:**
+Agent identity should be a verifiable workload identity bound to organization, environment, trust root, issuer, key material, proof type, rotation, revocation, and policy context.
+
+**Affected files:**
+`packages/product-platform/src/product_platform/db/migrations/0002_agent_registry.up.sql`; `packages/product-platform/src/product_platform/agents/identity.py`; `packages/product-platform/src/product_platform/agents/models.py`
+
+**Affected symbols:**
+`agent_identities`, identity verification models, identity repository/service functions.
+
+**Evidence:**
+The `agent_identities` schema focuses on DID/fingerprint/key type/status/bootstrap fields and lacks enterprise identity-provider or certificate-chain binding fields.
+
+**Why this matters:**
+Enterprise buyers will expect workload identity comparable to cloud IAM or AgentCore Identity, not only a stored fingerprint.
+
+**Competitor benchmark:**
+AWS AgentCore Identity and Google IAM-integrated Agent Registry.
+
+**Recommended remediation:**
+1. Define supported identity proof types and trusted roots.
+2. Add issuer/audience/environment/key-reference fields.
+3. Add verification evidence and rotation history.
+4. Expose identity trust status in admin UI.
+
+**Acceptance criteria:**
+1. Agent identities can be verified against configured trust roots.
+2. Identity status changes affect authentication and runtime authorization.
+3. Rotation and revocation are recorded with audit evidence.
+
+**Suggested tests:**
+1. Identity proof validation tests for accepted and rejected issuers.
+2. Rotation test preserving historical evidence.
+3. Runtime auth test enforcing identity status.
+
+**Risk if ignored:**
+Ophanix will look like a metadata registry instead of an identity control plane.
+
+**Remediation complexity:** High
+
+**Dependencies:** F-AUTH-001, F-AMT-001
+
+**Blocks production readiness:** No
+
+**Affects stated Ophanix product promise:** Yes
+
+## 5. Missing Tests
+
+1. Test name: `test_agent_lifecycle_quarantine_blocks_gateway`
+   Test type: API/integration
+   What it should verify: quarantined agents cannot authenticate or invoke tools.
+   Files likely affected: `agents/lifecycle.py`, `tool_gateway/auth.py`, agent routes.
+   Related finding ID: F-AIR-002
+
+2. Test name: `test_agent_status_transition_revokes_credentials`
+   Test type: API/integration
+   What it should verify: suspension or revocation invalidates existing credentials.
+   Files likely affected: `agents/repository.py`, `agents/credentials.py`.
+   Related finding ID: F-AIR-003
+
+3. Test name: `test_agent_registration_ui_collects_required_identity`
+   Test type: frontend/API integration
+   What it should verify: UI can submit a complete registration request.
+   Files likely affected: `AgentsPage.tsx`, `frontend/src/api/agents.ts`.
+   Related finding ID: F-AIR-001
+
+4. Test name: `test_agent_identity_trust_root_validation`
+   Test type: unit/integration
+   What it should verify: identity proof issuer/key/audience must match trusted configuration.
+   Files likely affected: `agents/identity.py`.
+   Related finding ID: F-AIR-004
+
+## 6. Recommended Remediation Order
+
+P0:
+
+1. F-AIR-002
+2. F-AIR-003
+
+P1:
+
+1. F-AIR-004
+2. F-AIR-001
+
+P2:
+
+None.
+
+P3:
+
+None.
+
+## 7. Feature-Level Target State
+
+Agent identity should become an enforceable registry, not just metadata. The data model should add enterprise lifecycle states, trust-root-backed workload identity, revocation evidence, credential cascade metadata, and policy bindings. APIs should provide explicit registration, review, activation, quarantine, revocation, rotation, and decommission routes. Services should centralize lifecycle transitions and reuse them across Tool Gateway, runtime sessions, mesh, and plugin governance. UI should support complete onboarding and incident-response workflows. Audit and observability should connect agent identity events to tool calls, sessions, credentials, and trust decisions. Tests should prove that identity state changes have immediate enforcement consequences.
+

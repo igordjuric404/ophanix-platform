@@ -1,0 +1,534 @@
+# Feature Audit: Admin UX And Developer Experience
+
+## Remediation Summary
+
+1. Date of remediation: May 19, 2026
+2. Total findings in this report: 4
+3. Number fixed: 3
+4. Number partially fixed: 1
+5. Number blocked: 0
+6. Number already fixed: 0
+7. Files changed:
+   - `packages/product-platform/README.md`
+   - `packages/product-platform/frontend/src/api/admin.ts`
+   - `packages/product-platform/frontend/src/api/types.ts`
+   - `packages/product-platform/frontend/src/app/router.tsx`
+   - `packages/product-platform/frontend/src/components/layout/AppShell.tsx`
+   - `packages/product-platform/frontend/src/features/agents/AgentsPage.tsx`
+   - `packages/product-platform/frontend/src/features/agents/AgentsPage.test.tsx`
+   - `packages/product-platform/frontend/src/features/settings/SettingsPage.tsx`
+   - `packages/product-platform/frontend/src/features/settings/SettingsPage.test.tsx`
+   - `packages/product-platform/frontend/src/lib/rbac.ts`
+   - `packages/product-platform/frontend/src/lib/rbac.test.ts`
+   - `packages/product-platform/src/product_platform/api/app.py`
+   - `packages/product-platform/tests/test_auth_overall.py`
+   - `../ophanix-python-sdk/API_REFERENCE.md`
+   - `../ophanix-python-sdk/README.md`
+   - `../ophanix-python-sdk/examples/async_worker_example.py`
+   - `../ophanix-python-sdk/pyproject.toml`
+   - `../ophanix-python-sdk/src/ophanix_tool_gateway/__init__.py`
+   - `../ophanix-python-sdk/src/ophanix_tool_gateway/cli.py`
+   - `../ophanix-python-sdk/src/ophanix_tool_gateway/sdk.py`
+   - `../ophanix-python-sdk/tests/test_package_smoke.py`
+   - `../ophanix-python-sdk/tests/test_sdk_behavior.py`
+8. Tests added or updated:
+   - `packages/product-platform/frontend/src/lib/rbac.test.ts`
+   - `packages/product-platform/frontend/src/features/agents/AgentsPage.test.tsx`
+   - `packages/product-platform/frontend/src/features/settings/SettingsPage.test.tsx`
+   - `packages/product-platform/tests/test_auth_overall.py`
+   - `../ophanix-python-sdk/tests/test_sdk_behavior.py`
+   - `../ophanix-python-sdk/tests/test_package_smoke.py`
+9. Validation commands run:
+   - `npm test -- src/lib/rbac.test.ts src/features/agents/AgentsPage.test.tsx src/features/settings/SettingsPage.test.tsx`
+   - `npm run typecheck`
+   - `npm run lint`
+   - `npm run build`
+   - `python3 -m pytest tests/test_auth_overall.py`
+   - `python3 -m ruff check src/product_platform/api/app.py tests/test_auth_overall.py`
+   - `python3 -m pytest tests/test_sdk_behavior.py tests/test_package_smoke.py`
+   - `python3 -m ruff check src tests examples && python3 -m mypy src/ophanix_tool_gateway`
+10. Remaining risks:
+   - Full enterprise IdP, user CRUD, and role-assignment workflows remain outside this UXD remediation because the backend does not yet expose a production user-management or IdP ownership API.
+   - The SDK is intentionally Tool Gateway-scoped for the `0.x` line; broader control-plane SDK modules should wait for stable backend contracts.
+   - Frontend production build passes, but Vite still warns that the main chunk is larger than 500 kB.
+
+Recovery note: this selected audit report path was missing from the platform working tree during final recovery. The report below was reconstructed from `docs/product-platform-worktree/execution-logs/07-tool-gateway`, the implementation plan in `docs/product-platform-worktree/implementation-plans/07-tool-gateway`, and current source evidence.
+
+## 1. Scope
+
+This audit covers the Admin UX and developer experience surfaces that help operators configure Ophanix and help external Python agent developers perform a first governed Tool Gateway call.
+
+Codebase modules inspected:
+
+1. Product Platform frontend routing, RBAC, agents onboarding, and settings UI.
+2. Product Platform backend tenancy, API key, and audit event routes.
+3. Product Platform README guidance for Tool Gateway SDK usage.
+4. Sibling `ophanix-python-sdk` package identity, SDK constructors, CLI, examples, and tests.
+5. Existing Tool Gateway execution logs and implementation plans.
+
+Relevant competitor benchmarks:
+
+1. Microsoft Agent 365 and Entra Agent ID: admin visibility, agent identity, roles, lifecycle visibility, and security controls.
+2. AWS Bedrock AgentCore and Google Agent Platform: control-plane setup, runtime/session visibility, gateway integration, and observable operational state.
+3. OpenAI Agents SDK, Arcade, and Composio: ergonomic SDK integration, tool-call examples, and developer-friendly authorization failures.
+4. LangSmith and JFrog MCP Registry: runtime evidence, audit visibility, and governance-oriented operator workflows.
+
+Out of scope:
+
+1. Building enterprise IdP, SCIM, SAML, or user lifecycle APIs.
+2. Expanding the SDK beyond the current Tool Gateway contract.
+3. Remediating non-UXD findings from AUTH, AIR, MCP, AUD, OBS, or INT reports.
+
+## 2. Current Implementation Summary
+
+Current implemented files and symbols:
+
+1. `packages/product-platform/frontend/src/lib/rbac.ts`
+   - `permissions`
+   - `rolePermissions`
+   - `routePermissions`
+   - `userHasPermission`
+   - `canAccessRoute`
+2. `packages/product-platform/frontend/src/app/router.tsx`
+   - Real `/settings` route via `SettingsPage`
+   - Protected route access through `canAccessRoute`
+3. `packages/product-platform/frontend/src/features/settings/SettingsPage.tsx`
+   - `SettingsPage`
+   - `SetupChecklist`
+   - `OrganizationEnvironmentPanel`
+   - `ApiKeyPanel`
+   - `IdentityRolesPanel`
+   - `OperationalSetupPanel`
+4. `packages/product-platform/frontend/src/api/admin.ts`
+   - `createEnvironment`
+   - `listApiKeys`
+   - `createApiKey`
+   - `revokeApiKey`
+   - `useApiKeys`
+   - `useAdminMutation`
+5. `packages/product-platform/frontend/src/features/agents/AgentsPage.tsx`
+   - permission-gated registration and operations
+   - `FirstGovernedRunGuide`
+   - generated `OphanixToolGatewayClient.from_env()` snippet
+6. `packages/product-platform/src/product_platform/api/app.py`
+   - `POST /api/v1/environments`
+   - `GET /api/v1/api-keys`
+   - `POST /api/v1/api-keys`
+   - `DELETE /api/v1/api-keys/{key_id}`
+   - `_record_admin_settings_audit_event`
+7. `../ophanix-python-sdk/src/ophanix_tool_gateway/sdk.py`
+   - `DEFAULT_GATEWAY_BASE_URL_ENV_VAR`
+   - `OphanixToolGatewayClient.from_env`
+   - `AsyncOphanixToolGatewayClient.from_env`
+8. `../ophanix-python-sdk/src/ophanix_tool_gateway/cli.py`
+   - `ophanix-tool-gateway list-tools`
+   - `ophanix-tool-gateway call-tool`
+
+Current data flow:
+
+1. Frontend route access is checked by `canAccessRoute` against the current user principal.
+2. Settings UI loads organizations, environments, dependency status, version info, and API keys.
+3. Environment creation, API key creation, and API key revocation call backend APIs with tenant context.
+4. Backend admin mutations require server-side permissions and emit `admin-settings` audit events.
+5. Agent onboarding shows a first governed run guide that links to Tool Gateway decisions, runtime state, and compliance evidence.
+6. Python SDK users can configure the client from `OPHANIX_GATEWAY_BASE_URL` and `OPHANIX_GATEWAY_TOKEN`, then use the SDK or CLI to discover tools and invoke governed tool calls.
+
+## 3. Benchmark Comparison
+
+| Benchmark Capability | Expected Behavior | Current Implementation | Status | Evidence | Priority |
+|---|---|---|---|---|---|
+| Backend-aligned admin RBAC | UI route and action access should mirror backend role templates and permission names. | Frontend permission constants and role templates now include backend compliance and observability permissions, with contract tests reading backend RBAC source. | Implemented | `frontend/src/lib/rbac.ts`; `frontend/src/lib/rbac.test.ts` | P1 |
+| Concrete admin setup surface | Admin users should configure environments, API keys, and view role/control-plane readiness from a real settings page. | `/settings` now renders setup checklist, environment controls, API key create/revoke, role templates, and operational links. | Partially Implemented | `frontend/src/features/settings/SettingsPage.tsx`; `frontend/src/api/admin.ts` | P1 |
+| Security-relevant admin auditability | Sensitive admin changes should emit audit events without raw secrets. | Environment creation, API key creation, and API key revocation emit `admin-settings` audit events; API key secret is returned one time but not written into audit payload. | Implemented | `api/app.py`; `tests/test_auth_overall.py` | P1 |
+| First governed run guidance | Developer onboarding should show a real Tool Gateway integration path and direct users to decision/evidence surfaces. | Agent page now generates SDK bootstrap snippet and links to Tool Gateway decisions, runtime, and compliance evidence. | Implemented | `AgentsPage.tsx`; `AgentsPage.test.tsx` | P1 |
+| SDK package identity and bootstrap ergonomics | Python developers should know the canonical package, import path, env vars, and smoke-test command. | SDK docs clarify `ophanix-python-sdk`, exposes `from_env()`, adds CLI, and updates examples/tests. | Implemented | `../ophanix-python-sdk/README.md`; `sdk.py`; `cli.py`; tests | P2 |
+
+## 4. Findings
+
+### F-UXD-001 [P1] [Authorization] Frontend RBAC drifted from backend permissions
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Frontend permission constants, role templates, and route permissions were aligned with backend RBAC. Agent write actions now consult the current user principal before allowing registration, lifecycle, credential, and inventory mutations.
+
+**Files changed:**
+`packages/product-platform/frontend/src/lib/rbac.ts`, `packages/product-platform/frontend/src/lib/rbac.test.ts`, `packages/product-platform/frontend/src/features/agents/AgentsPage.tsx`, `packages/product-platform/frontend/src/features/agents/AgentsPage.test.tsx`
+
+**Tests added or updated:**
+`route RBAC keeps frontend permission constants in contract with backend RBAC`; `route RBAC matches backend role templates for compliance and observability permissions`; `AgentsPage disables agent write actions for read-only users`
+
+**Validation performed:**
+`npm test -- src/lib/rbac.test.ts src/features/agents/AgentsPage.test.tsx src/features/settings/SettingsPage.test.tsx` passed; `npm run typecheck` passed; `npm run lint` passed.
+
+**Remaining work:**
+None in UXD scope.
+
+**Remediated by:**
+AI coding agent
+
+**Status:** Incorrect / Risky
+
+**Current implementation:**
+Before remediation, frontend RBAC did not include all backend permission names and role-template semantics. It also allowed some agent write controls to render without checking `agent:write`.
+
+**Expected implementation:**
+Frontend navigation and action visibility should be derived from the same permission contract used by backend authorization. Read-only users should not see usable mutation controls, and backend remains the source of enforcement.
+
+**Affected files:**
+`packages/product-platform/frontend/src/lib/rbac.ts`, `packages/product-platform/frontend/src/features/agents/AgentsPage.tsx`, `packages/product-platform/src/product_platform/api/rbac.py`
+
+**Affected symbols:**
+`permissions`, `rolePermissions`, `routePermissions`, `userHasPermission`, `canAccessRoute`, `AgentsPage`, `AgentRegistrationWizard`, `AgentInventory`, `AgentOperations`
+
+**Evidence:**
+The execution log records that frontend RBAC omitted backend `COMPLIANCE_WRITE`, `OBSERVABILITY_READ`, and `OBSERVABILITY_WRITE`; Compliance Admin had audit write semantics instead of compliance write semantics; `/observability` was not aligned to backend observability permission; `AgentsPage` did not use the current user principal for write action gating. Current code now includes these permission constants and uses `canWriteAgents`.
+
+**Why this matters:**
+Admin UX that disagrees with backend authorization causes confusing 403s, weakens operator trust, and makes it easy to accidentally expose mutation controls to read-only roles.
+
+**Competitor benchmark:**
+Microsoft Agent 365 and Entra Agent ID patterns require admin visibility and controls to reflect the identity and access model.
+
+**Recommended remediation:**
+1. Keep frontend permission constants in contract with backend `Permission`.
+2. Add tests that fail when backend permission values are missing from frontend RBAC.
+3. Gate write actions by permission, not only by route access.
+4. Keep backend authorization as the enforcement layer.
+
+**Acceptance criteria:**
+1. Frontend RBAC contains every backend permission value.
+2. Viewer can access read-only pages but cannot trigger write actions.
+3. Compliance Admin and Platform Admin permissions match backend role templates.
+4. Route and action tests cover read-only and admin users.
+
+**Suggested tests:**
+1. Frontend RBAC contract test comparing frontend permission values to backend `Permission`.
+2. Agent page test proving Viewer cannot create, suspend, rotate, or decommission agents.
+3. Route access tests for Viewer, Policy Admin, Security Admin, Compliance Admin, and Platform Admin.
+
+**Risk if ignored:**
+Operators see controls that later fail server-side, role semantics drift between layers, and future admin pages may accidentally expose unsafe actions.
+
+**Remediation complexity:**
+Medium
+
+**Dependencies:**
+None
+
+**Blocks production readiness:**
+Yes
+
+**Affects stated Ophanix product promise:**
+Yes
+
+### F-UXD-002 [P1] [Admin UX] Settings route was a placeholder instead of a usable admin control surface
+
+**Remediation status:** Partially Fixed
+
+**Remediation summary:**
+`/settings` now renders a concrete Settings page with setup checklist, organization/environment controls, API key management, current principal visibility, backend-aligned role templates, and operational links. Backend admin mutations emit audit events. Full enterprise IdP user CRUD and role-assignment CRUD remain out of UXD scope because the current backend does not expose a production user-management or IdP ownership API.
+
+**Files changed:**
+`packages/product-platform/frontend/src/api/admin.ts`, `packages/product-platform/frontend/src/features/settings/SettingsPage.tsx`, `packages/product-platform/frontend/src/features/settings/SettingsPage.test.tsx`, `packages/product-platform/frontend/src/app/router.tsx`, `packages/product-platform/frontend/src/api/types.ts`, `packages/product-platform/src/product_platform/api/app.py`, `packages/product-platform/tests/test_auth_overall.py`
+
+**Tests added or updated:**
+`SettingsPage renders concrete admin controls instead of a placeholder`; `SettingsPage creates environments, creates API keys, and revokes existing keys`; `AuthOverallValidationTests.test_platform_admin_can_create_environment_and_api_key`
+
+**Validation performed:**
+`npm test -- src/lib/rbac.test.ts src/features/agents/AgentsPage.test.tsx src/features/settings/SettingsPage.test.tsx` passed; `python3 -m pytest tests/test_auth_overall.py` passed; `npm run typecheck` passed; `npm run lint` passed; `npm run build` passed; `python3 -m ruff check src/product_platform/api/app.py tests/test_auth_overall.py` passed.
+
+**Remaining work:**
+Full enterprise IdP integration, user CRUD, and role-assignment CRUD need an AUTH/IdP implementation plan and backend API ownership decision.
+
+**Remediated by:**
+AI coding agent
+
+**Status:** Partially Implemented
+
+**Current implementation:**
+Before remediation, the `/settings` route was generated by `FeaturePlaceholderPage`, so admins could not perform real setup tasks from the application shell. Current implementation provides concrete controls for implemented backend capabilities.
+
+**Expected implementation:**
+Admin settings should expose real, permission-gated operational controls for tenant setup, environments, API keys, role visibility, readiness, and audit-linked changes. User and role assignment workflows should be implemented only after the backend owns IdP and membership semantics.
+
+**Affected files:**
+`packages/product-platform/frontend/src/app/router.tsx`, `packages/product-platform/frontend/src/features/settings/SettingsPage.tsx`, `packages/product-platform/frontend/src/api/admin.ts`, `packages/product-platform/src/product_platform/api/app.py`
+
+**Affected symbols:**
+`SettingsPage`, `createEnvironment`, `createApiKey`, `revokeApiKey`, `_record_admin_settings_audit_event`, `create_environment`, `create_api_key`, `revoke_api_key`
+
+**Evidence:**
+The execution log records `/settings` falling through to `FeaturePlaceholderPage`. Current code imports `SettingsPage`, removes `/settings` from placeholder route generation, and includes admin API helpers for environment and API key operations. Backend now records `admin.environment.created`, `admin.api_key.created`, and `admin.api_key.revoked`.
+
+**Why this matters:**
+A control plane cannot be production-ready if its central admin setup surface is a placeholder. Operators need concrete setup feedback and auditable security-relevant controls.
+
+**Competitor benchmark:**
+Microsoft Agent 365, Okta for AI Agents, and AWS Bedrock AgentCore emphasize central admin visibility and governed setup workflows.
+
+**Recommended remediation:**
+1. Keep `/settings` as a real route, not a placeholder.
+2. Expose implemented backend capabilities through permission-aware controls.
+3. Audit environment and API key changes with actor, tenant, resource, and correlation context.
+4. Track IdP, user CRUD, and role assignment as a separate AUTH/IdP remediation because it changes backend ownership boundaries.
+
+**Acceptance criteria:**
+1. `/settings` renders concrete controls and no placeholder copy.
+2. Platform Admin can create environments.
+3. Security Admin or Platform Admin can create and revoke API keys.
+4. Raw API key secrets are not persisted in audit payloads.
+5. Viewer can inspect allowed resources but cannot mutate settings.
+6. Remaining enterprise user/role CRUD has an explicit blocker or separate plan.
+
+**Suggested tests:**
+1. Settings component test for setup checklist and admin controls.
+2. Settings component test for environment create, API key create, and API key revoke flows.
+3. Backend API test for Platform Admin mutation success and Viewer mutation denial.
+4. Backend audit test proving admin mutation events are emitted without raw secrets.
+
+**Risk if ignored:**
+Operators cannot complete setup from the product, security-relevant changes are not discoverable from the UI, and setup falls back to undocumented API or manual database operations.
+
+**Remediation complexity:**
+High
+
+**Dependencies:**
+AUTH/IdP ownership for full user and role CRUD
+
+**Blocks production readiness:**
+Yes
+
+**Affects stated Ophanix product promise:**
+Yes
+
+### F-UXD-003 [P1] [Developer Experience] Agent onboarding did not lead to a real governed first run
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Agent onboarding now includes a first governed run guide that uses selected agent context, generates an SDK snippet with `OphanixToolGatewayClient.from_env()`, includes correlation and idempotency guidance, and links to Tool Gateway decisions, runtime, and compliance evidence.
+
+**Files changed:**
+`packages/product-platform/frontend/src/features/agents/AgentsPage.tsx`, `packages/product-platform/frontend/src/features/agents/AgentsPage.test.tsx`, `packages/product-platform/frontend/src/lib/rbac.ts`, `../ophanix-python-sdk/src/ophanix_tool_gateway/sdk.py`, `../ophanix-python-sdk/README.md`
+
+**Tests added or updated:**
+`AgentsPage renders registration, inventory, lifecycle, detail, credentials, and audit drawer flows`; SDK `from_env()` tests in `tests/test_sdk_behavior.py`
+
+**Validation performed:**
+`npm test -- src/features/agents/AgentsPage.test.tsx` passed as part of the focused frontend suite; SDK focused tests passed with 31 tests.
+
+**Remaining work:**
+None in UXD scope. Live invocation still requires a deployed gateway token and configured upstream tools.
+
+**Remediated by:**
+AI coding agent
+
+**Status:** Partially Implemented
+
+**Current implementation:**
+Before remediation, agent onboarding had registration and detail surfaces but no clear path from a newly registered agent to a real governed Tool Gateway invocation and audit evidence.
+
+**Expected implementation:**
+The first-agent journey should show the operator and developer exactly how to perform a governed call, where to inspect the decision, and how to connect runtime activity to evidence.
+
+**Affected files:**
+`packages/product-platform/frontend/src/features/agents/AgentsPage.tsx`, `packages/product-platform/frontend/src/features/tool-gateway/ToolDecisionsPage.tsx`, `../ophanix-python-sdk/src/ophanix_tool_gateway/sdk.py`
+
+**Affected symbols:**
+`FirstGovernedRunGuide`, `OphanixToolGatewayClient.from_env`, `ToolDecisionsPage`
+
+**Evidence:**
+Current `AgentsPage.tsx` renders `FirstGovernedRunGuide`, generates a `client.call_tool(...)` snippet, and links to `/tool-gateway/decisions?agent_id=...`. The frontend test asserts the guide and decision link.
+
+**Why this matters:**
+Early adopters need a short path from registration to a real governed call. Without it, the product looks like an inventory dashboard rather than an operational control plane.
+
+**Competitor benchmark:**
+OpenAI Agents SDK, Arcade, and Composio reduce adoption friction by making tool-call setup and authorization behavior easy to test from developer workflows.
+
+**Recommended remediation:**
+1. Keep first-run guidance tied to real SDK and gateway routes.
+2. Include correlation ID and idempotency key guidance.
+3. Link directly to decision and evidence views.
+4. Avoid demo-only or fake execution claims in the UI.
+
+**Acceptance criteria:**
+1. Agent page shows first governed run guidance.
+2. The generated snippet uses the canonical SDK import path.
+3. The snippet includes correlation and idempotency inputs.
+4. Links route to real Tool Gateway decision and evidence surfaces.
+5. Tests prove selected agent context appears in the generated links/snippet.
+
+**Suggested tests:**
+1. Frontend component test for first-run guide rendering.
+2. Frontend component test for selected-agent decision link.
+3. SDK unit test for `from_env()` base URL and token behavior.
+4. Documentation smoke test for first-run snippet shape.
+
+**Risk if ignored:**
+New users can register agents but remain unsure how to execute a governed call or verify that the call was actually controlled by Ophanix.
+
+**Remediation complexity:**
+Medium
+
+**Dependencies:**
+F-UXD-004
+
+**Blocks production readiness:**
+Yes
+
+**Affects stated Ophanix product promise:**
+Yes
+
+### F-UXD-004 [P2] [SDK Developer Experience] SDK package identity and bootstrap ergonomics were unclear
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+The sibling SDK now exposes sync and async `from_env()` constructors, exports `DEFAULT_GATEWAY_BASE_URL_ENV_VAR`, installs an `ophanix-tool-gateway` CLI, updates docs and examples around the canonical `ophanix-python-sdk` package, and has SDK tests for environment configuration and CLI behavior.
+
+**Files changed:**
+`../ophanix-python-sdk/src/ophanix_tool_gateway/sdk.py`, `../ophanix-python-sdk/src/ophanix_tool_gateway/__init__.py`, `../ophanix-python-sdk/src/ophanix_tool_gateway/cli.py`, `../ophanix-python-sdk/pyproject.toml`, `../ophanix-python-sdk/README.md`, `../ophanix-python-sdk/API_REFERENCE.md`, `../ophanix-python-sdk/examples/async_worker_example.py`, `../ophanix-python-sdk/tests/test_sdk_behavior.py`, `../ophanix-python-sdk/tests/test_package_smoke.py`, `packages/product-platform/README.md`
+
+**Tests added or updated:**
+`StandaloneSdkBehaviorTests.test_from_env_constructs_client_from_gateway_environment`; `StandaloneSdkBehaviorTests.test_from_env_requires_gateway_base_url`; `PackageSmokeTests.test_cli_lists_tools_as_json`; `PackageSmokeTests.test_cli_calls_tool_with_payload_json`
+
+**Validation performed:**
+`python3 -m pytest tests/test_sdk_behavior.py tests/test_package_smoke.py` passed with 31 tests; `python3 -m ruff check src tests examples && python3 -m mypy src/ophanix_tool_gateway` passed.
+
+**Remaining work:**
+None in current SDK scope. Broader control-plane SDK modules remain future work after API contracts stabilize.
+
+**Remediated by:**
+AI coding agent
+
+**Status:** Improvement
+
+**Current implementation:**
+Before remediation, developers had to manually wire base URL and token provider setup and package identity was split between internal product-platform compatibility code and the external SDK package.
+
+**Expected implementation:**
+The SDK should have an obvious canonical package identity, stable import path, environment-based bootstrap, CLI smoke path, and docs that align with the Tool Gateway contract.
+
+**Affected files:**
+`../ophanix-python-sdk/src/ophanix_tool_gateway/sdk.py`, `../ophanix-python-sdk/pyproject.toml`, `../ophanix-python-sdk/README.md`, `packages/product-platform/README.md`
+
+**Affected symbols:**
+`OphanixToolGatewayClient.from_env`, `AsyncOphanixToolGatewayClient.from_env`, `DEFAULT_GATEWAY_BASE_URL_ENV_VAR`, `ophanix-tool-gateway`
+
+**Evidence:**
+Current SDK code defines `DEFAULT_GATEWAY_BASE_URL_ENV_VAR`, sync and async `from_env()` constructors, and `src/ophanix_tool_gateway/cli.py`; package metadata exposes the `ophanix-tool-gateway` console script.
+
+**Why this matters:**
+Developer adoption depends on a clear first install, first configuration, and first smoke-test path. Ambiguous package identity can cause teams to install the wrong artifact or copy stale examples.
+
+**Competitor benchmark:**
+OpenAI Agents SDK and Arcade/Composio patterns make SDK setup, tool invocation, and failure modes easy for developers to exercise locally.
+
+**Recommended remediation:**
+1. Keep `ophanix-python-sdk` as the canonical external package name.
+2. Keep `ophanix_tool_gateway` as the stable import path for Tool Gateway.
+3. Support `OPHANIX_GATEWAY_BASE_URL` and `OPHANIX_GATEWAY_TOKEN` bootstrap.
+4. Keep CLI behavior tested and documented.
+5. Avoid exposing broader SDK modules until backend APIs are stable.
+
+**Acceptance criteria:**
+1. Sync and async clients can be constructed from environment variables.
+2. Missing base URL produces a stable SDK validation error.
+3. CLI can list tools and call a tool using mocked clients.
+4. Docs clearly state package name, import path, env vars, and scope.
+5. Product Platform README points to the canonical external SDK package.
+
+**Suggested tests:**
+1. SDK unit tests for `from_env()` success and missing base URL.
+2. CLI smoke tests for `list-tools` and `call-tool`.
+3. Example compile test.
+4. Ruff and mypy validation over SDK source.
+
+**Risk if ignored:**
+External developers may build against the wrong package identity, miss environment bootstrap conventions, or need to reverse-engineer the Tool Gateway client setup.
+
+**Remediation complexity:**
+Medium
+
+**Dependencies:**
+F-UXD-003
+
+**Blocks production readiness:**
+No
+
+**Affects stated Ophanix product promise:**
+Yes
+
+## 5. Missing Tests
+
+Remaining recommended tests:
+
+1. Full Settings route authorization test through the router
+   - Type: Frontend integration
+   - Verifies: Viewer cannot access `/settings`; Security Admin can access API-key controls; Platform Admin can access environment controls.
+   - Files likely affected: `frontend/src/app/router.tsx`, `frontend/src/features/settings/SettingsPage.test.tsx`
+   - Related finding ID: F-UXD-001, F-UXD-002
+2. Audit payload redaction regression for one-time API key secret
+   - Type: Backend integration
+   - Verifies: `admin.api_key.created` audit payload never contains the returned raw secret.
+   - Files likely affected: `tests/test_auth_overall.py`
+   - Related finding ID: F-UXD-002
+3. End-to-end first-run smoke test
+   - Type: E2E/API
+   - Verifies: A generated SDK or CLI invocation creates a Tool Gateway runtime action and links to the decision feed.
+   - Files likely affected: frontend E2E tests, SDK smoke tests, Tool Gateway API fixtures
+   - Related finding ID: F-UXD-003, F-UXD-004
+4. Enterprise IdP user/role workflow tests
+   - Type: Backend/API/frontend
+   - Verifies: Future user CRUD and role assignment APIs enforce tenant scoping and audit role changes.
+   - Files likely affected: future AUTH/IdP modules
+   - Related finding ID: F-UXD-002
+
+## 6. Recommended Remediation Order
+
+P0:
+
+1. None in this report.
+
+P1:
+
+1. F-UXD-001
+2. F-UXD-002
+3. F-UXD-003
+
+P2:
+
+1. F-UXD-004
+
+P3:
+
+1. None in this report.
+
+## 7. Feature-Level Target State
+
+The target state for Admin UX and developer experience is:
+
+1. Data model changes:
+   - No additional UXD-owned data model changes are required for current remediation.
+   - Future enterprise user and role assignment workflows require AUTH/IdP-owned schema and API decisions.
+2. API changes:
+   - Admin environment and API-key APIs remain permission-gated and audited.
+   - Future user/role CRUD APIs should expose explicit tenant-scoped membership and audit semantics.
+3. Service changes:
+   - Admin mutation audit helpers should remain centralized and should avoid raw secret payloads.
+4. Worker changes:
+   - None for this feature area.
+5. UI changes:
+   - Settings remains a real admin page.
+   - Agents onboarding continues to link first-run guidance to real gateway and evidence routes.
+   - Route and action visibility stays aligned with backend RBAC.
+6. Audit and observability changes:
+   - Admin environment/API-key mutations emit audit events with actor, tenant, resource, decision, trace, and correlation context.
+   - Future user/role changes should follow the same audit pattern.
+7. Security and authorization changes:
+   - Server-side permission checks remain authoritative.
+   - Frontend controls remain advisory and contract-tested against backend permission names.
+8. Tests required:
+   - Keep RBAC contract tests, Settings tests, backend admin audit tests, SDK environment/CLI tests, and add future E2E first-run smoke coverage.
