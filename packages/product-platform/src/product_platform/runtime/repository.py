@@ -50,6 +50,12 @@ class RuntimeActionDecisionRecord:
     correlation_id: str | None
     agent_trust_score: int
     assigned_ring: int
+    trace_id: str | None = None
+    span_id: str | None = None
+    parent_span_id: str | None = None
+    traceparent: str | None = None
+    tracestate: str | None = None
+    baggage: str | None = None
 
 
 class RuntimeRepository:
@@ -60,7 +66,17 @@ class RuntimeRepository:
         self.organization_id = organization_id
         self.environment_id = environment_id
 
-    def create_session(self, body: RuntimeSessionCreateRequest) -> Row:
+    def create_session(
+        self,
+        body: RuntimeSessionCreateRequest,
+        *,
+        trace_id: str | None = None,
+        span_id: str | None = None,
+        parent_span_id: str | None = None,
+        traceparent: str | None = None,
+        tracestate: str | None = None,
+        baggage: str | None = None,
+    ) -> Row:
         """Create an active runtime session for an active agent."""
 
         agent = self.get_agent(body.agent_id)
@@ -80,9 +96,10 @@ class RuntimeRepository:
             """
             INSERT INTO runtime_sessions (
                 id, organization_id, environment_id, agent_id, state, ring,
-                sponsor_user_id, started_at, ended_at, metadata_json
+                sponsor_user_id, started_at, ended_at, metadata_json,
+                trace_id, span_id, parent_span_id, traceparent, tracestate, baggage
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -95,6 +112,12 @@ class RuntimeRepository:
                 now,
                 None,
                 json.dumps(body.metadata, sort_keys=True),
+                trace_id,
+                span_id,
+                parent_span_id,
+                traceparent,
+                tracestate,
+                baggage,
             ),
         )
         row = self.get_session(session_id)
@@ -248,9 +271,11 @@ class RuntimeRepository:
             """
             INSERT INTO runtime_actions (
                 id, session_id, action_name, resource_type, required_ring,
-                decision, reason, latency_ms, correlation_id, created_at
+                decision, reason, latency_ms, correlation_id,
+                trace_id, span_id, parent_span_id, traceparent, tracestate, baggage,
+                created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 action_id,
@@ -262,6 +287,12 @@ class RuntimeRepository:
                 record.reason,
                 record.latency_ms,
                 record.correlation_id,
+                record.trace_id,
+                record.span_id,
+                record.parent_span_id,
+                record.traceparent,
+                record.tracestate,
+                record.baggage,
                 created_at,
             ),
         )
@@ -520,6 +551,12 @@ def runtime_action_response(
         reason=row["reason"],
         latency_ms=row["latency_ms"],
         correlation_id=row["correlation_id"],
+        trace_id=_optional_row_value(row, "trace_id"),
+        span_id=_optional_row_value(row, "span_id"),
+        parent_span_id=_optional_row_value(row, "parent_span_id"),
+        traceparent=_optional_row_value(row, "traceparent"),
+        tracestate=_optional_row_value(row, "tracestate"),
+        baggage=_optional_row_value(row, "baggage"),
         created_at=row["created_at"],
         ring_decision=ring_decision,
     )
@@ -544,5 +581,15 @@ def runtime_session_response(
         started_at=row["started_at"],
         ended_at=row["ended_at"],
         metadata=json.loads(row["metadata_json"]),
+        trace_id=_optional_row_value(row, "trace_id"),
+        span_id=_optional_row_value(row, "span_id"),
+        parent_span_id=_optional_row_value(row, "parent_span_id"),
+        traceparent=_optional_row_value(row, "traceparent"),
+        tracestate=_optional_row_value(row, "tracestate"),
+        baggage=_optional_row_value(row, "baggage"),
         actions=actions or [],
     )
+
+
+def _optional_row_value(row: Row, key: str) -> str | None:
+    return row[key] if key in row.keys() else None

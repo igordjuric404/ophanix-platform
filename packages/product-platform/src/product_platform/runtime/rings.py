@@ -120,6 +120,12 @@ class RuntimeRingDecisionService:
         body: RuntimeActionCreateRequest,
         *,
         correlation_id: str | None,
+        trace_id: str | None = None,
+        span_id: str | None = None,
+        parent_span_id: str | None = None,
+        traceparent: str | None = None,
+        tracestate: str | None = None,
+        baggage: str | None = None,
     ) -> tuple[Any, Any]:
         """Evaluate and persist one runtime action."""
 
@@ -150,6 +156,12 @@ class RuntimeRingDecisionService:
                 correlation_id=correlation_id,
                 agent_trust_score=evaluation.agent_trust_score,
                 assigned_ring=evaluation.assigned_ring,
+                trace_id=trace_id,
+                span_id=span_id,
+                parent_span_id=parent_span_id,
+                traceparent=traceparent,
+                tracestate=tracestate,
+                baggage=baggage,
             )
         )
 

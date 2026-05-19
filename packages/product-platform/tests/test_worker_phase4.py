@@ -10,6 +10,11 @@ from product_platform.api.settings import Settings
 from product_platform.db.time import utc_now_iso
 
 
+TRACE_ID = "66666666666666666666666666666666"
+PARENT_SPAN_ID = "7777777777777777"
+TRACEPARENT = f"00-{TRACE_ID}-{PARENT_SPAN_ID}-01"
+
+
 class WorkerPhase4ApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.app = create_app(
@@ -35,9 +40,12 @@ class WorkerPhase4ApiTests(unittest.TestCase):
             database.close()
 
     def _login(self, email: str, roles: list[str]) -> dict[str, str]:
+        login_body: dict[str, Any] = {"email": email, "roles": roles}
+        if "Operator" in roles:
+            login_body["environment_ids"] = ["env_default", "env_other"]
         login = self.client.post(
             "/api/v1/auth/dev-login",
-            json={"email": email, "roles": roles},
+            json=login_body,
         )
         self.assertEqual(login.status_code, 200)
         return {
@@ -84,6 +92,40 @@ class WorkerPhase4ApiTests(unittest.TestCase):
         self.assertEqual(job["runs"], [])
         self.assertEqual(listed.status_code, 200)
         self.assertIn(job["id"], {item["id"] for item in listed.json()})
+
+    def test_job_create_persists_w3c_trace_context(self) -> None:
+        headers = dict(self.operator_headers)
+        headers.update(
+            {
+                "X-Correlation-ID": "corr-job-trace",
+                "traceparent": TRACEPARENT,
+                "tracestate": "vendor=worker",
+                "baggage": "tenant=demo,job=noop",
+            }
+        )
+        response = self.client.post(
+            "/api/v1/jobs",
+            json={"job_type": "demo.noop", "payload": {"source": "trace"}},
+            headers=headers,
+        )
+
+        self.assertEqual(response.status_code, 201, response.text)
+        job = response.json()
+        self.assertEqual(response.headers["traceparent"].split("-")[1], TRACE_ID)
+        self.assertEqual(job["trace_id"], TRACE_ID)
+        self.assertRegex(job["span_id"], r"^[0-9a-f]{16}$")
+        self.assertEqual(job["parent_span_id"], PARENT_SPAN_ID)
+        self.assertEqual(job["traceparent"].split("-")[1], TRACE_ID)
+        self.assertEqual(job["tracestate"], "vendor=worker")
+        self.assertEqual(job["baggage"], "tenant=demo,job=noop")
+
+        row = self.app.state.database.connect().execute(
+            "SELECT trace_id, span_id, parent_span_id, traceparent, tracestate, baggage "
+            "FROM background_jobs WHERE id = ?",
+            (job["id"],),
+        ).fetchone()
+        self.assertEqual(row["trace_id"], TRACE_ID)
+        self.assertEqual(row["parent_span_id"], PARENT_SPAN_ID)
 
     def test_unknown_api_job_type_is_rejected_before_persistence(self) -> None:
         response = self.client.post(

@@ -119,6 +119,12 @@ class MCPProxyDecisionRecord:
     sanitizer_action: str | None
     latency_ms: int
     correlation_id: str | None
+    trace_id: str | None = None
+    span_id: str | None = None
+    parent_span_id: str | None = None
+    traceparent: str | None = None
+    tracestate: str | None = None
+    baggage: str | None = None
 
 
 class DemoMCPGatewayAdapter:
@@ -739,12 +745,17 @@ class MCPProxyRepository:
                 source_agent_id, params_summary_json, decision, reason,
                 matched_policy_id, matched_policy_version_id, trust_threshold_id,
                 trust_score, gateway_stage, response_json, sanitizer_action,
-                latency_ms, correlation_id, created_at
+                latency_ms, correlation_id,
+                trace_id, span_id, parent_span_id, traceparent, tracestate, baggage,
+                created_at
                 , policy_binding_id, policy_action, policy_reason,
                 policy_matched_rule, policy_input_json, upstream_request_json,
                 upstream_response_metadata_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
             """,
             (
                 call_id,
@@ -765,6 +776,12 @@ class MCPProxyRepository:
                 decision.sanitizer_action,
                 decision.latency_ms,
                 decision.correlation_id,
+                decision.trace_id,
+                decision.span_id,
+                decision.parent_span_id,
+                decision.traceparent,
+                decision.tracestate,
+                decision.baggage,
                 created_at,
                 decision.policy_binding_id,
                 decision.policy_action,
@@ -1330,6 +1347,12 @@ class MCPProxyDecisionService:
         body: MCPProxyCallRequest,
         *,
         request_correlation_id: str | None,
+        trace_id: str | None = None,
+        span_id: str | None = None,
+        parent_span_id: str | None = None,
+        traceparent: str | None = None,
+        tracestate: str | None = None,
+        baggage: str | None = None,
     ) -> Row:
         started = time.perf_counter()
         server = self.repository.get_server(body.server_id)
@@ -1459,6 +1482,12 @@ class MCPProxyDecisionService:
                 sanitizer_action=sanitizer_action,
                 latency_ms=latency_ms,
                 correlation_id=body.correlation_id or request_correlation_id,
+                trace_id=trace_id,
+                span_id=span_id,
+                parent_span_id=parent_span_id,
+                traceparent=traceparent,
+                tracestate=tracestate,
+                baggage=baggage,
             )
         )
         if row["decision"] == "escalated":
@@ -1581,6 +1610,12 @@ def mcp_tool_call_response(row: Row) -> MCPToolCallResponse:
         sanitizer_action=row["sanitizer_action"],
         latency_ms=row["latency_ms"],
         correlation_id=row["correlation_id"],
+        trace_id=_optional_row_value(row, "trace_id"),
+        span_id=_optional_row_value(row, "span_id"),
+        parent_span_id=_optional_row_value(row, "parent_span_id"),
+        traceparent=_optional_row_value(row, "traceparent"),
+        tracestate=_optional_row_value(row, "tracestate"),
+        baggage=_optional_row_value(row, "baggage"),
         created_at=row["created_at"],
     )
 
@@ -1808,6 +1843,10 @@ def _strip_instruction_markers(value: Any, scanner: Any, tool_name: str) -> Any:
     if isinstance(value, list):
         return [_strip_instruction_markers(item, scanner, tool_name) for item in value]
     return value
+
+
+def _optional_row_value(row: Row, key: str) -> str | None:
+    return row[key] if key in row.keys() else None
 
 
 def _load_gateway_classes() -> tuple[Any, Any]:

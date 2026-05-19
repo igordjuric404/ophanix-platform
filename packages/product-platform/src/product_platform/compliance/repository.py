@@ -302,6 +302,62 @@ def audit_export_runtime_links(
     return [_row_dict(row) for row in rows]
 
 
+def audit_export_linked_artifacts(
+    *,
+    connection: Connection,
+    organization_id: str,
+    environment_id: str,
+    runtime_links: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return artifact evidence linked to runtime actions included in an audit export."""
+
+    runtime_action_ids = sorted({str(link["id"]) for link in runtime_links if link.get("id")})
+    if not runtime_action_ids:
+        return []
+    placeholders = ", ".join("?" for _ in runtime_action_ids)
+    rows = connection.execute(
+        f"""
+        SELECT
+            a.id, a.artifact_type, a.name, a.content_type, a.storage_uri,
+            a.checksum, a.digest_algorithm, a.size_bytes, a.retention_policy,
+            a.redaction_classification, a.provenance_json, a.created_at,
+            l.id AS link_id, l.target_type, l.target_id, l.link_type,
+            l.created_at AS link_created_at
+        FROM artifact_links l
+        JOIN artifacts a ON a.id = l.artifact_id
+        WHERE a.organization_id = ?
+          AND a.environment_id = ?
+          AND l.target_type = 'tool_runtime_action'
+          AND l.target_id IN ({placeholders})
+        ORDER BY a.created_at DESC, l.created_at DESC, a.id DESC
+        """,
+        [organization_id, environment_id, *runtime_action_ids],
+    ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "artifact_type": row["artifact_type"],
+            "name": row["name"],
+            "content_type": row["content_type"],
+            "storage_uri": row["storage_uri"],
+            "checksum": row["checksum"],
+            "digest_algorithm": row["digest_algorithm"],
+            "digest_verified": bool(row["checksum"] and row["digest_algorithm"]),
+            "size_bytes": row["size_bytes"],
+            "retention_policy": row["retention_policy"],
+            "redaction_classification": row["redaction_classification"],
+            "provenance": _json_dict(row, "provenance_json"),
+            "target_type": row["target_type"],
+            "target_id": row["target_id"],
+            "link_type": row["link_type"],
+            "link_id": row["link_id"],
+            "created_at": row["created_at"],
+            "link_created_at": row["link_created_at"],
+        }
+        for row in rows
+    ]
+
+
 def audit_export_content(
     *,
     response: AuditExportResponse,
@@ -429,7 +485,8 @@ def _audit_events_csv(event_rows: list[dict[str, Any]]) -> str:
         row["payload_json"] = _csv_safe_cell(
             json.dumps(event.get("payload_json") or {}, sort_keys=True)
         )
-        hash_chain = event.get("hash_chain") if isinstance(event.get("hash_chain"), dict) else {}
+        raw_hash_chain = event.get("hash_chain")
+        hash_chain: dict[str, Any] = raw_hash_chain if isinstance(raw_hash_chain, dict) else {}
         row["audit_previous_hash"] = _csv_safe_cell(hash_chain.get("previous_hash"))
         row["audit_current_hash"] = _csv_safe_cell(hash_chain.get("current_hash"))
         row["audit_hash_algorithm"] = _csv_safe_cell(hash_chain.get("algorithm"))
@@ -482,7 +539,7 @@ def _audit_events_markdown(
     return "\n".join(lines) + "\n"
 
 
-DEFAULT_FRAMEWORKS = [
+DEFAULT_FRAMEWORKS: list[dict[str, Any]] = [
     {
         "id": "cf_soc2",
         "name": "SOC 2",

@@ -5,6 +5,86 @@ import { scopedQueryKey, useTenantQueryScope } from "./queryScope";
 
 export type ObservabilityParams = Record<string, string | number | boolean | null | undefined>;
 
+export interface ObservabilityTrace {
+  id: string;
+  organization_id: string;
+  environment_id: string;
+  trace_id: string;
+  name: string;
+  status: string;
+  agent_id?: string | null;
+  runtime_session_id?: string | null;
+  correlation_id?: string | null;
+  metadata: Record<string, unknown>;
+  started_at: string;
+  ended_at?: string | null;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ObservabilitySpan {
+  id: string;
+  trace_id: string;
+  span_id: string;
+  parent_span_id?: string | null;
+  span_kind: string;
+  name: string;
+  status: string;
+  start_time: string;
+  end_time?: string | null;
+  latency_ms?: number | null;
+  resource_type?: string | null;
+  resource_id?: string | null;
+  attributes: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ObservabilityEvalResult {
+  id: string;
+  organization_id: string;
+  environment_id: string;
+  trace_id: string;
+  span_id?: string | null;
+  dataset_id?: string | null;
+  dataset_name?: string | null;
+  evaluator_name: string;
+  score?: number | null;
+  label?: string | null;
+  passed?: boolean | null;
+  feedback: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  created_by?: string | null;
+  created_at: string;
+}
+
+export interface ObservabilityTraceTimelineEntry {
+  kind: string;
+  id: string;
+  name: string;
+  status: string;
+  timestamp: string;
+  span_id?: string | null;
+  parent_span_id?: string | null;
+}
+
+export interface ObservabilityTraceDetail {
+  trace: ObservabilityTrace;
+  spans: ObservabilitySpan[];
+  runtime_sessions: Array<Record<string, unknown>>;
+  runs: Array<Record<string, unknown>>;
+  runtime_actions: Array<Record<string, unknown>>;
+  tool_runtime_actions: Array<Record<string, unknown>>;
+  mcp_tool_calls: Array<Record<string, unknown>>;
+  policy_evaluations: Array<Record<string, unknown>>;
+  eval_results: ObservabilityEvalResult[];
+  annotations: Array<Record<string, unknown>>;
+  feedback: Array<Record<string, unknown>>;
+  artifacts: Array<Record<string, unknown>>;
+  model_calls: Array<Record<string, unknown>>;
+  timeline: ObservabilityTraceTimelineEntry[];
+}
+
 export interface SloMeasurement {
   id: string;
   slo_id: string;
@@ -16,6 +96,10 @@ export interface SloMeasurement {
   status: string;
   metadata: Record<string, unknown>;
   measured_at: string;
+  source: string;
+  source_resource_type?: string | null;
+  source_resource_id?: string | null;
+  trace_id?: string | null;
 }
 
 export interface SloObjective {
@@ -63,6 +147,10 @@ export interface CostEvent {
   amount: number;
   units: number;
   correlation_id?: string | null;
+  source: string;
+  source_resource_type?: string | null;
+  source_resource_id?: string | null;
+  trace_id?: string | null;
   created_at: string;
 }
 
@@ -86,6 +174,10 @@ export interface Incident {
   owner_user_id?: string | null;
   correlation_id?: string | null;
   source_event_id?: string | null;
+  source: string;
+  source_resource_type?: string | null;
+  source_resource_id?: string | null;
+  trace_id?: string | null;
   resolution_note?: string | null;
   started_at: string;
   acknowledged_at?: string | null;
@@ -143,6 +235,43 @@ export interface Rollout {
   created_at: string;
   updated_at: string;
   events: RolloutEvent[];
+}
+
+export interface TelemetryDerivationResponse {
+  slo_measurements: SloMeasurement[];
+  cost_events: CostEvent[];
+  incidents: Incident[];
+  examined_tool_runtime_actions: number;
+  examined_runtime_actions: number;
+  skipped_duplicate_cost_events: number;
+}
+
+export function listObservabilityTraces(
+  params: ObservabilityParams = {},
+  tenantContext?: TenantContext
+) {
+  return apiClient.request<ObservabilityTrace[]>(
+    `/observability/traces${queryString(params)}`,
+    { tenantContext }
+  );
+}
+
+export function getObservabilityTraceDetail(traceId: string, tenantContext?: TenantContext) {
+  return apiClient.request<ObservabilityTraceDetail>(
+    `/observability/traces/${encodeURIComponent(traceId)}`,
+    { tenantContext }
+  );
+}
+
+export function createObservabilityEvalResult(
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
+  return apiClient.request<ObservabilityEvalResult>("/observability/eval-results", {
+    method: "POST",
+    body,
+    tenantContext
+  });
 }
 
 export function createObservabilitySlo(
@@ -210,6 +339,17 @@ export function createObservabilityCostEvent(
 
 export function getObservabilityCosts(tenantContext?: TenantContext) {
   return apiClient.request<CostDashboard>("/observability/costs", { tenantContext });
+}
+
+export function deriveObservabilityTelemetry(
+  body: Record<string, unknown>,
+  tenantContext?: TenantContext
+) {
+  return apiClient.request<TelemetryDerivationResponse>("/observability/telemetry/derive", {
+    method: "POST",
+    body,
+    tenantContext
+  });
 }
 
 export function createObservabilityIncident(
@@ -382,6 +522,23 @@ export function useObservabilityRollouts(params: ObservabilityParams = {}) {
   return useQuery({
     queryKey: scopedQueryKey(["observability", "rollouts", params], scope),
     queryFn: () => listObservabilityRollouts(params, scope.context)
+  });
+}
+
+export function useObservabilityTraces(params: ObservabilityParams = {}) {
+  const scope = useTenantQueryScope();
+  return useQuery({
+    queryKey: scopedQueryKey(["observability", "traces", params], scope),
+    queryFn: () => listObservabilityTraces(params, scope.context)
+  });
+}
+
+export function useObservabilityTraceDetail(traceId?: string | null) {
+  const scope = useTenantQueryScope();
+  return useQuery({
+    enabled: Boolean(traceId),
+    queryKey: scopedQueryKey(["observability", "trace-detail", traceId], scope),
+    queryFn: () => getObservabilityTraceDetail(traceId ?? "", scope.context)
   });
 }
 

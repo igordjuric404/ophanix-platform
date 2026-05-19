@@ -34,7 +34,11 @@ const slo = {
       burn_rate: 0.1,
       status: "healthy",
       metadata: { source: "test" },
-      measured_at: "2026-05-02T00:00:00Z"
+      measured_at: "2026-05-02T00:00:00Z",
+      source: "runtime_telemetry",
+      source_resource_type: "telemetry_window",
+      source_resource_id: "window_1",
+      trace_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     },
     {
       id: "slomeas_0",
@@ -46,7 +50,11 @@ const slo = {
       burn_rate: 0.2,
       status: "healthy",
       metadata: { source: "test" },
-      measured_at: "2026-05-01T00:00:00Z"
+      measured_at: "2026-05-01T00:00:00Z",
+      source: "manual",
+      source_resource_type: null,
+      source_resource_id: null,
+      trace_id: null
     }
   ]
 };
@@ -82,6 +90,10 @@ const costs = {
       amount: 1.25,
       units: 1000,
       correlation_id: "corr_cost",
+      source: "runtime_telemetry",
+      source_resource_type: "tool_runtime_action",
+      source_resource_id: "toolrun_1",
+      trace_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       created_at: "2026-05-01T00:00:00Z"
     }
   ],
@@ -111,6 +123,10 @@ const incident = {
   owner_user_id: null,
   correlation_id: "corr_inc",
   source_event_id: "evt_1",
+  source: "runtime_telemetry",
+  source_resource_type: "cost_budget",
+  source_resource_id: "costbud_1",
+  trace_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   resolution_note: null,
   started_at: "2026-05-01T00:00:00Z",
   acknowledged_at: null,
@@ -170,6 +186,118 @@ const rollout = {
   ]
 };
 
+const trace = {
+  id: "trace_1",
+  organization_id: "org_default",
+  environment_id: "env_default",
+  trace_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  name: "Refund investigation trace",
+  status: "ok",
+  agent_id: "agent_1",
+  runtime_session_id: "rtssn_1",
+  correlation_id: "corr_trace",
+  metadata: { scenario: "refund" },
+  started_at: "2026-05-01T00:00:00Z",
+  ended_at: "2026-05-01T00:00:02Z",
+  created_by: "user_1",
+  created_at: "2026-05-01T00:00:00Z",
+  updated_at: "2026-05-01T00:00:02Z"
+};
+
+const traceDetail = {
+  trace,
+  spans: [
+    {
+      id: "span_1",
+      trace_id: trace.trace_id,
+      span_id: "bbbbbbbbbbbbbbbb",
+      parent_span_id: null,
+      span_kind: "tool",
+      name: "lookup_order",
+      status: "ok",
+      start_time: "2026-05-01T00:00:01Z",
+      end_time: "2026-05-01T00:00:02Z",
+      latency_ms: 1000,
+      resource_type: "tool",
+      resource_id: "lookup_order",
+      attributes: { "tool.name": "lookup_order" },
+      created_at: "2026-05-01T00:00:01Z"
+    }
+  ],
+  runtime_sessions: [
+    {
+      id: "rtssn_1",
+      agent_id: "agent_1",
+      agent_name: "Claims Agent",
+      state: "active",
+      started_at: "2026-05-01T00:00:00Z"
+    }
+  ],
+  runs: [
+    {
+      id: "rtssn_1",
+      agent_id: "agent_1",
+      agent_name: "Claims Agent",
+      state: "active",
+      started_at: "2026-05-01T00:00:00Z"
+    }
+  ],
+  runtime_actions: [],
+  tool_runtime_actions: [],
+  mcp_tool_calls: [],
+  policy_evaluations: [],
+  eval_results: [
+    {
+      id: "eval_1",
+      organization_id: "org_default",
+      environment_id: "env_default",
+      trace_id: trace.trace_id,
+      span_id: "bbbbbbbbbbbbbbbb",
+      dataset_id: "dataset_refunds",
+      dataset_name: "Refund QA",
+      evaluator_name: "groundedness",
+      score: 0.94,
+      label: "pass",
+      passed: true,
+      feedback: { note: "cited policy source" },
+      metadata: { run_id: "eval_run_1" },
+      created_by: "user_1",
+      created_at: "2026-05-01T00:00:03Z"
+    }
+  ],
+  annotations: [],
+  feedback: [],
+  artifacts: [],
+  model_calls: [],
+  timeline: [
+    {
+      kind: "runtime_session",
+      id: "rtssn_1",
+      name: "Claims Agent",
+      status: "active",
+      timestamp: "2026-05-01T00:00:00Z",
+      span_id: null
+    },
+    {
+      kind: "span",
+      id: "span_1",
+      name: "lookup_order",
+      status: "ok",
+      timestamp: "2026-05-01T00:00:01Z",
+      span_id: "bbbbbbbbbbbbbbbb",
+      parent_span_id: null
+    },
+    {
+      kind: "eval_result",
+      id: "eval_1",
+      name: "groundedness",
+      status: "passed",
+      timestamp: "2026-05-01T00:00:03Z",
+      span_id: "bbbbbbbbbbbbbbbb"
+    }
+  ]
+};
+
 describe("ObservabilityPage", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -180,16 +308,23 @@ describe("ObservabilityPage", () => {
 
     renderWithQueryClient(<ObservabilityPage />);
 
+    expect(await screen.findByRole("heading", { name: "Trace Timeline" })).toBeInTheDocument();
+    expect(await screen.findByText("Refund investigation trace")).toBeInTheDocument();
+    expect(await screen.findByText("lookup_order")).toBeInTheDocument();
+    expect((await screen.findAllByText("groundedness")).length).toBeGreaterThan(0);
     expect(await screen.findByRole("heading", { name: "SLO Objectives" })).toBeInTheDocument();
     expect(await screen.findByText("Task Success")).toBeInTheDocument();
     expect(screen.getByText("SLO Trend")).toBeInTheDocument();
     expect(screen.getByText("98.00%")).toBeInTheDocument();
+    expect(screen.getAllByText("Runtime Telemetry").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("May 2").length).toBeGreaterThan(0);
     expect(screen.getByText("Cost Distribution")).toBeInTheDocument();
     expect(screen.getByText("openai")).toBeInTheDocument();
     expect(screen.getByText("gpt")).toBeInTheDocument();
-    expect(screen.getByText("agent_1")).toBeInTheDocument();
+    expect(screen.getAllByText("agent_1").length).toBeGreaterThan(0);
     expect(screen.getAllByText("$12.50").length).toBeGreaterThan(0);
     expect(await screen.findByText("Denial Spike")).toBeInTheDocument();
+    expect(screen.getByText(/trace aaaaaaaa/)).toBeInTheDocument();
     expect(await screen.findByText("Latency Drill")).toBeInTheDocument();
     expect(await screen.findByText("Claims Canary")).toBeInTheDocument();
   });
@@ -330,6 +465,8 @@ describe("ObservabilityPage", () => {
 
 function mockObservabilityFetch(
   overrides: {
+    traces?: unknown[];
+    traceDetail?: unknown;
     slos?: unknown[];
     costs?: unknown;
     incidents?: unknown[];
@@ -338,6 +475,8 @@ function mockObservabilityFetch(
   } = {}
 ) {
   const requests: Array<{ url: string; method: string; body?: unknown }> = [];
+  const tracesPayload = overrides.traces ?? [trace];
+  const traceDetailPayload = overrides.traceDetail ?? traceDetail;
   const slosPayload = overrides.slos ?? [slo];
   const costsPayload = overrides.costs ?? costs;
   const incidentsPayload = overrides.incidents ?? [incident];
@@ -352,6 +491,12 @@ function mockObservabilityFetch(
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
       requests.push({ url: path, method, body });
 
+      if (path === "/api/v1/observability/traces" && method === "GET") {
+        return json(tracesPayload);
+      }
+      if (path === `/api/v1/observability/traces/${trace.trace_id}` && method === "GET") {
+        return json(traceDetailPayload);
+      }
       if (path === "/api/v1/observability/slo" && method === "GET") {
         return json(slosPayload);
       }

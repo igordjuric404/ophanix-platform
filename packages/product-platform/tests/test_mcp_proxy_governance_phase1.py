@@ -50,6 +50,9 @@ rules:
 defaults:
   action: allow
 """
+TRACE_ID = "88888888888888888888888888888888"
+PARENT_SPAN_ID = "9999999999999999"
+TRACEPARENT = f"00-{TRACE_ID}-{PARENT_SPAN_ID}-01"
 
 
 class MCPProxyGovernancePhase1Tests(unittest.TestCase):
@@ -82,11 +85,11 @@ class MCPProxyGovernancePhase1Tests(unittest.TestCase):
         self.assertEqual(login.status_code, 200)
         self.token = login.json()["access_token"]
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, correlation_id: str = "corr-real-mcp") -> dict[str, str]:
         return {
             "Authorization": f"Bearer {self.token}",
             "X-Environment-ID": "env_default",
-            "X-Correlation-ID": "corr-real-mcp",
+            "X-Correlation-ID": correlation_id,
         }
 
     def _insert_agent(self, connection: Any, agent_id: str, name: str, score: int) -> None:
@@ -233,6 +236,46 @@ class MCPProxyGovernancePhase1Tests(unittest.TestCase):
         self.assertEqual(payload["upstream_request"]["method"], "tools/call")
         self.assertEqual(payload["upstream_response_metadata"]["jsonrpc"], "2.0")
         self.assertEqual(self.mcp_server.methods, ["tools/call"])
+
+    def test_proxy_call_records_w3c_trace_context(self) -> None:
+        server, tool = self._create_real_server_and_discover()
+        headers = self._headers("corr-real-mcp-trace")
+        headers.update(
+            {
+                "traceparent": TRACEPARENT,
+                "tracestate": "vendor=mcp",
+                "baggage": "tenant=demo,mcp=real",
+            }
+        )
+
+        response = self.client.post(
+            "/api/v1/mcp/proxy/call",
+            headers=headers,
+            json={
+                "source_agent_id": "agent_high",
+                "server_id": server["id"],
+                "tool_id": tool["id"],
+                "params": {"order_id": "ORD-TRACE-1"},
+            },
+        )
+
+        self.assertEqual(response.status_code, 201, response.text)
+        payload = response.json()
+        self.assertEqual(response.headers["traceparent"].split("-")[1], TRACE_ID)
+        self.assertEqual(payload["trace_id"], TRACE_ID)
+        self.assertRegex(payload["span_id"], r"^[0-9a-f]{16}$")
+        self.assertEqual(payload["parent_span_id"], PARENT_SPAN_ID)
+        self.assertEqual(payload["traceparent"].split("-")[1], TRACE_ID)
+        self.assertEqual(payload["tracestate"], "vendor=mcp")
+        self.assertEqual(payload["baggage"], "tenant=demo,mcp=real")
+
+        row = self.database.connect().execute(
+            "SELECT trace_id, span_id, parent_span_id, traceparent, tracestate, baggage "
+            "FROM mcp_tool_calls WHERE id = ?",
+            (payload["id"],),
+        ).fetchone()
+        self.assertEqual(row["trace_id"], TRACE_ID)
+        self.assertEqual(row["parent_span_id"], PARENT_SPAN_ID)
 
     def test_demo_adapter_is_rejected_in_production(self) -> None:
         with self.assertRaisesRegex(ValueError, "Demo MCP adapter cannot be selected in production"):

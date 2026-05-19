@@ -290,6 +290,12 @@ class MCPToolCallResponse(BaseModel):
     sanitizer_action: str | None = None
     latency_ms: int
     correlation_id: str | None = None
+    trace_id: str | None = None
+    span_id: str | None = None
+    parent_span_id: str | None = None
+    traceparent: str | None = None
+    tracestate: str | None = None
+    baggage: str | None = None
     created_at: str
 
 

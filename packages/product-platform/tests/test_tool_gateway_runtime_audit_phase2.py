@@ -35,6 +35,9 @@ OUTPUT_SCHEMA = {
     },
     "required": ["claim_status"],
 }
+TRACE_ID = "44444444444444444444444444444444"
+PARENT_SPAN_ID = "5555555555555555"
+TRACEPARENT = f"00-{TRACE_ID}-{PARENT_SPAN_ID}-01"
 
 
 class FakeRuntimeExecutor:
@@ -125,6 +128,32 @@ class ToolGatewayRuntimeAuditPhase2Tests(unittest.TestCase):
         self.assertIsNotNone(action["decision_id"])
         self.assertNotIn("payload-secret", str(dict(action)))
         self.assertEqual(self._event_types(action["id"]), ["tool.runtime.denied"])
+
+    def test_integration_invocation_records_w3c_trace_context(self) -> None:
+        headers = self._gateway_headers(request_id="req-runtime-trace")
+        headers.update(
+            {
+                "traceparent": TRACEPARENT,
+                "tracestate": "vendor=tool-gateway",
+                "baggage": "tenant=demo,tool=claims",
+            }
+        )
+
+        response = self.client.post(
+            "/api/v1/tools/claims.runtime/invoke",
+            headers=headers,
+            json={"payload": {"claim_id": "claim_123"}},
+        )
+
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.headers["traceparent"].split("-")[1], TRACE_ID)
+        action = self._runtime_actions()[0]
+        self.assertEqual(action["trace_id"], TRACE_ID)
+        self.assertRegex(action["span_id"], r"^[0-9a-f]{16}$")
+        self.assertEqual(action["parent_span_id"], PARENT_SPAN_ID)
+        self.assertEqual(action["traceparent"].split("-")[1], TRACE_ID)
+        self.assertEqual(action["tracestate"], "vendor=tool-gateway")
+        self.assertEqual(action["baggage"], "tenant=demo,tool=claims")
 
     def test_integration_allowed_invocation_writes_forwarded_and_completed_states(self) -> None:
         permission_id = self._grant_permission()

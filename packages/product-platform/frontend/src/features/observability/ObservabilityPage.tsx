@@ -1,4 +1,4 @@
-import { Activity, AlertTriangle, CircleDollarSign, FlaskConical, Gauge } from "lucide-react";
+import { Activity, AlertTriangle, CircleDollarSign, FlaskConical, Gauge, GitBranch } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import {
   Bar,
@@ -32,11 +32,15 @@ import {
   useObservabilityMutation,
   useObservabilityRollouts,
   useObservabilitySlos,
+  useObservabilityTraceDetail,
+  useObservabilityTraces,
   type ChaosExperiment,
   type ChaosRun,
   type CostDashboard,
   type Incident,
   type ObservabilityParams,
+  type ObservabilityTrace,
+  type ObservabilityTraceDetail,
   type Rollout,
   type SloObjective
 } from "../../api/observability";
@@ -83,9 +87,11 @@ export function ObservabilityPage() {
   const [incidentFilters, setIncidentFilters] = useState<ObservabilityParams>({});
   const [chaosFilters, setChaosFilters] = useState<ObservabilityParams>({});
   const [rolloutFilters, setRolloutFilters] = useState<ObservabilityParams>({});
+  const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
   const [chaosRuns, setChaosRuns] = useState<ChaosRun[]>([]);
   const { feedback, runWithFeedback, setError } = useActionFeedback();
 
+  const tracesQuery = useObservabilityTraces();
   const slosQuery = useObservabilitySlos();
   const costsQuery = useObservabilityCosts();
   const incidentsQuery = useObservabilityIncidents(incidentFilters);
@@ -93,11 +99,15 @@ export function ObservabilityPage() {
   const rolloutsQuery = useObservabilityRollouts(rolloutFilters);
   const mutation = useObservabilityMutation();
 
+  const traces = tracesQuery.data ?? [];
   const slos = slosQuery.data ?? [];
   const costs = costsQuery.data ?? emptyCostDashboard();
   const incidents = incidentsQuery.data ?? [];
   const experiments = chaosQuery.data ?? [];
   const rollouts = rolloutsQuery.data ?? [];
+  const activeTraceId = selectedTraceId ?? traces[0]?.trace_id ?? null;
+  const traceDetailQuery = useObservabilityTraceDetail(activeTraceId);
+  const traceDetail = traceDetailQuery.data ?? null;
 
   async function runTask(label: string, task: (tenantContext: TenantContext) => Promise<unknown>) {
     await runWithFeedback(() => mutation.mutateAsync(task), {
@@ -133,6 +143,8 @@ export function ObservabilityPage() {
         <ActionFeedback feedback={feedback} />
         <QueryErrorSummary
           items={[
+            { error: tracesQuery.error, isError: tracesQuery.isError, label: "Traces", onRetry: () => void tracesQuery.refetch() },
+            { error: traceDetailQuery.error, isError: traceDetailQuery.isError, label: "Trace detail", onRetry: () => void traceDetailQuery.refetch() },
             { error: slosQuery.error, isError: slosQuery.isError, label: "SLOs", onRetry: () => void slosQuery.refetch() },
             { error: costsQuery.error, isError: costsQuery.isError, label: "Costs", onRetry: () => void costsQuery.refetch() },
             { error: incidentsQuery.error, isError: incidentsQuery.isError, label: "Incidents", onRetry: () => void incidentsQuery.refetch() },
@@ -140,7 +152,14 @@ export function ObservabilityPage() {
             { error: rolloutsQuery.error, isError: rolloutsQuery.isError, label: "Rollouts", onRetry: () => void rolloutsQuery.refetch() }
           ]}
         />
-        <ObservabilitySummary costs={costs} incidents={incidents} rollouts={rollouts} slos={slos} />
+        <ObservabilitySummary costs={costs} incidents={incidents} rollouts={rollouts} slos={slos} traces={traces} />
+        <TracePanel
+          activeTraceId={activeTraceId}
+          detail={traceDetail}
+          isLoading={traceDetailQuery.isLoading}
+          onSelect={setSelectedTraceId}
+          traces={traces}
+        />
         <div className="grid gap-6 2xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
           <SloPanel
             onCreate={(payload) =>
@@ -248,19 +267,204 @@ function ObservabilitySummary({
   costs,
   incidents,
   rollouts,
-  slos
+  slos,
+  traces
 }: {
   costs: CostDashboard;
   incidents: Incident[];
   rollouts: Rollout[];
   slos: SloObjective[];
+  traces: ObservabilityTrace[];
 }) {
   return (
-    <div className="grid gap-4 md:grid-cols-4">
+    <div className="grid gap-4 md:grid-cols-5">
+      <Metric icon={<GitBranch className="h-4 w-4" />} label="Traces" value={traces.length} />
       <Metric icon={<Gauge className="h-4 w-4" />} label="SLOs" value={slos.length} />
       <Metric icon={<CircleDollarSign className="h-4 w-4" />} label="Total Cost" value={formatMoney(costs.total_amount)} />
       <Metric icon={<AlertTriangle className="h-4 w-4" />} label="Open Incidents" value={incidents.filter((item) => item.status !== "resolved").length} />
       <Metric icon={<Activity className="h-4 w-4" />} label="Rollouts" value={rollouts.length} />
+    </div>
+  );
+}
+
+function TracePanel({
+  activeTraceId,
+  detail,
+  isLoading,
+  onSelect,
+  traces
+}: {
+  activeTraceId: string | null;
+  detail: ObservabilityTraceDetail | null;
+  isLoading: boolean;
+  onSelect: (traceId: string) => void;
+  traces: ObservabilityTrace[];
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Trace Timeline</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {traces.length === 0 ? (
+          <EmptyState title="No traces" description="Runtime trace evidence appears after traces or linked runs are recorded." />
+        ) : (
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,0.38fr)_minmax(0,0.62fr)]">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Trace</TableHead>
+                  <TableHead>Agent</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Open</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {traces.map((trace) => (
+                  <TableRow data-observability-trace-row={trace.trace_id} key={trace.id}>
+                    <TableCell>
+                      <div className="max-w-56 break-all font-medium">{trace.name}</div>
+                      <div className="max-w-56 break-all text-xs text-muted-foreground">{trace.trace_id}</div>
+                    </TableCell>
+                    <TableCell>{trace.agent_id ?? "n/a"}</TableCell>
+                    <TableCell>
+                      <StatusBadge status={trace.status} />
+                    </TableCell>
+                    <TableCell>
+                      <Button
+                        onClick={() => onSelect(trace.trace_id)}
+                        type="button"
+                        variant={activeTraceId === trace.trace_id ? "default" : "outline"}
+                      >
+                        View
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+            <TraceDetailPanel detail={detail} isLoading={isLoading} />
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function TraceDetailPanel({
+  detail,
+  isLoading
+}: {
+  detail: ObservabilityTraceDetail | null;
+  isLoading: boolean;
+}) {
+  if (isLoading) {
+    return <EmptyState title="Loading trace" description="Fetching trace timeline." />;
+  }
+  if (!detail) {
+    return <EmptyState title="No trace selected" description="Select a trace to inspect runtime evidence." />;
+  }
+  const timeline = detail.timeline.length > 0 ? detail.timeline : spansToTimeline(detail);
+  return (
+    <div className="space-y-4" data-observability-trace-detail={detail.trace.trace_id}>
+      <div className="grid gap-3 sm:grid-cols-4">
+        <Metric label="Spans" value={detail.spans.length} />
+        <Metric label="Runs" value={detail.runs.length} />
+        <Metric label="Tool Calls" value={detail.tool_runtime_actions.length + detail.mcp_tool_calls.length} />
+        <Metric label="Evals" value={detail.eval_results.length} />
+      </div>
+      <div className="rounded-md border bg-muted/20 p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="max-w-full break-all text-sm font-medium">{detail.trace.name}</div>
+            <div className="max-w-full break-all text-xs text-muted-foreground">{detail.trace.trace_id}</div>
+          </div>
+          <StatusBadge status={detail.trace.status} />
+        </div>
+        {timeline.length === 0 ? (
+          <div className="mt-4">
+            <EmptyState title="No timeline entries" description="Spans and linked runtime records appear here." />
+          </div>
+        ) : (
+          <ol className="mt-4 space-y-2" data-observability-trace-timeline={detail.trace.trace_id}>
+            {timeline.map((entry) => (
+              <li className="rounded-md border bg-card p-3" key={`${entry.kind}-${entry.id}`}>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="font-medium">{entry.name}</div>
+                    <div className="text-xs text-muted-foreground">
+                      {entry.kind}
+                      {entry.span_id ? ` span ${entry.span_id}` : ""}
+                    </div>
+                  </div>
+                  <StatusBadge status={entry.status} />
+                </div>
+                <div className="mt-2 text-xs text-muted-foreground">{formatDate(entry.timestamp)}</div>
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
+      <TraceEvidenceTables detail={detail} />
+    </div>
+  );
+}
+
+function TraceEvidenceTables({ detail }: { detail: ObservabilityTraceDetail }) {
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      <div className="rounded-md border p-3">
+        <div className="mb-2 text-sm font-medium">Runtime Runs</div>
+        {detail.runs.length === 0 ? (
+          <EmptyState title="No runs" description="Linked runtime sessions appear here." />
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Run</TableHead>
+                <TableHead>Agent</TableHead>
+                <TableHead>Status</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {detail.runs.map((run) => (
+                <TableRow key={String(run.id)}>
+                  <TableCell className="break-all">{String(run.id)}</TableCell>
+                  <TableCell>{String(run.agent_id ?? "n/a")}</TableCell>
+                  <TableCell>
+                    <StatusBadge status={String(run.state ?? "unknown")} />
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </div>
+      <div className="rounded-md border p-3">
+        <div className="mb-2 text-sm font-medium">Eval Results</div>
+        {detail.eval_results.length === 0 ? (
+          <EmptyState title="No evals" description="Trace-linked eval results appear here." />
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Evaluator</TableHead>
+                <TableHead>Dataset</TableHead>
+                <TableHead>Score</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {detail.eval_results.map((result) => (
+                <TableRow key={result.id}>
+                  <TableCell>{result.evaluator_name}</TableCell>
+                  <TableCell>{result.dataset_name ?? result.dataset_id ?? "n/a"}</TableCell>
+                  <TableCell>{result.score == null ? "n/a" : result.score.toFixed(2)}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </div>
     </div>
   );
 }
@@ -312,6 +516,8 @@ function SloPanel({
                 <TableHead>Target</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Burn</TableHead>
+                <TableHead>Source</TableHead>
+                <TableHead>Freshness</TableHead>
                 <TableHead>Measure</TableHead>
                 <TableHead>Trend</TableHead>
               </TableRow>
@@ -329,6 +535,8 @@ function SloPanel({
                       <StatusBadge status={latest?.status ?? slo.status} />
                     </TableCell>
                     <TableCell>{latest ? latest.burn_rate.toFixed(2) : "n/a"}</TableCell>
+                    <TableCell>{formatSourceLabel(latest?.source)}</TableCell>
+                    <TableCell>{latest ? formatFreshness(latest.measured_at) : "n/a"}</TableCell>
                     <TableCell>
                       <form
                         className="flex gap-2"
@@ -548,6 +756,7 @@ function CostPanel({
 
 function CostDistributionChart({ costs }: { costs: CostDashboard }) {
   const rows = costDistributionRows(costs);
+  const latestEvent = costs.events[0] ?? null;
 
   return (
     <div className="rounded-md border bg-muted/20 p-4" data-observability-cost-chart>
@@ -557,6 +766,11 @@ function CostDistributionChart({ costs }: { costs: CostDashboard }) {
           <p className="text-xs text-muted-foreground">
             Spend grouped by provider, model, and governed target.
           </p>
+          {latestEvent ? (
+            <p className="text-xs text-muted-foreground">
+              {formatSourceLabel(latestEvent.source)} · {formatFreshness(latestEvent.created_at)}
+            </p>
+          ) : null}
         </div>
         <div className="text-sm font-semibold">{formatMoney(costs.total_amount)}</div>
       </div>
@@ -676,6 +890,10 @@ function IncidentPanel({
                       <TableCell>
                         <div className="font-medium">{incident.title}</div>
                         <div className="text-xs text-muted-foreground">{incident.correlation_id ?? "no correlation"}</div>
+                        <div className="text-xs text-muted-foreground">
+                          {formatSourceLabel(incident.source)}
+                          {incident.trace_id ? ` · ${shortTrace(incident.trace_id)}` : ""}
+                        </div>
                       </TableCell>
                       <TableCell>{incident.severity}</TableCell>
                       <TableCell>
@@ -1324,6 +1542,28 @@ function formatMoney(value: number) {
   return `$${Number(value ?? 0).toFixed(2)}`;
 }
 
+function formatSourceLabel(source?: string | null) {
+  if (!source) {
+    return "Unknown";
+  }
+  return source
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function formatFreshness(value?: string | null) {
+  if (!value) {
+    return "n/a";
+  }
+  return formatShortDate(value);
+}
+
+function shortTrace(traceId: string) {
+  return `trace ${traceId.slice(0, 8)}`;
+}
+
 function costDistributionRows(costs: CostDashboard) {
   return [
     ...Object.entries(costs.by_provider).map(([name, amount]) => ({
@@ -1372,6 +1612,31 @@ function formatShortDate(value: string) {
     return value;
   }
   return parsed.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+function formatDate(value: string) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toLocaleString("en-US", {
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    month: "short"
+  });
+}
+
+function spansToTimeline(detail: ObservabilityTraceDetail): ObservabilityTraceDetail["timeline"] {
+  return detail.spans.map((span) => ({
+    id: span.id,
+    kind: "span",
+    name: span.name,
+    parent_span_id: span.parent_span_id,
+    span_id: span.span_id,
+    status: span.status,
+    timestamp: span.start_time
+  }));
 }
 
 function numberValue(value: unknown, fieldName: string) {

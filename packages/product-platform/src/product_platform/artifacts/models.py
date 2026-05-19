@@ -14,8 +14,18 @@ class ArtifactCreateRequest(BaseModel):
     name: str = Field(min_length=1)
     content_type: str = "application/octet-stream"
     content_base64: str = Field(min_length=1)
+    retention_policy: str = Field(default="standard", min_length=1)
+    redaction_classification: str = Field(default="internal", min_length=1)
+    provenance: dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("artifact_type", "name", "content_type", "content_base64")
+    @field_validator(
+        "artifact_type",
+        "name",
+        "content_type",
+        "content_base64",
+        "retention_policy",
+        "redaction_classification",
+    )
     @classmethod
     def _strip_string(cls, value: str) -> str:
         stripped = value.strip()
@@ -78,6 +88,9 @@ class ArtifactAttestationResponse(BaseModel):
     attested_by: str
     statement: str
     signature_ref: str | None = None
+    artifact_checksum: str | None = None
+    digest_algorithm: str = "sha256"
+    signer_user_id: str | None = None
     created_at: str
 
 
@@ -90,7 +103,11 @@ class ArtifactResponse(BaseModel):
     content_type: str
     storage_uri: str
     checksum: str
+    digest_algorithm: str = "sha256"
     size_bytes: int
+    retention_policy: str = "standard"
+    redaction_classification: str = "internal"
+    provenance: dict[str, Any] = Field(default_factory=dict)
     created_by: str
     created_at: str
     links: list[ArtifactLinkResponse] = Field(default_factory=list)

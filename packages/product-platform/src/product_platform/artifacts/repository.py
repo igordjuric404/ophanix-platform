@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import base64
+import builtins
 import binascii
+import json
 import re
 from product_platform.db.postgres import Connection, IntegrityError, Row
 
@@ -22,11 +24,18 @@ from product_platform.db.time import utc_now_iso
 
 
 SUPPORTED_ARTIFACT_TARGET_TYPES = {
-    "workflow_run",
-    "plugin_assessment",
     "audit_export",
     "compliance_report",
     "evidence_item",
+    "mcp_tool_call",
+    "observability_eval_result",
+    "observability_span",
+    "observability_trace",
+    "plugin_assessment",
+    "runtime_action",
+    "runtime_session",
+    "tool_runtime_action",
+    "workflow_run",
 }
 
 
@@ -66,9 +75,11 @@ class ArtifactRepository:
             """
             INSERT INTO artifacts (
                 id, organization_id, environment_id, artifact_type, name,
-                content_type, storage_uri, checksum, size_bytes, created_by, created_at
+                content_type, storage_uri, checksum, digest_algorithm, size_bytes,
+                retention_policy, redaction_classification, provenance_json,
+                created_by, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 artifact_id,
@@ -79,7 +90,11 @@ class ArtifactRepository:
                 body.content_type,
                 storage_uri,
                 calculate_sha256(data),
+                "sha256",
                 len(data),
+                body.retention_policy,
+                body.redaction_classification,
+                json.dumps(body.provenance, sort_keys=True, separators=(",", ":")),
                 actor_id,
                 now,
             ),
@@ -89,7 +104,7 @@ class ArtifactRepository:
             raise ArtifactNotFoundError("Created artifact could not be loaded.")
         return row
 
-    def list(self, *, artifact_type: str | None = None) -> list[Row]:
+    def list(self, *, artifact_type: str | None = None) -> builtins.list[Row]:
         clauses = ["organization_id = ?", "environment_id = ?"]
         values: list[object] = [self.organization_id, self.environment_id]
         if artifact_type:
@@ -122,10 +137,15 @@ class ArtifactRepository:
         if row is None:
             raise ArtifactNotFoundError("Artifact not found.")
         data = self.storage.download(row["storage_uri"])
+        digest_verified = calculate_sha256(data) == row["checksum"]
         return ArtifactDownloadResponse(
             artifact=artifact_response(self, row),
             content_base64=base64.b64encode(data).decode("ascii"),
-            metadata={"checksum_verified": calculate_sha256(data) == row["checksum"]},
+            metadata={
+                "checksum_verified": digest_verified,
+                "digest_verified": digest_verified,
+                "digest_algorithm": row["digest_algorithm"] if "digest_algorithm" in row.keys() else "sha256",
+            },
         )
 
     def create_link(self, artifact_id: str, body: ArtifactLinkCreateRequest) -> Row:
@@ -166,7 +186,7 @@ class ArtifactRepository:
             raise ArtifactNotFoundError("Artifact link could not be loaded.")
         return row
 
-    def links_for_artifact(self, artifact_id: str) -> list[Row]:
+    def links_for_artifact(self, artifact_id: str) -> builtins.list[Row]:
         return self.connection.execute(
             """
             SELECT *
@@ -184,15 +204,17 @@ class ArtifactRepository:
         *,
         actor_id: str,
     ) -> Row:
-        if self.get(artifact_id) is None:
+        artifact = self.get(artifact_id)
+        if artifact is None:
             raise ArtifactNotFoundError("Artifact not found.")
         attestation_id = generate_id("aat")
         self.connection.execute(
             """
             INSERT INTO artifact_attestations (
-                id, artifact_id, attested_by, statement, signature_ref, created_at
+                id, artifact_id, attested_by, statement, signature_ref,
+                artifact_checksum, digest_algorithm, signer_user_id, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 attestation_id,
@@ -200,6 +222,9 @@ class ArtifactRepository:
                 actor_id,
                 body.statement,
                 body.signature_ref,
+                artifact["checksum"],
+                artifact["digest_algorithm"] if "digest_algorithm" in artifact.keys() else "sha256",
+                actor_id,
                 utc_now_iso(),
             ),
         )
@@ -218,7 +243,7 @@ class ArtifactRepository:
             raise ArtifactNotFoundError("Created artifact attestation could not be loaded.")
         return row
 
-    def attestations_for_artifact(self, artifact_id: str) -> list[Row]:
+    def attestations_for_artifact(self, artifact_id: str) -> builtins.list[Row]:
         return self.connection.execute(
             """
             SELECT aa.*
@@ -250,6 +275,53 @@ class ArtifactRepository:
                 "SELECT 1 FROM evidence_items WHERE id = ? AND organization_id = ? AND environment_id = ?",
                 (target_id, self.organization_id, self.environment_id),
             ),
+            "runtime_session": (
+                "SELECT 1 FROM runtime_sessions WHERE id = ? AND organization_id = ? AND environment_id = ?",
+                (target_id, self.organization_id, self.environment_id),
+            ),
+            "runtime_action": (
+                """
+                SELECT 1
+                FROM runtime_actions a
+                JOIN runtime_sessions s ON s.id = a.session_id
+                WHERE a.id = ?
+                  AND s.organization_id = ?
+                  AND s.environment_id = ?
+                """,
+                (target_id, self.organization_id, self.environment_id),
+            ),
+            "tool_runtime_action": (
+                "SELECT 1 FROM tool_runtime_actions WHERE id = ? AND organization_id = ? AND environment_id = ?",
+                (target_id, self.organization_id, self.environment_id),
+            ),
+            "mcp_tool_call": (
+                "SELECT 1 FROM mcp_tool_calls WHERE id = ? AND organization_id = ? AND environment_id = ?",
+                (target_id, self.organization_id, self.environment_id),
+            ),
+            "observability_trace": (
+                """
+                SELECT 1
+                FROM observability_traces
+                WHERE (id = ? OR trace_id = ?)
+                  AND organization_id = ?
+                  AND environment_id = ?
+                """,
+                (target_id, target_id, self.organization_id, self.environment_id),
+            ),
+            "observability_span": (
+                """
+                SELECT 1
+                FROM observability_spans
+                WHERE (id = ? OR span_id = ?)
+                  AND organization_id = ?
+                  AND environment_id = ?
+                """,
+                (target_id, target_id, self.organization_id, self.environment_id),
+            ),
+            "observability_eval_result": (
+                "SELECT 1 FROM observability_eval_results WHERE id = ? AND organization_id = ? AND environment_id = ?",
+                (target_id, self.organization_id, self.environment_id),
+            ),
             "plugin_assessment": (
                 """
                 SELECT 1
@@ -276,7 +348,13 @@ def artifact_response(repository: ArtifactRepository, row: Row) -> ArtifactRespo
         content_type=row["content_type"],
         storage_uri=row["storage_uri"],
         checksum=row["checksum"],
+        digest_algorithm=row["digest_algorithm"] if "digest_algorithm" in row.keys() else "sha256",
         size_bytes=row["size_bytes"],
+        retention_policy=row["retention_policy"] if "retention_policy" in row.keys() else "standard",
+        redaction_classification=row["redaction_classification"]
+        if "redaction_classification" in row.keys()
+        else "internal",
+        provenance=json.loads(row["provenance_json"]) if "provenance_json" in row.keys() else {},
         created_by=row["created_by"],
         created_at=row["created_at"],
         links=[artifact_link_response(link) for link in repository.links_for_artifact(row["id"])],
@@ -305,6 +383,9 @@ def artifact_attestation_response(row: Row) -> ArtifactAttestationResponse:
         attested_by=row["attested_by"],
         statement=row["statement"],
         signature_ref=row["signature_ref"],
+        artifact_checksum=row["artifact_checksum"] if "artifact_checksum" in row.keys() else None,
+        digest_algorithm=row["digest_algorithm"] if "digest_algorithm" in row.keys() else "sha256",
+        signer_user_id=row["signer_user_id"] if "signer_user_id" in row.keys() else row["attested_by"],
         created_at=row["created_at"],
     )
 

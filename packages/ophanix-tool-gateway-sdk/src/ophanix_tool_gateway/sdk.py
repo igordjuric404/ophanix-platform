@@ -663,6 +663,9 @@ class OphanixToolGatewayClient:
         payload: dict[str, Any],
         correlation_id: str | None = None,
         idempotency_key: str | None = None,
+        traceparent: str | None = None,
+        tracestate: str | None = None,
+        baggage: str | None = None,
     ) -> ToolCallResult:
         """Invoke one registered gateway tool with bearer authentication."""
 
@@ -681,6 +684,12 @@ class OphanixToolGatewayClient:
         normalized_idempotency_key = _optional_idempotency_key(idempotency_key)
         if normalized_idempotency_key is not None:
             headers["Idempotency-Key"] = normalized_idempotency_key
+        _set_optional_trace_context_headers(
+            headers,
+            traceparent=traceparent,
+            tracestate=tracestate,
+            baggage=baggage,
+        )
         self._emit_event(
             {
                 "event": "tool_call.start",
@@ -1445,6 +1454,9 @@ class AsyncOphanixToolGatewayClient:
         payload: dict[str, Any],
         correlation_id: str | None = None,
         idempotency_key: str | None = None,
+        traceparent: str | None = None,
+        tracestate: str | None = None,
+        baggage: str | None = None,
     ) -> ToolCallResult:
         """Invoke one registered gateway tool with bearer authentication."""
 
@@ -1463,6 +1475,12 @@ class AsyncOphanixToolGatewayClient:
         normalized_idempotency_key = _optional_idempotency_key(idempotency_key)
         if normalized_idempotency_key is not None:
             headers["Idempotency-Key"] = normalized_idempotency_key
+        _set_optional_trace_context_headers(
+            headers,
+            traceparent=traceparent,
+            tracestate=tracestate,
+            baggage=baggage,
+        )
         self._emit_event(
             {
                 "event": "tool_call.start",
@@ -2926,6 +2944,23 @@ def _optional_header_text(value: object | None, field_name: str) -> str | None:
     if _has_control_character(stripped):
         raise ToolGatewayValidationError(f"{field_name} must not contain header control characters")
     return stripped
+
+
+def _set_optional_trace_context_headers(
+    headers: dict[str, str],
+    *,
+    traceparent: str | None,
+    tracestate: str | None,
+    baggage: str | None,
+) -> None:
+    for header_name, field_name, value in (
+        ("traceparent", "traceparent", traceparent),
+        ("tracestate", "tracestate", tracestate),
+        ("baggage", "baggage", baggage),
+    ):
+        normalized = _optional_header_text(value, field_name)
+        if normalized is not None:
+            headers[header_name] = normalized
 
 
 def _optional_idempotency_key(value: object | None) -> str | None:

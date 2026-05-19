@@ -38,6 +38,12 @@ class JobStateRepository:
         scheduled_at: str | None = None,
         max_attempts: int = 3,
         job_id: str | None = None,
+        trace_id: str | None = None,
+        span_id: str | None = None,
+        parent_span_id: str | None = None,
+        traceparent: str | None = None,
+        tracestate: str | None = None,
+        baggage: str | None = None,
     ) -> Row:
         now = utc_now_iso()
         resolved_id = job_id or generate_id("job")
@@ -45,9 +51,11 @@ class JobStateRepository:
             """
             INSERT INTO background_jobs (
                 id, organization_id, environment_id, job_type, status, payload_json,
-                scheduled_at, attempts, max_attempts, created_at, updated_at
+                scheduled_at, attempts, max_attempts,
+                trace_id, span_id, parent_span_id, traceparent, tracestate, baggage,
+                created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 resolved_id,
@@ -59,6 +67,12 @@ class JobStateRepository:
                 scheduled_at,
                 0,
                 max_attempts,
+                trace_id,
+                span_id,
+                parent_span_id,
+                traceparent,
+                tracestate,
+                baggage,
                 now,
                 now,
             ),

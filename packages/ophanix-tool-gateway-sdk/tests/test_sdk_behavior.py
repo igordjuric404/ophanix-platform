@@ -38,6 +38,9 @@ TOOL_FIXTURE = {
     "input_schema_json": {"type": "object"},
     "output_schema_json": {"type": "object"},
 }
+TRACE_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+PARENT_SPAN_ID = "bbbbbbbbbbbbbbbb"
+TRACEPARENT = f"00-{TRACE_ID}-{PARENT_SPAN_ID}-01"
 
 
 class StandaloneSdkBehaviorTests(unittest.TestCase):
@@ -188,6 +191,39 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
             [event["event"] for event in events if event["event"] == "tool_call.retry"],
             ["tool_call.retry"],
         )
+
+    def test_call_tool_sends_w3c_trace_context_headers(self) -> None:
+        calls: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            return httpx.Response(
+                200,
+                json={
+                    "request_id": "req-trace",
+                    "correlation_id": "corr-trace",
+                    "tool_name": "claims.lookup",
+                    "result": {"ok": True},
+                    "error": None,
+                },
+            )
+
+        client = _client(handler)
+
+        result = client.call_tool(
+            "claims.lookup",
+            {"claim_id": "claim_123"},
+            correlation_id="corr-trace",
+            traceparent=TRACEPARENT,
+            tracestate="vendor=sdk",
+            baggage="tenant=demo,tool=claims",
+        )
+
+        self.assertEqual(result.result, {"ok": True})
+        self.assertEqual(calls[0].headers["traceparent"], TRACEPARENT)
+        self.assertEqual(calls[0].headers["tracestate"], "vendor=sdk")
+        self.assertEqual(calls[0].headers["baggage"], "tenant=demo,tool=claims")
+        self.assertEqual(calls[0].headers["X-Correlation-ID"], "corr-trace")
 
     def test_call_tool_does_not_retry_retryable_status_without_idempotency_key(self) -> None:
         calls = 0

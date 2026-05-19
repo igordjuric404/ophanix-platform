@@ -61,6 +61,12 @@ class JobResponse(BaseModel):
     attempts: int
     max_attempts: int
     error_message: str | None
+    trace_id: str | None = None
+    span_id: str | None = None
+    parent_span_id: str | None = None
+    traceparent: str | None = None
+    tracestate: str | None = None
+    baggage: str | None = None
     created_at: str
     updated_at: str
     runs: list[JobRunResponse] = Field(default_factory=list)
@@ -158,6 +164,12 @@ def job_response(row: Row, runs: list[Row]) -> JobResponse:
         attempts=row["attempts"],
         max_attempts=row["max_attempts"],
         error_message=row["error_message"],
+        trace_id=_optional_row_value(row, "trace_id"),
+        span_id=_optional_row_value(row, "span_id"),
+        parent_span_id=_optional_row_value(row, "parent_span_id"),
+        traceparent=_optional_row_value(row, "traceparent"),
+        tracestate=_optional_row_value(row, "tracestate"),
+        baggage=_optional_row_value(row, "baggage"),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         runs=[job_run_response(run) for run in runs],
@@ -195,3 +207,7 @@ def _normalize_timezone_aware_datetime(value: str | None, field_name: str) -> st
     if parsed.tzinfo is None:
         raise ValueError(f"{field_name} must include a timezone.")
     return parsed.isoformat()
+
+
+def _optional_row_value(row: Row, key: str) -> str | None:
+    return row[key] if key in row.keys() else None

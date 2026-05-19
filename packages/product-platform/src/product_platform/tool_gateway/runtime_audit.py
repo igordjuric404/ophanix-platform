@@ -29,6 +29,14 @@ TOOL_RUNTIME_ACTION_STATUSES = {
     "response_blocked",
     "completed",
 }
+TELEMETRY_DERIVATION_ACTION_STATUSES = {
+    "authentication_failed",
+    "denied",
+    "validation_failed",
+    "upstream_failed",
+    "response_blocked",
+    "completed",
+}
 
 
 class ToolRuntimeActionCreate(BaseModel):
@@ -36,6 +44,12 @@ class ToolRuntimeActionCreate(BaseModel):
 
     request_id: str = Field(min_length=1)
     correlation_id: str | None = None
+    trace_id: str | None = None
+    span_id: str | None = None
+    parent_span_id: str | None = None
+    traceparent: str | None = None
+    tracestate: str | None = None
+    baggage: str | None = None
     agent_id: str | None = None
     credential_id: str | None = None
     tool_id: str | None = None
@@ -154,6 +168,12 @@ class ToolRuntimeActionResponse(BaseModel):
     environment_id: str
     request_id: str
     correlation_id: str | None = None
+    trace_id: str | None = None
+    span_id: str | None = None
+    parent_span_id: str | None = None
+    traceparent: str | None = None
+    tracestate: str | None = None
+    baggage: str | None = None
     agent_id: str | None = None
     credential_id: str | None = None
     tool_id: str | None = None
@@ -204,13 +224,14 @@ class ToolRuntimeActionRepository:
             """
             INSERT INTO tool_runtime_actions (
                 id, organization_id, environment_id, request_id, correlation_id,
+                trace_id, span_id, parent_span_id, traceparent, tracestate, baggage,
                 agent_id, credential_id, tool_id, permission_id, decision_id,
                 action_status, reason_code, upstream_status_code, latency_ms,
                 payload_summary_json, response_summary_json, redaction_applied,
                 error_code, delegated_user_id, provider_account_id, delegated_authorization_id,
                 approval_state, authorization_session_id, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 action_id,
@@ -218,6 +239,12 @@ class ToolRuntimeActionRepository:
                 self.environment_id,
                 body.request_id,
                 body.correlation_id,
+                body.trace_id,
+                body.span_id,
+                body.parent_span_id,
+                body.traceparent,
+                body.tracestate,
+                body.baggage,
                 body.agent_id,
                 body.credential_id,
                 body.tool_id,
@@ -243,6 +270,7 @@ class ToolRuntimeActionRepository:
         row = self.get_action(action_id)
         if row is None:
             raise ValueError("Created tool runtime action could not be loaded.")
+        self._derive_observability_from_action(row)
         return row
 
     def update_action(
@@ -291,7 +319,39 @@ class ToolRuntimeActionRepository:
         row = self.get_action(action_id)
         if row is None:
             raise ValueError("Tool runtime action not found.")
+        self._derive_observability_from_action(row)
         return row
+
+    def _derive_observability_from_action(self, row: Row) -> None:
+        """Project terminal tool runtime telemetry into observability records."""
+
+        if row["action_status"] not in TELEMETRY_DERIVATION_ACTION_STATUSES:
+            return
+        target_type: str | None = None
+        target_id: str | None = None
+        if row["agent_id"]:
+            target_type = "agent"
+            target_id = row["agent_id"]
+        elif row["tool_id"]:
+            target_type = "tool"
+            target_id = row["tool_id"]
+        if target_type is None or target_id is None:
+            return
+        from product_platform.observability.models import TelemetryDerivationRequest
+        from product_platform.observability.repository import ObservabilityRepository
+
+        ObservabilityRepository(
+            self.connection,
+            self.organization_id,
+            self.environment_id,
+        ).derive_telemetry_signals(
+            TelemetryDerivationRequest(
+                target_type=target_type,
+                target_id=target_id,
+                limit=200,
+                create_incidents=True,
+            )
+        )
 
     def append_event(
         self,
@@ -734,6 +794,12 @@ def tool_runtime_action_response(row: Row) -> ToolRuntimeActionResponse:
         environment_id=row["environment_id"],
         request_id=row["request_id"],
         correlation_id=row["correlation_id"],
+        trace_id=_optional_row_value(row, "trace_id"),
+        span_id=_optional_row_value(row, "span_id"),
+        parent_span_id=_optional_row_value(row, "parent_span_id"),
+        traceparent=_optional_row_value(row, "traceparent"),
+        tracestate=_optional_row_value(row, "tracestate"),
+        baggage=_optional_row_value(row, "baggage"),
         agent_id=row["agent_id"],
         credential_id=row["credential_id"],
         tool_id=row["tool_id"],
@@ -804,3 +870,7 @@ def _loads_optional_mapping(value: str | None) -> dict[str, Any] | None:
     if value is None:
         return None
     return _loads_mapping(value)
+
+
+def _optional_row_value(row: Row, key: str) -> str | None:
+    return row[key] if key in row.keys() else None

@@ -169,6 +169,7 @@ from product_platform.compliance.repository import (
     ComplianceViolationStateError,
     DuplicateComplianceResourceError,
     audit_export_content,
+    audit_export_linked_artifacts,
     audit_export_runtime_links,
     audit_export_response,
     collect_audit_export_events,
@@ -315,6 +316,7 @@ from product_platform.mcp.proxy import (
     mcp_rate_limit_response,
     mcp_tool_call_response,
 )
+from product_platform.observability.trace_context import build_request_trace_context
 from product_platform.mcp.repository import (
     DuplicateMCPServerNameError,
     MCPFindingLifecycleError,
@@ -378,6 +380,17 @@ from product_platform.observability.models import (
     IncidentFromEventRequest,
     IncidentResolveRequest,
     IncidentResponse,
+    ObservabilityEvalResultCreateRequest,
+    ObservabilityEvalResultResponse,
+    ObservabilitySpanCreateRequest,
+    ObservabilitySpanResponse,
+    ObservabilityTraceAnnotationCreateRequest,
+    ObservabilityTraceAnnotationResponse,
+    ObservabilityTraceCreateRequest,
+    ObservabilityTraceDetailResponse,
+    ObservabilityTraceFeedbackCreateRequest,
+    ObservabilityTraceFeedbackResponse,
+    ObservabilityTraceResponse,
     RolloutAdvanceRequest,
     RolloutCreateRequest,
     RolloutRollbackRequest,
@@ -386,6 +399,8 @@ from product_platform.observability.models import (
     SloMeasurementResponse,
     SloObjectiveCreateRequest,
     SloObjectiveResponse,
+    TelemetryDerivationRequest,
+    TelemetryDerivationResponse,
 )
 from product_platform.observability.repository import (
     ChaosExperimentValidationError,
@@ -393,6 +408,7 @@ from product_platform.observability.repository import (
     ChaosRunNotFoundError,
     IncidentNotFoundError,
     IncidentStateError,
+    ObservabilityTraceNotFoundError,
     ObservabilityRepository,
     RolloutNotFoundError,
     SloObjectiveNotFoundError,
@@ -402,6 +418,11 @@ from product_platform.observability.repository import (
     cost_dashboard_response,
     cost_event_response,
     incident_response,
+    observability_eval_result_response,
+    observability_span_response,
+    observability_trace_annotation_response,
+    observability_trace_feedback_response,
+    observability_trace_response,
     rollout_response,
     slo_measurement_response,
     slo_objective_response,
@@ -703,10 +724,21 @@ def _request_context_from_request(request: Request) -> RequestContext:
         return existing
     server_request_id = str(uuid4())
     fallback_id = _trusted_trace_id(request.headers.get("X-Request-ID")) or server_request_id
+    trace_context = build_request_trace_context(
+        traceparent=request.headers.get("traceparent"),
+        tracestate=request.headers.get("tracestate"),
+        baggage=request.headers.get("baggage"),
+    )
     return RequestContext(
         request_id=fallback_id,
         correlation_id=_trusted_trace_id(request.headers.get("X-Correlation-ID")) or fallback_id,
         server_request_id=server_request_id,
+        trace_id=trace_context.trace_id,
+        span_id=trace_context.span_id,
+        parent_span_id=trace_context.parent_span_id,
+        traceparent=trace_context.traceparent,
+        tracestate=trace_context.tracestate,
+        baggage=trace_context.baggage,
         organization_id=request.headers.get("X-Organization-ID"),
         environment_id=request.headers.get("X-Environment-ID"),
         user_id=request.headers.get("X-User-ID"),
@@ -723,6 +755,17 @@ def _trusted_trace_id(value: str | None) -> str | None:
     if not TRACE_ID_PATTERN.fullmatch(stripped):
         return None
     return stripped
+
+
+def _trace_context_fields(context: RequestContext) -> dict[str, str | None]:
+    return {
+        "trace_id": context.trace_id,
+        "span_id": context.span_id,
+        "parent_span_id": context.parent_span_id,
+        "traceparent": context.traceparent,
+        "tracestate": context.tracestate,
+        "baggage": context.baggage,
+    }
 
 
 def _tool_gateway_idempotency_key(request: Request, body: ToolInvocationRequest) -> str | None:
@@ -1100,6 +1143,11 @@ async def _send_asgi_error_response(
     headers = _scope_headers(scope)
     request_id = _trusted_trace_id(headers.get("x-request-id")) or str(uuid4())
     correlation_id = _trusted_trace_id(headers.get("x-correlation-id")) or request_id
+    trace_context = build_request_trace_context(
+        traceparent=headers.get("traceparent"),
+        tracestate=headers.get("tracestate"),
+        baggage=headers.get("baggage"),
+    )
     body = json.dumps(
         {
             "code": code,
@@ -1109,15 +1157,21 @@ async def _send_asgi_error_response(
         },
         separators=(",", ":"),
     ).encode("utf-8")
+    response_headers = [
+        (b"content-type", b"application/json"),
+        (b"x-request-id", request_id.encode("utf-8")),
+        (b"x-correlation-id", correlation_id.encode("utf-8")),
+        (b"traceparent", trace_context.traceparent.encode("utf-8")),
+    ]
+    if trace_context.tracestate is not None:
+        response_headers.append((b"tracestate", trace_context.tracestate.encode("utf-8")))
+    if trace_context.baggage is not None:
+        response_headers.append((b"baggage", trace_context.baggage.encode("utf-8")))
     await send(
         {
             "type": "http.response.start",
             "status": status_code,
-            "headers": [
-                (b"content-type", b"application/json"),
-                (b"x-request-id", request_id.encode("utf-8")),
-                (b"x-correlation-id", correlation_id.encode("utf-8")),
-            ],
+            "headers": response_headers,
         }
     )
     await send({"type": "http.response.body", "body": body})
@@ -1226,6 +1280,9 @@ def create_app(
             "Accept",
             "Authorization",
             "Content-Type",
+            "baggage",
+            "traceparent",
+            "tracestate",
             "X-Actor-Type",
             "X-Break-Glass-Reason",
             "X-Correlation-ID",
@@ -1253,11 +1310,22 @@ def create_app(
         server_request_id = str(uuid4())
         request_id = _trusted_trace_id(request.headers.get("X-Request-ID")) or server_request_id
         correlation_id = _trusted_trace_id(request.headers.get("X-Correlation-ID")) or request_id
+        trace_context = build_request_trace_context(
+            traceparent=request.headers.get("traceparent"),
+            tracestate=request.headers.get("tracestate"),
+            baggage=request.headers.get("baggage"),
+        )
         principal = getattr(request.state, "principal", None)
         request.state.request_context = RequestContext(
             request_id=request_id,
             correlation_id=correlation_id,
             server_request_id=server_request_id,
+            trace_id=trace_context.trace_id,
+            span_id=trace_context.span_id,
+            parent_span_id=trace_context.parent_span_id,
+            traceparent=trace_context.traceparent,
+            tracestate=trace_context.tracestate,
+            baggage=trace_context.baggage,
             organization_id=getattr(
                 request.state,
                 "selected_organization_id",
@@ -1276,6 +1344,11 @@ def create_app(
         response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
         response.headers["X-Correlation-ID"] = correlation_id
+        response.headers["traceparent"] = trace_context.traceparent
+        if trace_context.tracestate is not None:
+            response.headers["tracestate"] = trace_context.tracestate
+        if trace_context.baggage is not None:
+            response.headers["baggage"] = trace_context.baggage
         return response
 
     public_api_paths = {"/api/v1/auth/dev-login"}
@@ -1902,6 +1975,7 @@ def create_app(
             ToolRuntimeActionCreate(
                 request_id=context.request_id,
                 correlation_id=context.correlation_id,
+                **_trace_context_fields(context),
                 agent_id=error.agent_id,
                 credential_id=error.credential_id,
                 action_status="authentication_failed",
@@ -2127,12 +2201,14 @@ def create_app(
     async def create_workflow_run(
         workflow_id: str,
         body: WorkflowRunCreateRequest,
+        request: Request,
         current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
         environment_id: str = Depends(require_environment_context),
     ) -> WorkflowRunResponse:
         """Create and optionally execute a workflow run."""
 
         organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
         with _audit_database().transaction() as connection:
             repository = WorkflowRepository(connection, organization_id)
             definition = repository.get_definition(workflow_id)
@@ -2171,6 +2247,7 @@ def create_app(
                     },
                     max_attempts=1,
                     job_id=run["id"],
+                    **_trace_context_fields(context),
                 )
             if body.run_immediately:
                 started = repository.start_run(run["id"], environment_id=environment_id)
@@ -4465,6 +4542,7 @@ def create_app(
                         ToolRuntimeActionCreate(
                             request_id=context.request_id,
                             correlation_id=correlation_id,
+                            **_trace_context_fields(context),
                             agent_id=principal.agent_id,
                             credential_id=principal.credential_id,
                             tool_id=decision.tool_id,
@@ -4556,6 +4634,7 @@ def create_app(
                             ToolRuntimeActionCreate(
                                 request_id=context.request_id,
                                 correlation_id=correlation_id,
+                                **_trace_context_fields(context),
                                 agent_id=principal.agent_id,
                                 credential_id=principal.credential_id,
                                 tool_id=tool["id"],
@@ -4679,6 +4758,7 @@ def create_app(
                     ToolRuntimeActionCreate(
                         request_id=context.request_id,
                         correlation_id=correlation_id,
+                        **_trace_context_fields(context),
                         agent_id=principal.agent_id,
                         credential_id=principal.credential_id,
                         tool_id=tool["id"],
@@ -5501,11 +5581,18 @@ def create_app(
                     event_ids=[event.id for event in event_set.events],
                     checkpoint=checkpoint,
                 )
-                chain_proof["linked_runtime_actions"] = audit_export_runtime_links(
+                linked_runtime_actions = audit_export_runtime_links(
                     connection=connection,
                     organization_id=organization_id,
                     environment_id=environment_id,
                     events=event_set.events,
+                )
+                chain_proof["linked_runtime_actions"] = linked_runtime_actions
+                chain_proof["linked_artifacts"] = audit_export_linked_artifacts(
+                    connection=connection,
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    runtime_links=linked_runtime_actions,
                 )
                 row = AuditExportRepository(connection, organization_id, environment_id).create(
                     AuditExportRequest(format=body.format, filters=event_set.filters),
@@ -8852,6 +8939,7 @@ def create_app(
                 ).evaluate_and_record(
                     body,
                     request_correlation_id=context.correlation_id,
+                    **_trace_context_fields(context),
                 )
                 response = mcp_tool_call_response(row)
                 AuditEventRepository(connection).insert(
@@ -9933,12 +10021,14 @@ def create_app(
     @app.post("/api/v1/jobs", response_model=JobResponse, status_code=201, tags=["jobs"])
     async def create_job(
         body: JobCreateRequest,
+        request: Request,
         current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
         environment_id: str = Depends(require_environment_context),
     ) -> JobResponse:
         """Create a background job in the selected environment."""
 
         organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
         database_for_jobs = _audit_database()
         with database_for_jobs.transaction() as connection:
             jobs = JobStateRepository(connection)
@@ -9949,6 +10039,7 @@ def create_app(
                 job_type=body.job_type,
                 payload=body.payload,
                 max_attempts=body.max_attempts,
+                **_trace_context_fields(context),
             )
             _insert_job_audit_event(
                 audit,
@@ -10077,7 +10168,9 @@ def create_app(
         try:
             with _audit_database().transaction() as connection:
                 repository = RuntimeRepository(connection, organization_id, environment_id)
-                session = runtime_session_response(repository.create_session(body))
+                session = runtime_session_response(
+                    repository.create_session(body, **_trace_context_fields(context))
+                )
                 AuditEventRepository(connection).insert(
                     _runtime_session_audit_event(
                         organization_id=organization_id,
@@ -10204,6 +10297,7 @@ def create_app(
                     session_id,
                     body,
                     correlation_id=context.correlation_id,
+                    **_trace_context_fields(context),
                 )
                 decision = runtime_ring_decision_response(decision_row)
                 action = runtime_action_response(action_row, ring_decision=decision)
@@ -10587,7 +10681,8 @@ def create_app(
                             ring=2,
                             sponsor_user_id=current_user.id,
                             metadata={"source": "saga.execute", "saga_id": saga_id},
-                        )
+                        ),
+                        **_trace_context_fields(context),
                     )
                     session = runtime_session_response(session_row)
                     owned_runtime_session_id = session.id
@@ -11826,6 +11921,7 @@ def create_app(
     )
     async def activate_agent_registration(
         agent_id: str,
+        request: Request,
         body: AgentLifecycleActionRequest | None = None,
         current_user: UserPrincipal = Depends(require_permission(Permission.AGENT_WRITE)),
         environment_id: str = Depends(require_environment_context),
@@ -11833,6 +11929,7 @@ def create_app(
         """Activate an approved agent and queue initial credential issuance."""
 
         organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
         try:
             with _audit_database().transaction() as connection:
                 agents = AgentRegistryRepository(connection, organization_id, environment_id)
@@ -11849,6 +11946,7 @@ def create_app(
                     job_type="agent.credential.issue",
                     payload={"agent_id": agent_id},
                     max_attempts=3,
+                    **_trace_context_fields(context),
                 )
                 audit = AuditEventRepository(connection)
                 audit.insert(
@@ -13393,6 +13491,275 @@ def create_app(
             )
 
     @app.post(
+        "/api/v1/observability/traces",
+        response_model=ObservabilityTraceResponse,
+        status_code=201,
+        tags=["observability"],
+    )
+    async def create_observability_trace(
+        body: ObservabilityTraceCreateRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ObservabilityTraceResponse:
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            row = repository.create_trace(
+                body,
+                created_by=current_user.id,
+                correlation_id=context.correlation_id,
+            )
+            response = observability_trace_response(row)
+            AuditEventRepository(connection).insert(
+                AuditEventEnvelope(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    event_type="observability.trace.ingested",
+                    source_component="observability",
+                    actor_type="user",
+                    actor_id=current_user.id,
+                    agent_id=response.agent_id,
+                    resource_type="observability_trace",
+                    resource_id=response.id,
+                    decision="allow",
+                    correlation_id=response.correlation_id or context.correlation_id,
+                    trace_id=context.trace_id or response.trace_id,
+                    payload_json=response.model_dump(),
+                )
+            )
+            return response
+
+    @app.get(
+        "/api/v1/observability/traces",
+        response_model=list[ObservabilityTraceResponse],
+        tags=["observability"],
+    )
+    async def list_observability_traces(
+        status: str | None = Query(default=None),
+        agent_id: str | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[ObservabilityTraceResponse]:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            return [
+                observability_trace_response(row)
+                for row in repository.list_traces(
+                    status=status,
+                    agent_id=agent_id,
+                    limit=limit,
+                    offset=offset,
+                )
+            ]
+
+    @app.get(
+        "/api/v1/observability/traces/{trace_id}",
+        response_model=ObservabilityTraceDetailResponse,
+        tags=["observability"],
+    )
+    async def get_observability_trace(
+        trace_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ObservabilityTraceDetailResponse:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            detail = repository.get_trace_detail(trace_id)
+            if detail is None:
+                raise HTTPException(status_code=404, detail="Trace not found.")
+            return detail
+
+    @app.post(
+        "/api/v1/observability/traces/{trace_id}/spans",
+        response_model=ObservabilitySpanResponse,
+        status_code=201,
+        tags=["observability"],
+    )
+    async def create_observability_trace_span(
+        trace_id: str,
+        body: ObservabilitySpanCreateRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ObservabilitySpanResponse:
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            try:
+                row = repository.create_span(trace_id.strip().lower(), body)
+            except ObservabilityTraceNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            response = observability_span_response(row)
+            AuditEventRepository(connection).insert(
+                AuditEventEnvelope(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    event_type="observability.span.ingested",
+                    source_component="observability",
+                    actor_type="user",
+                    actor_id=current_user.id,
+                    resource_type="observability_span",
+                    resource_id=response.id,
+                    decision="allow",
+                    correlation_id=context.correlation_id,
+                    trace_id=context.trace_id or response.trace_id,
+                    payload_json=response.model_dump(),
+                )
+            )
+            return response
+
+    @app.post(
+        "/api/v1/observability/eval-results",
+        response_model=ObservabilityEvalResultResponse,
+        status_code=201,
+        tags=["observability"],
+    )
+    async def create_observability_eval_result(
+        body: ObservabilityEvalResultCreateRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ObservabilityEvalResultResponse:
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            row = repository.create_eval_result(body, created_by=current_user.id)
+            response = observability_eval_result_response(row)
+            AuditEventRepository(connection).insert(
+                AuditEventEnvelope(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    event_type="observability.eval_result.ingested",
+                    source_component="observability",
+                    actor_type="user",
+                    actor_id=current_user.id,
+                    resource_type="observability_eval_result",
+                    resource_id=response.id,
+                    decision="allow",
+                    correlation_id=context.correlation_id,
+                    trace_id=context.trace_id or response.trace_id,
+                    payload_json=response.model_dump(),
+                )
+            )
+            return response
+
+    @app.get(
+        "/api/v1/observability/eval-results",
+        response_model=list[ObservabilityEvalResultResponse],
+        tags=["observability"],
+    )
+    async def list_observability_eval_results(
+        trace_id: str | None = Query(default=None),
+        dataset_id: str | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=200),
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[ObservabilityEvalResultResponse]:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            return [
+                observability_eval_result_response(row)
+                for row in repository.list_eval_results(
+                    trace_id=trace_id.strip().lower() if trace_id else None,
+                    dataset_id=dataset_id,
+                    limit=limit,
+                )
+            ]
+
+    @app.post(
+        "/api/v1/observability/traces/{trace_id}/annotations",
+        response_model=ObservabilityTraceAnnotationResponse,
+        status_code=201,
+        tags=["observability"],
+    )
+    async def create_observability_trace_annotation(
+        trace_id: str,
+        body: ObservabilityTraceAnnotationCreateRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ObservabilityTraceAnnotationResponse:
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        normalized_trace_id = trace_id.strip().lower()
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            row = repository.create_trace_annotation(
+                normalized_trace_id,
+                body,
+                created_by=current_user.id,
+            )
+            response = observability_trace_annotation_response(row)
+            AuditEventRepository(connection).insert(
+                AuditEventEnvelope(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    event_type="observability.trace.annotation.created",
+                    source_component="observability",
+                    actor_type="user",
+                    actor_id=current_user.id,
+                    resource_type="observability_trace_annotation",
+                    resource_id=response.id,
+                    decision="allow",
+                    correlation_id=context.correlation_id,
+                    trace_id=context.trace_id or normalized_trace_id,
+                    payload_json=response.model_dump(),
+                )
+            )
+            return response
+
+    @app.post(
+        "/api/v1/observability/traces/{trace_id}/feedback",
+        response_model=ObservabilityTraceFeedbackResponse,
+        status_code=201,
+        tags=["observability"],
+    )
+    async def create_observability_trace_feedback(
+        trace_id: str,
+        body: ObservabilityTraceFeedbackCreateRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> ObservabilityTraceFeedbackResponse:
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        normalized_trace_id = trace_id.strip().lower()
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            row = repository.create_trace_feedback(
+                normalized_trace_id,
+                body,
+                created_by=current_user.id,
+            )
+            response = observability_trace_feedback_response(row)
+            AuditEventRepository(connection).insert(
+                AuditEventEnvelope(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    event_type="observability.trace.feedback.created",
+                    source_component="observability",
+                    actor_type="user",
+                    actor_id=current_user.id,
+                    resource_type="observability_trace_feedback",
+                    resource_id=response.id,
+                    decision="allow",
+                    correlation_id=context.correlation_id,
+                    trace_id=context.trace_id or normalized_trace_id,
+                    payload_json=response.model_dump(),
+                )
+            )
+            return response
+
+    @app.post(
         "/api/v1/observability/slo",
         response_model=SloObjectiveResponse,
         status_code=201,
@@ -13539,6 +13906,9 @@ def create_app(
                                 good_events=0,
                                 total_events=1,
                                 metadata={"source": "chaos_run", "chaos_run_id": response.id},
+                                source="chaos_run",
+                                source_resource_type="chaos_run",
+                                source_resource_id=response.id,
                             ),
                         )
                 repository.create_incident(
@@ -13548,6 +13918,9 @@ def create_app(
                         summary="A chaos experiment stopped because one or more guardrails were breached.",
                         correlation_id=context.correlation_id,
                         source_event_id=event.id,
+                        source="chaos_run",
+                        source_resource_type="chaos_run",
+                        source_resource_id=response.id,
                     )
                 )
             return response
@@ -13767,6 +14140,33 @@ def create_app(
         with _audit_database().transaction() as connection:
             repository = ObservabilityRepository(connection, organization_id, environment_id)
             return cost_dashboard_response(repository)
+
+    @app.post(
+        "/api/v1/observability/telemetry/derive",
+        response_model=TelemetryDerivationResponse,
+        status_code=201,
+        tags=["observability"],
+    )
+    async def derive_observability_telemetry(
+        body: TelemetryDerivationRequest,
+        current_user: UserPrincipal = Depends(require_permission(Permission.OBSERVABILITY_WRITE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> TelemetryDerivationResponse:
+        organization_id = _require_organization_id(current_user)
+        with _audit_database().transaction() as connection:
+            repository = ObservabilityRepository(connection, organization_id, environment_id)
+            result = repository.derive_telemetry_signals(body)
+            return TelemetryDerivationResponse(
+                slo_measurements=[
+                    slo_measurement_response(row)
+                    for row in result["slo_measurements"]
+                ],
+                cost_events=[cost_event_response(row) for row in result["cost_events"]],
+                incidents=[incident_response(repository, row) for row in result["incidents"]],
+                examined_tool_runtime_actions=int(result["examined_tool_runtime_actions"]),
+                examined_runtime_actions=int(result["examined_runtime_actions"]),
+                skipped_duplicate_cost_events=int(result["skipped_duplicate_cost_events"]),
+            )
 
     @app.post(
         "/api/v1/observability/incidents",

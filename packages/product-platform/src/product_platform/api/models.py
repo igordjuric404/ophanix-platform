@@ -41,6 +41,12 @@ class RequestContext(BaseModel):
     request_id: str
     correlation_id: str
     server_request_id: str | None = None
+    trace_id: str | None = None
+    span_id: str | None = None
+    parent_span_id: str | None = None
+    traceparent: str | None = None
+    tracestate: str | None = None
+    baggage: str | None = None
     organization_id: str | None = None
     environment_id: str | None = None
     user_id: str | None = None

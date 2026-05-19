@@ -155,6 +155,12 @@ class RuntimeActionResponse(BaseModel):
     reason: str
     latency_ms: int
     correlation_id: str | None = None
+    trace_id: str | None = None
+    span_id: str | None = None
+    parent_span_id: str | None = None
+    traceparent: str | None = None
+    tracestate: str | None = None
+    baggage: str | None = None
     created_at: str
     ring_decision: RuntimeRingDecisionResponse | None = None
 
@@ -173,6 +179,12 @@ class RuntimeSessionResponse(BaseModel):
     started_at: str
     ended_at: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    trace_id: str | None = None
+    span_id: str | None = None
+    parent_span_id: str | None = None
+    traceparent: str | None = None
+    tracestate: str | None = None
+    baggage: str | None = None
     actions: list[RuntimeActionResponse] = Field(default_factory=list)
 
 

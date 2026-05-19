@@ -11,6 +11,13 @@ from product_platform.db.seed import seed_demo_data
 from product_platform.db.testing import create_migrated_test_database
 
 
+TRACE_ID = "11111111111111111111111111111111"
+SESSION_PARENT_SPAN_ID = "2222222222222222"
+ACTION_PARENT_SPAN_ID = "3333333333333333"
+SESSION_TRACEPARENT = f"00-{TRACE_ID}-{SESSION_PARENT_SPAN_ID}-01"
+ACTION_TRACEPARENT = f"00-{TRACE_ID}-{ACTION_PARENT_SPAN_ID}-01"
+
+
 class RuntimeSessionsPhase1Tests(unittest.TestCase):
     def setUp(self) -> None:
         self.database = create_migrated_test_database()
@@ -102,6 +109,76 @@ class RuntimeSessionsPhase1Tests(unittest.TestCase):
         detail = self.client.get(f"/api/v1/runtime/sessions/{payload['id']}", headers=self._headers())
         self.assertEqual(detail.status_code, 200)
         self.assertEqual(detail.json()["actions"], [])
+
+    def test_trace_context_is_persisted_on_session_and_actions(self) -> None:
+        session_headers = self._headers("corr-runtime-trace")
+        session_headers.update(
+            {
+                "traceparent": SESSION_TRACEPARENT,
+                "tracestate": "vendor=runtime",
+                "baggage": "tenant=demo,run=phase1",
+            }
+        )
+        created = self.client.post(
+            "/api/v1/runtime/sessions",
+            headers=session_headers,
+            json={
+                "agent_id": "agent_active",
+                "ring": 2,
+                "metadata": {"purpose": "trace-context"},
+            },
+        )
+
+        self.assertEqual(created.status_code, 201, created.text)
+        session = created.json()
+        self.assertEqual(created.headers["traceparent"].split("-")[1], TRACE_ID)
+        self.assertEqual(session["trace_id"], TRACE_ID)
+        self.assertRegex(session["span_id"], r"^[0-9a-f]{16}$")
+        self.assertEqual(session["parent_span_id"], SESSION_PARENT_SPAN_ID)
+        self.assertEqual(session["traceparent"].split("-")[1], TRACE_ID)
+        self.assertEqual(session["tracestate"], "vendor=runtime")
+        self.assertEqual(session["baggage"], "tenant=demo,run=phase1")
+
+        action_headers = self._headers("corr-runtime-action-trace")
+        action_headers.update(
+            {
+                "traceparent": ACTION_TRACEPARENT,
+                "tracestate": "vendor=runtime-action",
+                "baggage": "tenant=demo,action=read",
+            }
+        )
+        action = self.client.post(
+            f"/api/v1/runtime/sessions/{session['id']}/actions",
+            headers=action_headers,
+            json={
+                "action_name": "claims.read",
+                "resource_type": "claim",
+                "is_read_only": True,
+            },
+        )
+
+        self.assertEqual(action.status_code, 201, action.text)
+        action_payload = action.json()
+        self.assertEqual(action_payload["trace_id"], TRACE_ID)
+        self.assertRegex(action_payload["span_id"], r"^[0-9a-f]{16}$")
+        self.assertEqual(action_payload["parent_span_id"], ACTION_PARENT_SPAN_ID)
+        self.assertEqual(action_payload["tracestate"], "vendor=runtime-action")
+        self.assertEqual(action_payload["baggage"], "tenant=demo,action=read")
+
+        persisted_session = self.database.connect().execute(
+            "SELECT trace_id, span_id, parent_span_id, traceparent, tracestate, baggage "
+            "FROM runtime_sessions WHERE id = ?",
+            (session["id"],),
+        ).fetchone()
+        persisted_action = self.database.connect().execute(
+            "SELECT trace_id, span_id, parent_span_id, traceparent, tracestate, baggage "
+            "FROM runtime_actions WHERE id = ?",
+            (action_payload["id"],),
+        ).fetchone()
+        self.assertEqual(persisted_session["trace_id"], TRACE_ID)
+        self.assertEqual(persisted_session["parent_span_id"], SESSION_PARENT_SPAN_ID)
+        self.assertEqual(persisted_action["trace_id"], TRACE_ID)
+        self.assertEqual(persisted_action["parent_span_id"], ACTION_PARENT_SPAN_ID)
 
     def test_create_session_rejects_suspended_agent(self) -> None:
         rejected = self.client.post(

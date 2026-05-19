@@ -1,5 +1,112 @@
 # Feature Audit: Observability, Runtime Events, and Artifacts
 
+## Remediation Summary
+
+Date of remediation: 2026-05-20
+
+Total findings in this report: 4
+
+Number fixed: 4
+
+Number partially fixed: 0
+
+Number blocked: 0
+
+Number already fixed: 0
+
+Files changed:
+- `packages/product-platform/src/product_platform/observability/trace_context.py`
+- `packages/product-platform/src/product_platform/api/models.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/db/migrations/0080_observability_trace_context.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0080_observability_trace_context.down.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0081_observability_trace_eval_surface.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0081_observability_trace_eval_surface.down.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0082_artifact_runtime_evidence.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0082_artifact_runtime_evidence.down.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0083_observability_telemetry_sources.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0083_observability_telemetry_sources.down.sql`
+- `packages/product-platform/src/product_platform/artifacts/models.py`
+- `packages/product-platform/src/product_platform/artifacts/repository.py`
+- `packages/product-platform/src/product_platform/compliance/repository.py`
+- `packages/product-platform/src/product_platform/observability/models.py`
+- `packages/product-platform/src/product_platform/observability/repository.py`
+- `packages/product-platform/src/product_platform/runtime/models.py`
+- `packages/product-platform/src/product_platform/runtime/repository.py`
+- `packages/product-platform/src/product_platform/runtime/rings.py`
+- `packages/product-platform/src/product_platform/tool_gateway/runtime_audit.py`
+- `packages/product-platform/src/product_platform/tool_gateway/decision.py`
+- `packages/product-platform/src/product_platform/worker/store.py`
+- `packages/product-platform/src/product_platform/worker/api_models.py`
+- `packages/product-platform/src/product_platform/mcp/models.py`
+- `packages/product-platform/src/product_platform/mcp/proxy.py`
+- `packages/ophanix-tool-gateway-sdk/src/ophanix_tool_gateway/sdk.py`
+- `packages/product-platform/src/ophanix_tool_gateway/sdk.py`
+- `packages/product-platform/tests/test_runtime_sessions_and_rings_phase1.py`
+- `packages/product-platform/tests/test_tool_gateway_runtime_audit_phase2.py`
+- `packages/product-platform/tests/test_worker_phase4.py`
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase1.py`
+- `packages/product-platform/tests/test_observability_trace_eval_phase2.py`
+- `packages/product-platform/tests/test_observability_artifact_evidence_phase3.py`
+- `packages/product-platform/tests/test_observability_telemetry_derivation_phase4.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+- `packages/product-platform/frontend/src/api/observability.ts`
+- `packages/product-platform/frontend/src/features/observability/ObservabilityPage.tsx`
+- `packages/product-platform/frontend/src/features/observability/ObservabilityPage.test.tsx`
+- `packages/ophanix-tool-gateway-sdk/tests/test_sdk_behavior.py`
+
+Tests added or updated:
+- `RuntimeSessionsPhase1Tests::test_trace_context_is_persisted_on_session_and_actions`
+- `ToolGatewayRuntimeAuditPhase2Tests::test_integration_invocation_records_w3c_trace_context`
+- `WorkerPhase4ApiTests::test_job_create_persists_w3c_trace_context`
+- `MCPProxyGovernancePhase1Tests::test_proxy_call_records_w3c_trace_context`
+- `ObservabilityTraceEvalPhase2Tests::test_trace_ingestion_and_query_api_round_trip`
+- `ObservabilityTraceEvalPhase2Tests::test_runtime_to_tool_call_trace_linkage`
+- `ObservabilityTraceEvalPhase2Tests::test_eval_result_links_to_trace_and_dataset`
+- `ObservabilityOverallTests::test_overall_observability_dashboard_flow`
+- `ObservabilityPage` focused Vitest suite renders trace timeline and existing observability workflows
+- `ObservabilityArtifactEvidencePhase3Tests::test_runtime_trace_eval_artifact_links_are_queryable_from_trace`
+- `ObservabilityArtifactEvidencePhase3Tests::test_digest_download_and_attestation_bind_artifact_checksum`
+- `ObservabilityArtifactEvidencePhase3Tests::test_audit_export_includes_linked_runtime_artifacts`
+- `ObservabilityTelemetryDerivationPhase4Tests::test_manual_slo_and_cost_ingestion_are_labeled_manual`
+- `ObservabilityTelemetryDerivationPhase4Tests::test_runtime_tool_telemetry_derives_slo_cost_and_incidents`
+- `DatabaseMigrationPhase1Tests` migration apply/rollback expectations updated through migration `0083`
+- Existing artifact/workflow/compliance suites in `test_workflow_runner_phase3.py`, `test_workflow_runner_phase4.py`, and `test_compliance_phase1.py`
+- `StandaloneSdkBehaviorTests::test_call_tool_sends_w3c_trace_context_headers`
+
+Validation commands run:
+- `python3 -m pytest tests/test_runtime_sessions_and_rings_phase1.py::RuntimeSessionsPhase1Tests::test_trace_context_is_persisted_on_session_and_actions tests/test_tool_gateway_runtime_audit_phase2.py::ToolGatewayRuntimeAuditPhase2Tests::test_integration_invocation_records_w3c_trace_context tests/test_worker_phase4.py::WorkerPhase4ApiTests::test_job_create_persists_w3c_trace_context tests/test_mcp_proxy_governance_phase1.py::MCPProxyGovernancePhase1Tests::test_proxy_call_records_w3c_trace_context`
+- `python3 -m pytest tests/test_sdk_behavior.py::StandaloneSdkBehaviorTests::test_call_tool_sends_w3c_trace_context_headers`
+- `python3 -m pytest tests/test_worker_phase4.py`
+- `python3 -m pytest tests/test_runtime_sessions_and_rings_phase1.py tests/test_tool_gateway_runtime_audit_phase2.py tests/test_worker_phase4.py tests/test_mcp_proxy_governance_phase1.py`
+- `python3 -m pytest tests/test_sdk_behavior.py`
+- `python3 -m ruff check src/product_platform/observability/trace_context.py src/product_platform/api/models.py src/product_platform/api/app.py src/product_platform/runtime/models.py src/product_platform/runtime/repository.py src/product_platform/runtime/rings.py src/product_platform/tool_gateway/runtime_audit.py src/product_platform/worker/store.py src/product_platform/worker/api_models.py src/product_platform/mcp/models.py src/product_platform/mcp/proxy.py tests/test_runtime_sessions_and_rings_phase1.py tests/test_tool_gateway_runtime_audit_phase2.py tests/test_worker_phase4.py tests/test_mcp_proxy_governance_phase1.py`
+- `python3 -m ruff check src/ophanix_tool_gateway/sdk.py tests/test_sdk_behavior.py`
+- `python3 -m pytest tests/test_observability_trace_eval_phase2.py`
+- `python3 -m pytest tests/test_observability_trace_eval_phase2.py tests/test_observability_overall.py`
+- `python3 -m ruff check src/product_platform/observability/models.py src/product_platform/observability/repository.py src/product_platform/api/app.py tests/test_observability_trace_eval_phase2.py`
+- `python3 -m mypy src/product_platform/observability`
+- `npm test -- ObservabilityPage.test.tsx`
+- `npm run typecheck`
+- `npm run lint -- src/api/observability.ts src/features/observability/ObservabilityPage.tsx src/features/observability/ObservabilityPage.test.tsx`
+- `python3 -m pytest tests/test_observability_artifact_evidence_phase3.py`
+- `python3 -m pytest tests/test_observability_artifact_evidence_phase3.py tests/test_workflow_runner_phase3.py tests/test_workflow_runner_phase4.py tests/test_compliance_phase1.py`
+- `python3 -m ruff check src/product_platform/artifacts/models.py src/product_platform/artifacts/repository.py src/product_platform/observability/repository.py src/product_platform/compliance/repository.py src/product_platform/api/app.py tests/test_observability_artifact_evidence_phase3.py`
+- `python3 -m mypy src/product_platform/artifacts src/product_platform/observability src/product_platform/compliance/repository.py`
+- `python3 -m pytest tests/test_observability_telemetry_derivation_phase4.py`
+- `python3 -m pytest tests/test_observability_telemetry_derivation_phase4.py tests/test_observability_overall.py tests/test_observability_trace_eval_phase2.py tests/test_observability_artifact_evidence_phase3.py tests/test_tool_gateway_runtime_audit_phase2.py`
+- `python3 -m ruff check src/product_platform/observability/models.py src/product_platform/observability/repository.py src/product_platform/api/app.py src/product_platform/tool_gateway/runtime_audit.py src/product_platform/tool_gateway/decision.py tests/test_observability_telemetry_derivation_phase4.py`
+- `python3 -m mypy src/product_platform/observability src/product_platform/tool_gateway/runtime_audit.py src/product_platform/tool_gateway/decision.py`
+- `npm test -- ObservabilityPage.test.tsx`
+- `npm run typecheck`
+- `npm run lint -- src/api/observability.ts src/features/observability/ObservabilityPage.tsx src/features/observability/ObservabilityPage.test.tsx`
+- `npm run build`
+- `python3 -m pytest tests/test_db_phase1.py`
+- `python3 -m ruff check tests/test_db_phase1.py`
+
+Remaining risks:
+- None.
+
 ## 1. Scope
 
 This audit covers observability APIs, runtime events, trace propagation, OpenTelemetry support, cost/SLO/incident data, artifacts, attestations, and evaluation readiness. It inspects `product_platform/observability`, `product_platform/runtime`, `product_platform/artifacts`, Tool Gateway runtime audit, Agent OS observability module, frontend observability pages, docs, and the Python SDK. Relevant benchmarks are LangSmith tracing/evaluation, AWS AgentCore Observability, Google ADK traces/evals, CrewAI tracing/OTel export, OpenTelemetry GenAI semantic conventions, and Phoenix/Braintrust/Galileo-style eval loops. Out of scope: compliance evidence export, covered in AUD.
@@ -24,6 +131,44 @@ Current workflow: operators can manually ingest SLO/cost/incident data, view das
 ## 4. Findings
 
 ### F-OBS-001 [P1] [Observability] Product observability has no first-class trace, run, or eval surface
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Added first-class observability trace, span, eval result, annotation, and feedback persistence and APIs. Trace detail now combines explicit trace/span/eval records with linked runtime sessions, runtime actions, Tool Gateway runtime actions, MCP calls, policy evaluations by correlation ID, and a timeline suitable for operator debugging. The frontend observability page now includes a Trace Timeline panel that navigates from trace to runtime run/session, spans, tool-call counts, and eval results.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/db/migrations/0081_observability_trace_eval_surface.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0081_observability_trace_eval_surface.down.sql`
+- `packages/product-platform/src/product_platform/observability/models.py`
+- `packages/product-platform/src/product_platform/observability/repository.py`
+- `packages/product-platform/tests/test_observability_trace_eval_phase2.py`
+- `packages/product-platform/frontend/src/api/observability.ts`
+- `packages/product-platform/frontend/src/features/observability/ObservabilityPage.tsx`
+- `packages/product-platform/frontend/src/features/observability/ObservabilityPage.test.tsx`
+
+**Tests added or updated:**
+- `ObservabilityTraceEvalPhase2Tests::test_trace_ingestion_and_query_api_round_trip`
+- `ObservabilityTraceEvalPhase2Tests::test_runtime_to_tool_call_trace_linkage`
+- `ObservabilityTraceEvalPhase2Tests::test_eval_result_links_to_trace_and_dataset`
+- `ObservabilityOverallTests::test_overall_observability_dashboard_flow`
+- `ObservabilityPage` focused Vitest suite trace timeline assertions
+
+**Validation performed:**
+- `python3 -m pytest tests/test_observability_trace_eval_phase2.py` passed, 3 tests.
+- `python3 -m pytest tests/test_observability_trace_eval_phase2.py tests/test_observability_overall.py` passed, 4 tests.
+- `python3 -m ruff check src/product_platform/observability/models.py src/product_platform/observability/repository.py src/product_platform/api/app.py tests/test_observability_trace_eval_phase2.py` passed.
+- `python3 -m mypy src/product_platform/observability` passed.
+- `npm test -- ObservabilityPage.test.tsx` passed, 7 tests.
+- `npm run typecheck` passed.
+- `npm run lint -- src/api/observability.ts src/features/observability/ObservabilityPage.tsx src/features/observability/ObservabilityPage.test.tsx` passed.
+
+**Remaining work:**
+None for the trace/run/span/eval surface. Artifact evidence-object expansion remains tracked separately under F-OBS-003.
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Missing
 
@@ -77,6 +222,55 @@ Operators cannot debug, evaluate, or improve agent behavior at benchmark parity.
 
 ### F-OBS-002 [P1] [Observability] Distributed context propagation is correlation-id only
 
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Added W3C trace-context parsing and response propagation, persisted trace ID, span ID, parent span ID, traceparent, tracestate, and baggage on runtime sessions/actions, Tool Gateway runtime actions, MCP proxy calls, and background jobs, and updated the SDK to send `traceparent`, `tracestate`, and `baggage` headers.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/observability/trace_context.py`
+- `packages/product-platform/src/product_platform/api/models.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/db/migrations/0080_observability_trace_context.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0080_observability_trace_context.down.sql`
+- `packages/product-platform/src/product_platform/runtime/models.py`
+- `packages/product-platform/src/product_platform/runtime/repository.py`
+- `packages/product-platform/src/product_platform/runtime/rings.py`
+- `packages/product-platform/src/product_platform/tool_gateway/runtime_audit.py`
+- `packages/product-platform/src/product_platform/worker/store.py`
+- `packages/product-platform/src/product_platform/worker/api_models.py`
+- `packages/product-platform/src/product_platform/mcp/models.py`
+- `packages/product-platform/src/product_platform/mcp/proxy.py`
+- `packages/ophanix-tool-gateway-sdk/src/ophanix_tool_gateway/sdk.py`
+- `packages/product-platform/src/ophanix_tool_gateway/sdk.py`
+- `packages/product-platform/tests/test_runtime_sessions_and_rings_phase1.py`
+- `packages/product-platform/tests/test_tool_gateway_runtime_audit_phase2.py`
+- `packages/product-platform/tests/test_worker_phase4.py`
+- `packages/product-platform/tests/test_mcp_proxy_governance_phase1.py`
+- `packages/ophanix-tool-gateway-sdk/tests/test_sdk_behavior.py`
+
+**Tests added or updated:**
+- `RuntimeSessionsPhase1Tests::test_trace_context_is_persisted_on_session_and_actions`
+- `ToolGatewayRuntimeAuditPhase2Tests::test_integration_invocation_records_w3c_trace_context`
+- `WorkerPhase4ApiTests::test_job_create_persists_w3c_trace_context`
+- `MCPProxyGovernancePhase1Tests::test_proxy_call_records_w3c_trace_context`
+- `StandaloneSdkBehaviorTests::test_call_tool_sends_w3c_trace_context_headers`
+
+**Validation performed:**
+- `python3 -m pytest tests/test_runtime_sessions_and_rings_phase1.py::RuntimeSessionsPhase1Tests::test_trace_context_is_persisted_on_session_and_actions tests/test_tool_gateway_runtime_audit_phase2.py::ToolGatewayRuntimeAuditPhase2Tests::test_integration_invocation_records_w3c_trace_context tests/test_worker_phase4.py::WorkerPhase4ApiTests::test_job_create_persists_w3c_trace_context tests/test_mcp_proxy_governance_phase1.py::MCPProxyGovernancePhase1Tests::test_proxy_call_records_w3c_trace_context` - passed, 4 tests.
+- `python3 -m pytest tests/test_sdk_behavior.py::StandaloneSdkBehaviorTests::test_call_tool_sends_w3c_trace_context_headers` - passed, 1 test.
+- `python3 -m pytest tests/test_worker_phase4.py` - passed, 10 tests.
+- `python3 -m pytest tests/test_runtime_sessions_and_rings_phase1.py tests/test_tool_gateway_runtime_audit_phase2.py tests/test_worker_phase4.py tests/test_mcp_proxy_governance_phase1.py` - passed, 26 tests.
+- `python3 -m pytest tests/test_sdk_behavior.py` - passed, 45 tests.
+- Product-platform focused `ruff check` - passed.
+- SDK focused `ruff check` - passed.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
+
 **Status:** Missing
 
 **Current implementation:**
@@ -129,6 +323,39 @@ Observability and compliance evidence will remain fragmented.
 
 ### F-OBS-003 [P1] [Artifacts] Artifacts are not runtime, trace, or eval evidence objects
 
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Extended artifacts into runtime/trace/eval evidence objects. Artifacts now expose digest algorithm, retention policy, redaction classification, and provenance metadata; attestations bind to the artifact checksum, digest algorithm, and signer. Artifact links now support runtime sessions/actions, Tool Gateway runtime actions, MCP tool calls, observability traces, spans, and eval results. Trace detail includes linked artifacts, and audit export chain proof includes artifacts linked to exported runtime actions.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/artifacts/models.py`
+- `packages/product-platform/src/product_platform/artifacts/repository.py`
+- `packages/product-platform/src/product_platform/compliance/repository.py`
+- `packages/product-platform/src/product_platform/db/migrations/0082_artifact_runtime_evidence.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0082_artifact_runtime_evidence.down.sql`
+- `packages/product-platform/src/product_platform/observability/repository.py`
+- `packages/product-platform/tests/test_observability_artifact_evidence_phase3.py`
+
+**Tests added or updated:**
+- `ObservabilityArtifactEvidencePhase3Tests::test_runtime_trace_eval_artifact_links_are_queryable_from_trace`
+- `ObservabilityArtifactEvidencePhase3Tests::test_digest_download_and_attestation_bind_artifact_checksum`
+- `ObservabilityArtifactEvidencePhase3Tests::test_audit_export_includes_linked_runtime_artifacts`
+- Existing suites: `test_workflow_runner_phase3.py`, `test_workflow_runner_phase4.py`, `test_compliance_phase1.py`
+
+**Validation performed:**
+- `python3 -m pytest tests/test_observability_artifact_evidence_phase3.py` passed, 3 tests.
+- `python3 -m pytest tests/test_observability_artifact_evidence_phase3.py tests/test_workflow_runner_phase3.py tests/test_workflow_runner_phase4.py tests/test_compliance_phase1.py` passed, 17 tests.
+- `python3 -m ruff check src/product_platform/artifacts/models.py src/product_platform/artifacts/repository.py src/product_platform/observability/repository.py src/product_platform/compliance/repository.py src/product_platform/api/app.py tests/test_observability_artifact_evidence_phase3.py` passed.
+- `python3 -m mypy src/product_platform/artifacts src/product_platform/observability src/product_platform/compliance/repository.py` passed.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
+
 **Status:** Missing
 
 **Current implementation:**
@@ -180,6 +407,49 @@ Key operational evidence remains detached from the runtime history.
 **Affects stated Ophanix product promise:** Yes
 
 ### F-OBS-004 [P2] [Performance] SLO, cost, and incident data are manually ingested rather than derived from runtime telemetry
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Runtime Tool Gateway actions now automatically derive SLO measurements, model cost/token events, and incidents for threshold breaches. Manual SLO/cost/incident ingestion remains available and is explicitly labeled with source/provenance metadata. A telemetry derivation replay endpoint was added for backfill/idempotent reprocessing, numeric token usage counters are preserved in sanitized runtime summaries, and the observability dashboard shows source and freshness hints.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/db/migrations/0083_observability_telemetry_sources.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0083_observability_telemetry_sources.down.sql`
+- `packages/product-platform/src/product_platform/observability/models.py`
+- `packages/product-platform/src/product_platform/observability/repository.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/tool_gateway/runtime_audit.py`
+- `packages/product-platform/src/product_platform/tool_gateway/decision.py`
+- `packages/product-platform/frontend/src/api/observability.ts`
+- `packages/product-platform/frontend/src/features/observability/ObservabilityPage.tsx`
+- `packages/product-platform/frontend/src/features/observability/ObservabilityPage.test.tsx`
+- `packages/product-platform/tests/test_observability_telemetry_derivation_phase4.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+
+**Tests added or updated:**
+- `ObservabilityTelemetryDerivationPhase4Tests::test_manual_slo_and_cost_ingestion_are_labeled_manual`
+- `ObservabilityTelemetryDerivationPhase4Tests::test_runtime_tool_telemetry_derives_slo_cost_and_incidents`
+- `ObservabilityPage` focused Vitest source/freshness assertions
+- `DatabaseMigrationPhase1Tests` migration chain expectation through `0083`
+
+**Validation performed:**
+- `python3 -m pytest tests/test_observability_telemetry_derivation_phase4.py` - passed
+- `python3 -m pytest tests/test_observability_telemetry_derivation_phase4.py tests/test_observability_overall.py tests/test_observability_trace_eval_phase2.py tests/test_observability_artifact_evidence_phase3.py tests/test_tool_gateway_runtime_audit_phase2.py` - passed
+- `python3 -m ruff check src/product_platform/observability/models.py src/product_platform/observability/repository.py src/product_platform/api/app.py src/product_platform/tool_gateway/runtime_audit.py src/product_platform/tool_gateway/decision.py tests/test_observability_telemetry_derivation_phase4.py` - passed
+- `python3 -m mypy src/product_platform/observability src/product_platform/tool_gateway/runtime_audit.py src/product_platform/tool_gateway/decision.py` - passed
+- `npm test -- ObservabilityPage.test.tsx` - passed
+- `npm run typecheck` - passed
+- `npm run lint -- src/api/observability.ts src/features/observability/ObservabilityPage.tsx src/features/observability/ObservabilityPage.test.tsx` - passed
+- `npm run build` - passed with existing Vite chunk-size warning
+- `python3 -m pytest tests/test_db_phase1.py` - passed
+- `python3 -m ruff check tests/test_db_phase1.py` - passed
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Risky
 
@@ -280,4 +550,3 @@ None.
 ## 7. Feature-Level Target State
 
 Observability should become a native execution timeline and OTel-compatible export surface. Data models should include traces, spans, runs, sessions, steps, tool calls, model calls, policy decisions, artifacts, eval results, costs, and incidents. APIs should ingest/query spans and evals. Workers and SDKs should propagate W3C trace context. UI should show waterfall/timeline views and link artifacts/evidence. SLOs and costs should derive from telemetry. Tests should prove trace propagation, runtime linkage, artifact evidence, OTel export, and metric derivation.
-

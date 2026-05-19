@@ -43,6 +43,15 @@ MAX_PAYLOAD_SUMMARY_ITEMS = 50
 MAX_PAYLOAD_SUMMARY_STRING_LENGTH = 120
 MAX_PAYLOAD_SUMMARY_TOTAL_CHARS = 16_384
 REDACTED_PAYLOAD_VALUE = "[redacted]"
+SAFE_NUMERIC_USAGE_KEYS = {
+    "completion_tokens",
+    "input_tokens",
+    "output_tokens",
+    "prompt_tokens",
+    "total_tokens",
+    "tokens",
+    "units",
+}
 SECRET_LIKE_KEY_TOKENS = (
     "authorization",
     "api_key",
@@ -848,6 +857,8 @@ def _summarize_value(key: str, value: Any, *, depth: int) -> Any:
     if depth > MAX_PAYLOAD_SUMMARY_DEPTH:
         return "[truncated]"
     lowered_key = key.lower()
+    if lowered_key in SAFE_NUMERIC_USAGE_KEYS and isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
     if any(token in lowered_key for token in SECRET_LIKE_KEY_TOKENS):
         return REDACTED_PAYLOAD_VALUE
     if isinstance(value, dict):
