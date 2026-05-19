@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import os
 from hashlib import sha256
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -15,6 +16,21 @@ from product_platform.policies.models import PolicyLintRequest
 
 class WorkflowRunnerError(ValueError):
     """Raised when a workflow command cannot be executed safely."""
+
+
+MAX_WORKFLOW_SCAN_FILES = 1_000
+MAX_WORKFLOW_SCAN_FILE_BYTES = 1_000_000
+EXCLUDED_WORKFLOW_SCAN_DIRS = {
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "dist",
+    "build",
+    "node_modules",
+    "__pycache__",
+}
+WORKFLOW_SCAN_SUFFIXES = {".py", ".js", ".json", ".toml", ".yaml", ".yml"}
 
 
 @dataclass(frozen=True)
@@ -242,7 +258,10 @@ def _run_security_scan(repo_root: Path) -> WorkflowRunner:
         )
         if isinstance(target, WorkflowRunResult):
             return target
-        files = _candidate_files(target)
+        try:
+            files = _candidate_files(target)
+        except WorkflowRunnerError as exc:
+            return _failed_result("security.scan", "scan_limit_exceeded", str(exc))
         finding_count = 0
         for path in files:
             try:
@@ -285,7 +304,10 @@ def _run_sbom_generate(repo_root: Path) -> WorkflowRunner:
         )
         if isinstance(target, WorkflowRunResult):
             return target
-        files = _candidate_files(target)
+        try:
+            files = _candidate_files(target)
+        except WorkflowRunnerError as exc:
+            return _failed_result("sbom.generate", "scan_limit_exceeded", str(exc))
         components = sorted({_component_name(path) for path in files})
         summary = {
             "target_path": _relative_path(repo_root, target),
@@ -368,12 +390,38 @@ def _resolve_existing_repo_path(
 
 def _candidate_files(path: Path) -> list[Path]:
     if path.is_file():
+        _validate_scan_file(path)
         return [path]
-    return [
-        candidate
-        for candidate in path.rglob("*")
-        if candidate.is_file() and candidate.suffix in {".py", ".js", ".json", ".toml", ".yaml", ".yml"}
-    ]
+    files: list[Path] = []
+    for root, dirnames, filenames in os.walk(path):
+        dirnames[:] = [
+            dirname
+            for dirname in sorted(dirnames)
+            if dirname not in EXCLUDED_WORKFLOW_SCAN_DIRS
+        ]
+        root_path = Path(root)
+        for filename in sorted(filenames):
+            candidate = root_path / filename
+            if candidate.suffix not in WORKFLOW_SCAN_SUFFIXES:
+                continue
+            _validate_scan_file(candidate)
+            files.append(candidate)
+            if len(files) > MAX_WORKFLOW_SCAN_FILES:
+                raise WorkflowRunnerError(
+                    f"workflow scan exceeded {MAX_WORKFLOW_SCAN_FILES} candidate files"
+                )
+    return files
+
+
+def _validate_scan_file(path: Path) -> None:
+    try:
+        size_bytes = path.stat().st_size
+    except OSError as exc:
+        raise WorkflowRunnerError(f"cannot inspect candidate file {path}") from exc
+    if size_bytes > MAX_WORKFLOW_SCAN_FILE_BYTES:
+        raise WorkflowRunnerError(
+            f"candidate file {path} exceeds {MAX_WORKFLOW_SCAN_FILE_BYTES} bytes"
+        )
 
 
 def _component_name(path: Path) -> str:

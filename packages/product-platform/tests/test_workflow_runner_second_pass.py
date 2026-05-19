@@ -135,6 +135,25 @@ class WorkflowRunnerSecondPassTests(unittest.TestCase):
         self.assertEqual(dependency.status, "failed")
         self.assertEqual(dependency.summary["error"], "manifest_not_found")
 
+    def test_workflow_scan_adapters_enforce_directory_and_file_size_bounds(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            (root_path / "src").mkdir()
+            (root_path / "src" / "safe.py").write_text("print('ok')\n")
+            (root_path / "node_modules" / "pkg").mkdir(parents=True)
+            (root_path / "node_modules" / "pkg" / "package.json").write_text('{"ignored": true}')
+
+            registry = build_default_workflow_runner_registry(repo_root=root_path)
+            scanned = registry.run("shell:security.scan", {"target_path": "."})
+            large = root_path / "large.json"
+            large.write_text("x" * 1_000_001)
+            oversized = registry.run("shell:sbom.generate", {"target_path": "large.json"})
+
+            self.assertEqual(scanned.status, "succeeded")
+            self.assertEqual(scanned.summary["file_count"], 1)
+            self.assertEqual(oversized.status, "failed")
+            self.assertEqual(oversized.summary["error"], "scan_limit_exceeded")
+
     def test_audit_export_and_compliance_report_generation_create_linked_artifacts(self) -> None:
         export = self.client.post(
             "/api/v1/audit/export",

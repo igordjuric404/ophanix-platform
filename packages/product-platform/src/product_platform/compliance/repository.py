@@ -59,9 +59,10 @@ class ComplianceReportValidationError(ValueError):
 class AuditExportRepository:
     """Repository for audit export metadata."""
 
-    def __init__(self, connection: Connection, organization_id: str) -> None:
+    def __init__(self, connection: Connection, organization_id: str, environment_id: str) -> None:
         self.connection = connection
         self.organization_id = organization_id
+        self.environment_id = environment_id
 
     def create(self, body: AuditExportRequest, *, actor_id: str) -> Row:
         export_id = generate_id("audexp")
@@ -70,14 +71,15 @@ class AuditExportRepository:
         self.connection.execute(
             """
             INSERT INTO audit_exports (
-                id, organization_id, filters_json, format, status,
+                id, organization_id, environment_id, filters_json, format, status,
                 artifact_uri, created_by, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 export_id,
                 self.organization_id,
+                self.environment_id,
                 json.dumps(_clean_filters(body.filters), sort_keys=True),
                 body.format,
                 "ready",
@@ -90,9 +92,9 @@ class AuditExportRepository:
             """
             SELECT *
             FROM audit_exports
-            WHERE id = ? AND organization_id = ?
+            WHERE id = ? AND organization_id = ? AND environment_id = ?
             """,
-            (export_id, self.organization_id),
+            (export_id, self.organization_id, self.environment_id),
         ).fetchone()
         if row is None:
             raise ValueError("Created audit export could not be loaded.")
@@ -137,9 +139,14 @@ def audit_export_query(
         raise AuditExportValidationError(
             "Unsupported audit export filter(s): " + ", ".join(unknown)
         )
+    requested_environment_id = cleaned.get("environment_id")
+    if requested_environment_id is not None and str(requested_environment_id) != environment_id:
+        raise AuditExportValidationError(
+            "Audit export environment filter must match the selected request environment."
+        )
     return AuditEventQuery(
         organization_id=organization_id,
-        environment_id=str(cleaned.get("environment_id") or environment_id),
+        environment_id=environment_id,
         event_type=_string_filter(cleaned, "event_type"),
         source_component=_string_filter(cleaned, "source_component"),
         actor_type=_string_filter(cleaned, "actor_type"),
@@ -186,6 +193,7 @@ def audit_export_response(row: Row) -> AuditExportResponse:
     return AuditExportResponse(
         id=row["id"],
         organization_id=row["organization_id"],
+        environment_id=row["environment_id"],
         filters=json.loads(row["filters_json"] or "{}"),
         format=row["format"],
         status=row["status"],
@@ -254,10 +262,22 @@ def _audit_events_csv(event_rows: list[dict[str, Any]]) -> str:
     writer = csv.DictWriter(output, fieldnames=fields)
     writer.writeheader()
     for event in event_rows:
-        row = {field: event.get(field) for field in fields}
-        row["payload_json"] = json.dumps(event.get("payload_json") or {}, sort_keys=True)
+        row = {field: _csv_safe_cell(event.get(field)) for field in fields}
+        row["payload_json"] = _csv_safe_cell(
+            json.dumps(event.get("payload_json") or {}, sort_keys=True)
+        )
         writer.writerow(row)
     return output.getvalue()
+
+
+def _csv_safe_cell(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value)
+    stripped = text.lstrip(" \t\r\n")
+    if stripped and stripped[0] in {"=", "+", "-", "@"}:
+        return "'" + text
+    return text
 
 
 def _audit_events_markdown(
@@ -809,8 +829,8 @@ class ComplianceRepository:
                 body.framework_id,
                 body.name,
                 "draft",
-                body.date_from,
-                body.date_to,
+                body.date_from.isoformat(),
+                body.date_to.isoformat(),
                 actor_id,
                 None,
                 json.dumps({}, sort_keys=True),
@@ -864,7 +884,10 @@ class ComplianceRepository:
         evidence_rows = self._report_evidence_rows(report)
         violation_rows = self._report_violation_rows(report)
         control_rows = self._report_control_rows(report["framework_id"])
-        verification = AuditEventRepository(self.connection).verify_range(self.organization_id)
+        verification = AuditEventRepository(self.connection).verify_range(
+            self.organization_id,
+            environment_id=self.environment_id,
+        )
         summary = {
             "framework_name": report["framework_name"],
             "control_count": len(control_rows),
@@ -1221,6 +1244,7 @@ class ComplianceRepository:
         ).fetchall()
 
     def _report_violation_rows(self, report: Row) -> list[Row]:
+        date_from, date_to = _report_datetime_bounds(report["date_from"], report["date_to"])
         return self.connection.execute(
             """
             SELECT v.*, c.control_code
@@ -1232,6 +1256,8 @@ class ComplianceRepository:
               AND f.organization_id = ?
               AND c.framework_id = ?
               AND v.status != ?
+              AND v.created_at >= ?
+              AND v.created_at <= ?
             ORDER BY v.created_at DESC, v.id DESC
             """,
             (
@@ -1240,6 +1266,8 @@ class ComplianceRepository:
                 self.organization_id,
                 report["framework_id"],
                 "resolved",
+                date_from,
+                date_to,
             ),
         ).fetchall()
 

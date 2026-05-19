@@ -52,6 +52,86 @@ class AuditPhase3Tests(unittest.TestCase):
         finally:
             database.close()
 
+    def test_hash_range_verification_is_environment_scoped(self) -> None:
+        database = create_migrated_test_database()
+        try:
+            with database.transaction() as connection:
+                seed_demo_data(connection)
+                connection.execute(
+                    """
+                    INSERT INTO environments
+                        (id, organization_id, name, slug, type, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "env_other",
+                        "org_default",
+                        "Other",
+                        "other",
+                        "development",
+                        "2026-04-30T00:00:00+00:00",
+                        "2026-04-30T00:00:00+00:00",
+                    ),
+                )
+                repository = AuditEventRepository(connection)
+                repository.insert(_event("evt_default_a"))
+                repository.insert(_event("evt_other", environment_id="env_other"))
+                repository.insert(_event("evt_default_b"))
+                connection.execute(
+                    "UPDATE audit_events SET payload_json = ? WHERE id = ?",
+                    (json.dumps({"tampered": True}), "evt_other"),
+                )
+
+            repository = AuditEventRepository(database.connect())
+            scoped = repository.verify_range("org_default", environment_id="env_default")
+            organization_wide = repository.verify_range("org_default")
+
+            self.assertTrue(scoped.valid)
+            self.assertEqual(scoped.checked_count, 2)
+            self.assertFalse(organization_wide.valid)
+            self.assertEqual(organization_wide.failed_event_id, "evt_other")
+        finally:
+            database.close()
+
+    def test_stream_cursor_from_other_environment_does_not_advance_selected_environment(self) -> None:
+        database = create_migrated_test_database()
+        try:
+            with database.transaction() as connection:
+                seed_demo_data(connection)
+                connection.execute(
+                    """
+                    INSERT INTO environments
+                        (id, organization_id, name, slug, type, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "env_other",
+                        "org_default",
+                        "Other",
+                        "other",
+                        "development",
+                        "2026-04-30T00:00:00+00:00",
+                        "2026-04-30T00:00:00+00:00",
+                    ),
+                )
+                repository = AuditEventRepository(connection)
+                repository.insert(_event("evt_default_cursor_a"))
+                repository.insert(_event("evt_other_cursor", environment_id="env_other"))
+                repository.insert(_event("evt_default_cursor_b"))
+
+            streamed = AuditEventRepository(database.connect()).stream_events(
+                organization_id="org_default",
+                environment_id="env_default",
+                last_event_id="evt_other_cursor",
+            )
+
+            self.assertEqual(
+                [event.id for event in streamed],
+                ["evt_default_cursor_a", "evt_default_cursor_b"],
+            )
+        finally:
+            database.close()
+
 
 class AuditPhase3ApiTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -119,11 +199,11 @@ class AuditPhase3ApiTests(unittest.TestCase):
             database.close()
 
 
-def _event(event_id: str) -> AuditEventEnvelope:
+def _event(event_id: str, *, environment_id: str = "env_default") -> AuditEventEnvelope:
     return AuditEventEnvelope(
         id=event_id,
         organization_id="org_default",
-        environment_id="env_default",
+        environment_id=environment_id,
         event_type="test.hash",
         source_component="tests",
         actor_type="system",

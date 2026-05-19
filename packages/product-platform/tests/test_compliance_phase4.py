@@ -95,10 +95,21 @@ class CompliancePhase4ReportTests(unittest.TestCase):
                 "date_to": "2020-01-01",
             },
         )
+        invalid_format = self.client.post(
+            "/api/v1/compliance/reports",
+            headers=self._headers(),
+            json={
+                "framework_id": self._soc2_framework_id(),
+                "name": "Invalid Format Report",
+                "date_from": "not-a-date",
+                "date_to": "2020-01-01",
+            },
+        )
 
         self.assertEqual(report["status"], "draft")
         self.assertEqual(report["summary"], {})
         self.assertEqual(invalid.status_code, 422, invalid.text)
+        self.assertEqual(invalid_format.status_code, 422, invalid_format.text)
 
     def test_generate_report_selects_evidence_and_open_violations(self) -> None:
         self._insert_policy_denial_and_recompute()
@@ -121,6 +132,28 @@ class CompliancePhase4ReportTests(unittest.TestCase):
         self.assertIn("policy_decision evidence", payload["rendered_markdown"])
         self.assertIn("## Open Violations", payload["rendered_markdown"])
         self.assertIn("Audit hash status:", payload["rendered_markdown"])
+
+    def test_generate_report_excludes_violations_outside_period(self) -> None:
+        self._insert_policy_denial_and_recompute()
+        response = self.client.post(
+            "/api/v1/compliance/reports",
+            headers=self._headers(),
+            json={
+                "framework_id": self._soc2_framework_id(),
+                "name": "Historical SOC 2 Evidence Report",
+                "date_from": "2020-01-01",
+                "date_to": "2021-01-01",
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+
+        generated = self.client.post(
+            f"/api/v1/compliance/reports/{response.json()['id']}/generate",
+            headers=self._headers(),
+        )
+
+        self.assertEqual(generated.status_code, 200, generated.text)
+        self.assertEqual(generated.json()["summary"]["open_violation_count"], 0)
 
     def test_download_returns_generated_markdown(self) -> None:
         self._insert_policy_denial_and_recompute()

@@ -84,6 +84,28 @@ class MarketplaceInstallationPhase3Tests(unittest.TestCase):
         self.assertEqual(listed.status_code, 200, listed.text)
         self.assertEqual(listed.json()[0]["id"], payload["id"])
 
+    def test_duplicate_active_install_is_rejected(self) -> None:
+        plugin = self._import_manifest(sample_plugin_manifests()[0])
+        version_id = plugin["versions"][0]["id"]
+        self._check_allow(version_id)
+        first = self.client.post(
+            "/api/v1/marketplace/installations",
+            headers=self._headers(),
+            json={"plugin_version_id": version_id, "environment_id": "env_default"},
+        )
+        self.assertEqual(first.status_code, 201, first.text)
+
+        duplicate = self.client.post(
+            "/api/v1/marketplace/installations",
+            headers=self._headers(),
+            json={"plugin_version_id": version_id, "environment_id": "env_default"},
+        )
+
+        self.assertEqual(duplicate.status_code, 409, duplicate.text)
+        self.assertIn("already installed", duplicate.json()["message"])
+        listed = self.client.get("/api/v1/marketplace/installations", headers=self._headers())
+        self.assertEqual(len(listed.json()), 1)
+
     def test_install_denied_plugin_fails(self) -> None:
         plugin = self._import_manifest(sample_plugin_manifests()[1])
         version_id = plugin["versions"][0]["id"]

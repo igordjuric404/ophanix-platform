@@ -251,8 +251,12 @@ class PluginInstaller:
         _seen: Optional[set[str]] = None,
     ) -> Path:
         manifest = self._registry.get_plugin(name, version)
-        # Signature verification — only when keys are configured and signature exists
-        if verify and self._trusted_keys and manifest.signature:
+        if verify:
+            if not manifest.signature:
+                raise MarketplaceError(
+                    f"Plugin {name}@{manifest.version} has no signature; "
+                    "install with verify=False to bypass (not recommended)"
+                )
             if manifest.author not in self._trusted_keys:
                 raise MarketplaceError(
                     f"Plugin {name}@{manifest.version} signed by untrusted "
@@ -261,7 +265,7 @@ class PluginInstaller:
             verify_signature(manifest, self._trusted_keys[manifest.author])
         if _seen is None:
             _seen = set()
-        self._resolve_dependencies(manifest, _seen=_seen)
+        self._resolve_dependencies(manifest, verify=verify, _seen=_seen)
         dest = self._plugins_dir / name
         dest.mkdir(parents=True, exist_ok=True)
         manifest_file = dest / MANIFEST_FILENAME
@@ -289,7 +293,9 @@ class PluginInstaller:
                     logger.warning("Skipping invalid plugin at %s", child)
         return results
 
-    def _resolve_dependencies(self, manifest: PluginManifest, *, _seen: set[str]) -> None:
+    def _resolve_dependencies(
+        self, manifest: PluginManifest, *, verify: bool, _seen: set[str]
+    ) -> None:
         if manifest.name in _seen:
             raise MarketplaceError(f"Circular dependency detected: {manifest.name}")
         _seen.add(manifest.name)
@@ -298,7 +304,7 @@ class PluginInstaller:
             dest = self._plugins_dir / dep_name
             if dest.exists():
                 continue
-            self.install(dep_name, dep_version, verify=True, _seen=_seen)
+            self.install(dep_name, dep_version, verify=verify, _seen=_seen)
 
     @staticmethod
     def check_sandbox(module_name: str) -> bool:

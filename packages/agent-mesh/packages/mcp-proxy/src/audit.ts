@@ -26,6 +26,25 @@ export interface AuditEvent {
 }
 
 export class AuditLogger {
+  private static readonly MAX_REDACTION_DEPTH = 8;
+  private static readonly MAX_OBJECT_KEYS = 100;
+  private static readonly MAX_ARRAY_ITEMS = 100;
+  private static readonly MAX_STRING_LENGTH = 500;
+  private static readonly SENSITIVE_KEY_PATTERNS = [
+    'password',
+    'passwd',
+    'secret',
+    'token',
+    'key',
+    'credential',
+    'authorization',
+    'cookie',
+    'set-cookie',
+    'api_key',
+    'apikey',
+    'private',
+  ];
+
   private options: AuditLoggerOptions;
   private stream: WriteStream | null = null;
   private previousHash: string = '0'.repeat(64);
@@ -61,17 +80,23 @@ export class AuditLogger {
   private formatCloudEvent(event: AuditEvent): object {
     const id = randomUUID();
     const time = new Date().toISOString();
+    const sanitizedArguments = this.sanitizeArguments(event.arguments);
+    const loggedEvent = {
+      ...event,
+      arguments: sanitizedArguments,
+    };
 
     // Compute hash chain hash for tamper detection
-    const dataJson = JSON.stringify(event);
-    const entryHash = this.computeHash(`${this.previousHash}:${dataJson}`);
+    const previousHash = this.previousHash;
+    const dataJson = JSON.stringify(loggedEvent);
+    const entryHash = this.computeHash(`${previousHash}:${dataJson}`);
     this.previousHash = entryHash;
 
     if (this.options.format === 'json') {
       return {
         id,
         timestamp: time,
-        ...event,
+        ...loggedEvent,
         _hash: entryHash,
       };
     }
@@ -86,7 +111,7 @@ export class AuditLogger {
       datacontenttype: 'application/json',
       data: {
         tool: event.tool,
-        arguments: this.sanitizeArguments(event.arguments),
+        arguments: sanitizedArguments,
         decision: event.decision,
         reason: event.reason,
         matched_rule: event.rule,
@@ -96,7 +121,7 @@ export class AuditLogger {
       // Extension attributes for AgentMesh
       agentmeshversion: '1.0',
       entryhash: entryHash,
-      previoushash: this.previousHash,
+      previoushash: previousHash,
     };
   }
 
@@ -107,21 +132,56 @@ export class AuditLogger {
   private sanitizeArguments(args?: Record<string, any>): Record<string, any> | undefined {
     if (!args) return undefined;
 
-    // Redact potentially sensitive fields
-    const sensitiveKeys = ['password', 'secret', 'token', 'key', 'credential', 'api_key'];
-    const sanitized: Record<string, any> = {};
+    return this.sanitizeValue(args, 0) as Record<string, any>;
+  }
 
-    for (const [key, value] of Object.entries(args)) {
-      if (sensitiveKeys.some(s => key.toLowerCase().includes(s))) {
-        sanitized[key] = '[REDACTED]';
-      } else if (typeof value === 'string' && value.length > 500) {
-        sanitized[key] = value.substring(0, 500) + '...[truncated]';
-      } else {
-        sanitized[key] = value;
+  private sanitizeValue(value: unknown, depth: number): unknown {
+    if (depth > AuditLogger.MAX_REDACTION_DEPTH) {
+      return '[MAX_DEPTH]';
+    }
+    if (typeof value === 'string') {
+      return this.sanitizeString(value);
+    }
+    if (value === null || typeof value !== 'object') {
+      return value;
+    }
+    if (Array.isArray(value)) {
+      const items = value
+        .slice(0, AuditLogger.MAX_ARRAY_ITEMS)
+        .map((item) => this.sanitizeValue(item, depth + 1));
+      if (value.length > AuditLogger.MAX_ARRAY_ITEMS) {
+        items.push(`[${value.length - AuditLogger.MAX_ARRAY_ITEMS} more item(s) truncated]`);
       }
+      return items;
     }
 
+    const sanitized: Record<string, unknown> = {};
+    const entries = Object.entries(value as Record<string, unknown>).slice(0, AuditLogger.MAX_OBJECT_KEYS);
+    for (const [key, nestedValue] of entries) {
+      if (this.isSensitiveKey(key)) {
+        sanitized[key] = '[REDACTED]';
+      } else {
+        sanitized[key] = this.sanitizeValue(nestedValue, depth + 1);
+      }
+    }
+    const remainingKeys = Object.keys(value as Record<string, unknown>).length - entries.length;
+    if (remainingKeys > 0) {
+      sanitized.__truncated_keys = remainingKeys;
+    }
     return sanitized;
+  }
+
+  private isSensitiveKey(key: string): boolean {
+    const normalized = key.toLowerCase();
+    return AuditLogger.SENSITIVE_KEY_PATTERNS.some((pattern) => normalized.includes(pattern));
+  }
+
+  private sanitizeString(value: string): string {
+    const normalized = value.replace(/[\u0000-\u001f\u007f]/g, ' ');
+    if (normalized.length > AuditLogger.MAX_STRING_LENGTH) {
+      return normalized.substring(0, AuditLogger.MAX_STRING_LENGTH) + '...[truncated]';
+    }
+    return normalized;
   }
 
   close(): void {

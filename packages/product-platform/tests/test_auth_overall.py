@@ -35,7 +35,10 @@ class AuthOverallValidationTests(unittest.TestCase):
 
     def test_platform_admin_can_create_environment_and_api_key(self) -> None:
         token = self._token_for("admin@example.com", ["Platform Admin"])
-        headers = {"Authorization": f"Bearer {token}"}
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-Environment-ID": "env_default",
+        }
 
         environment = self.client.post(
             "/api/v1/environments",
@@ -55,7 +58,10 @@ class AuthOverallValidationTests(unittest.TestCase):
 
     def test_viewer_can_inspect_but_not_mutate_resources(self) -> None:
         token = self._token_for("viewer@example.com", ["Viewer"])
-        headers = {"Authorization": f"Bearer {token}"}
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-Environment-ID": "env_default",
+        }
 
         orgs = self.client.get("/api/v1/organizations", headers=headers)
         envs = self.client.get("/api/v1/environments", headers=headers)
@@ -78,4 +84,3 @@ class AuthOverallValidationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

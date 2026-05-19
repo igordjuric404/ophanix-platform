@@ -69,9 +69,16 @@ class EnvironmentSecretProvider:
             env_name = stripped[4:].strip().upper()
             if not ENV_SECRET_NAME_PATTERN.fullmatch(env_name):
                 raise ValueError("env: secret_ref must contain a valid environment variable name.")
+            if not env_name.startswith(self.prefix):
+                raise ValueError("env: secret_ref must use the configured environment secret prefix.")
             return env_name
         normalized = re.sub(r"[^A-Za-z0-9]", "_", stripped).upper()
         return f"{self.prefix}{normalized}"
+
+    def validate_reference(self, secret_ref: str) -> str:
+        """Validate a caller-provided reference and return the environment variable it resolves to."""
+
+        return self._env_name_for_ref(secret_ref)
 
 
 DEFAULT_SECRET_PROVIDER = DemoLocalSecretProvider()
@@ -90,6 +97,13 @@ def is_supported_secret_manager_ref(secret_manager_ref: str | None) -> bool:
         return False
     normalized = secret_manager_ref.strip().lower()
     return normalized in ENV_SECRET_MANAGER_REFS or normalized.startswith("env:")
+
+
+def validate_secret_reference_for_provider(secret_ref: str, provider: SecretProvider) -> None:
+    """Reject secret references that the configured provider cannot safely resolve."""
+
+    if isinstance(provider, EnvironmentSecretProvider):
+        provider.validate_reference(secret_ref)
 
 
 def build_secret_provider(secret_manager_ref: str | None, *, environment: str) -> SecretProvider:

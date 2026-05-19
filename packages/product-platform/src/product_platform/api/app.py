@@ -499,8 +499,11 @@ from product_platform.runtime.sandbox import (
     sandbox_profile_response,
 )
 from product_platform.runtime.sagas import (
+    SAGA_EXECUTABLE_STATUSES,
+    SAGA_TERMINAL_STATUSES,
     SagaNotFoundError,
     SagaRepository,
+    SagaStateTransitionError,
     SagaStepValidationError,
     saga_event_response,
     saga_response,
@@ -1318,6 +1321,21 @@ def create_app(
                         code="FORBIDDEN",
                         message="Environment access is denied.",
                     )
+                allowed_environment_ids = list(getattr(principal, "environment_ids", []))
+                if principal.actor_type == "api_key" and not allowed_environment_ids:
+                    return _error_response(
+                        request,
+                        status_code=403,
+                        code="FORBIDDEN",
+                        message="Environment access is denied.",
+                    )
+                if allowed_environment_ids and selected_environment_id not in allowed_environment_ids:
+                    return _error_response(
+                        request,
+                        status_code=403,
+                        code="FORBIDDEN",
+                        message="Environment access is denied.",
+                    )
             request.state.selected_organization_id = organization_id
             request.state.selected_environment_id = selected_environment_id
         return await call_next(request)
@@ -1681,6 +1699,21 @@ def create_app(
 
     def _api_key_store(connection: Any) -> DatabaseApiKeyStore:
         return DatabaseApiKeyStore(connection, api_key_hash_pepper)
+
+    def _api_key_environment_scope(
+        requested_environment_ids: list[str],
+        *,
+        organization_id: str,
+        selected_environment_id: str,
+    ) -> list[str]:
+        environment_ids = list(requested_environment_ids or [selected_environment_id])
+        if not environment_ids:
+            raise HTTPException(status_code=400, detail="At least one API key environment is required.")
+        for requested_environment_id in environment_ids:
+            environment = tenants.get_environment(requested_environment_id)
+            if environment is None or environment.organization_id != organization_id:
+                raise HTTPException(status_code=400, detail="API key environment is not visible.")
+        return environment_ids
 
     def _create_generated_artifact(
         *,
@@ -3262,6 +3295,33 @@ def create_app(
             payload_json=session.model_dump(),
         )
 
+    def _archive_runtime_session_if_active(
+        *,
+        repository: RuntimeRepository,
+        audit_repository: AuditEventRepository,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        session_id: str,
+        reason: str,
+        correlation_id: str | None,
+    ) -> RuntimeSessionResponse | None:
+        session_row = repository.get_session(session_id)
+        if session_row is None or session_row["state"] != "active":
+            return None
+        session = runtime_session_response(repository.end_session(session_id, reason=reason))
+        audit_repository.insert(
+            _runtime_session_audit_event(
+                organization_id=organization_id,
+                environment_id=environment_id,
+                actor_id=actor_id,
+                event_type="runtime.session.ended",
+                session=session,
+                correlation_id=correlation_id,
+            )
+        )
+        return session
+
     def _runtime_action_audit_event(
         *,
         organization_id: str,
@@ -4302,6 +4362,7 @@ def create_app(
     async def create_api_key(
         body: ApiKeyCreateRequest,
         current_user: UserPrincipal = Depends(require_permission(Permission.API_KEYS_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
     ) -> ApiKeyCreateResponse:
         """Create a scoped API key and return its one-time secret."""
 
@@ -4313,6 +4374,11 @@ def create_app(
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        environment_ids = _api_key_environment_scope(
+            body.environment_ids,
+            organization_id=current_user.organization_id,
+            selected_environment_id=environment_id,
+        )
         if use_persistent_api_keys:
             with _audit_database().transaction() as connection:
                 record, secret = _api_key_store(connection).create_key(
@@ -4320,6 +4386,7 @@ def create_app(
                     name=body.name,
                     scopes=delegated_scopes,
                     kind=body.kind,
+                    environment_ids=environment_ids,
                     expires_at=body.expires_at,
                 )
         else:
@@ -4328,6 +4395,7 @@ def create_app(
                 name=body.name,
                 scopes=delegated_scopes,
                 kind=body.kind,
+                environment_ids=environment_ids,
                 expires_at=body.expires_at,
             )
         return ApiKeyCreateResponse(key=record.to_response(), secret=secret)
@@ -4422,14 +4490,16 @@ def create_app(
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
         current_user: UserPrincipal = Depends(require_permission(Permission.AUDIT_READ)),
+        environment_id: str = Depends(require_environment_context),
     ) -> list[AuditEventEnvelope]:
-        """List audit events for the current organization."""
+        """List audit events for the selected environment."""
 
         if current_user.organization_id is None:
             return []
         return AuditEventRepository(_audit_database().connect()).query(
             AuditEventQuery(
                 organization_id=current_user.organization_id,
+                environment_id=environment_id,
                 event_type=event_type,
                 source_component=source_component,
                 actor_type=actor_type,
@@ -4463,7 +4533,7 @@ def create_app(
 
         organization_id = _require_organization_id(current_user)
         with _audit_database().transaction() as connection:
-            row = AuditExportRepository(connection, organization_id).create(
+            row = AuditExportRepository(connection, organization_id, environment_id).create(
                 body,
                 actor_id=current_user.id,
             )
@@ -4500,14 +4570,16 @@ def create_app(
         last_event_id: str | None = None,
         limit: int = Query(default=100, ge=1, le=500),
         current_user: UserPrincipal = Depends(require_permission(Permission.AUDIT_READ)),
+        environment_id: str = Depends(require_environment_context),
     ) -> StreamingResponse:
-        """Stream current audit events as server-sent events."""
+        """Stream current audit events for the selected environment as server-sent events."""
 
         if current_user.organization_id is None:
             events = []
         else:
             events = AuditEventRepository(_audit_database().connect()).stream_events(
                 organization_id=current_user.organization_id,
+                environment_id=environment_id,
                 event_type=event_type,
                 last_event_id=last_event_id,
                 limit=limit,
@@ -4523,13 +4595,14 @@ def create_app(
     async def get_audit_event(
         event_id: str,
         current_user: UserPrincipal = Depends(require_permission(Permission.AUDIT_READ)),
+        environment_id: str = Depends(require_environment_context),
     ) -> AuditEventEnvelope:
-        """Get a single audit event."""
+        """Get a single audit event in the selected environment."""
 
         if current_user.organization_id is None:
             raise HTTPException(status_code=404, detail="Audit event not found.")
         event = AuditEventRepository(_audit_database().connect()).get(
-            event_id, current_user.organization_id
+            event_id, current_user.organization_id, environment_id=environment_id
         )
         if event is None:
             raise HTTPException(status_code=404, detail="Audit event not found.")
@@ -5644,7 +5717,7 @@ def create_app(
     )
     async def recalculate_trust(
         body: TrustRecalculateRequest | None = None,
-        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
         environment_id: str = Depends(require_environment_context),
     ) -> TrustRecalculationRunResponse:
         """Recalculate trust scores from current audit and trust events."""
@@ -5781,7 +5854,7 @@ def create_app(
     async def simulate_trust_handshake(
         body: TrustHandshakeRequest,
         request: Request,
-        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
         environment_id: str = Depends(require_environment_context),
     ) -> TrustHandshakeResponse:
         """Simulate and persist an explainable trust handshake."""
@@ -8548,13 +8621,14 @@ def create_app(
     async def verify_audit_event(
         event_id: str,
         current_user: UserPrincipal = Depends(require_permission(Permission.AUDIT_READ)),
+        environment_id: str = Depends(require_environment_context),
     ) -> AuditVerificationResult:
-        """Verify one audit event hash."""
+        """Verify one audit event hash in the selected environment."""
 
         if current_user.organization_id is None:
             raise HTTPException(status_code=404, detail="Audit event not found.")
         return AuditEventRepository(_audit_database().connect()).verify_event(
-            event_id, current_user.organization_id
+            event_id, current_user.organization_id, environment_id=environment_id
         )
 
     @app.post(
@@ -8564,13 +8638,15 @@ def create_app(
     )
     async def verify_audit_range(
         current_user: UserPrincipal = Depends(require_permission(Permission.AUDIT_READ)),
+        environment_id: str = Depends(require_environment_context),
     ) -> AuditVerificationResult:
-        """Verify the current organization's audit hash chain."""
+        """Verify the selected environment's audit hash chain."""
 
         if current_user.organization_id is None:
             return AuditVerificationResult(valid=True, checked_count=0)
         return AuditEventRepository(_audit_database().connect()).verify_range(
-            current_user.organization_id
+            current_user.organization_id,
+            environment_id=environment_id,
         )
 
     @app.post("/api/v1/jobs", response_model=JobResponse, status_code=201, tags=["jobs"])
@@ -9203,6 +9279,7 @@ def create_app(
 
         organization_id = _require_organization_id(current_user)
         context = _request_context_from_request(request)
+        owned_runtime_session_id: str | None = None
         try:
             with _audit_database().transaction() as connection:
                 saga_repository = SagaRepository(connection, organization_id, environment_id)
@@ -9214,6 +9291,8 @@ def create_app(
                 steps = saga_repository.list_steps(saga_id)
                 if not steps:
                     raise SagaExecutionError("Saga must have at least one step before execution.")
+                if saga_row["status"] not in SAGA_EXECUTABLE_STATUSES:
+                    raise SagaExecutionError(f"Saga cannot be executed from status: {saga_row['status']}.")
 
                 runtime_session_id = body.runtime_session_id or saga_row["runtime_session_id"]
                 if runtime_session_id:
@@ -9230,6 +9309,7 @@ def create_app(
                         )
                     )
                     session = runtime_session_response(session_row)
+                    owned_runtime_session_id = session.id
                     saga_repository.link_runtime_session(saga_id, session.id)
                     audit_repository.insert(
                         _runtime_session_audit_event(
@@ -9254,11 +9334,44 @@ def create_app(
                         payload={"failure_actions": body.failure_actions},
                     )
                 )
+
+            try:
                 result = await SagaExecutionService(
-                    saga_repository,
+                    SagaRepository(_audit_database().connect(), organization_id, environment_id),
                     action_runner=DemoSafeActionRunner(failure_actions=body.failure_actions),
+                    transaction_factory=_audit_database().transaction,
                 ).execute(saga_id)
+            except Exception:
+                if owned_runtime_session_id is not None:
+                    with _audit_database().transaction() as connection:
+                        _archive_runtime_session_if_active(
+                            repository=RuntimeRepository(connection, organization_id, environment_id),
+                            audit_repository=AuditEventRepository(connection),
+                            organization_id=organization_id,
+                            environment_id=environment_id,
+                            actor_id=current_user.id,
+                            session_id=owned_runtime_session_id,
+                            reason="Saga execution aborted.",
+                            correlation_id=context.correlation_id,
+                        )
+                raise
+
+            with _audit_database().transaction() as connection:
+                saga_repository = SagaRepository(connection, organization_id, environment_id)
+                runtime_repository = RuntimeRepository(connection, organization_id, environment_id)
+                audit_repository = AuditEventRepository(connection)
                 final_saga = _saga_detail_response(saga_repository, saga_id)
+                if owned_runtime_session_id is not None:
+                    _archive_runtime_session_if_active(
+                        repository=runtime_repository,
+                        audit_repository=audit_repository,
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        session_id=owned_runtime_session_id,
+                        reason=f"Saga execution ended with status: {result.status}.",
+                        correlation_id=context.correlation_id,
+                    )
 
                 step_event_by_status = {
                     "committed": "saga.step.committed",
@@ -9333,7 +9446,7 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except RuntimeSessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except (RuntimeAgentNotActiveError, SagaExecutionError, SagaStepValidationError) as exc:
+        except (RuntimeAgentNotActiveError, SagaExecutionError, SagaStateTransitionError, SagaStepValidationError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post(
@@ -9352,7 +9465,6 @@ def create_app(
 
         organization_id = _require_organization_id(current_user)
         context = _request_context_from_request(request)
-        terminal_statuses = {"completed", "compensated", "failed", "compensation_failed", "cancelled"}
         try:
             with _audit_database().transaction() as connection:
                 saga_repository = SagaRepository(connection, organization_id, environment_id)
@@ -9361,9 +9473,14 @@ def create_app(
                 saga_row = saga_repository.get_saga(saga_id)
                 if saga_row is None:
                     raise SagaNotFoundError("Saga not found.")
-                if saga_row["status"] in terminal_statuses:
+                if saga_row["status"] in SAGA_TERMINAL_STATUSES:
                     raise SagaExecutionError("Terminal saga cannot be cancelled.")
-                saga_repository.update_saga_status(saga_id, "cancelled", mark_finished=True)
+                saga_repository.update_saga_status(
+                    saga_id,
+                    "cancelled",
+                    mark_finished=True,
+                    expected_statuses=set(SAGA_EXECUTABLE_STATUSES) | {"running", "compensating"},
+                )
                 saga_repository.create_event(
                     saga_id,
                     event_type="saga.cancelled",
@@ -9407,7 +9524,7 @@ def create_app(
                 return saga
         except SagaNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except (RuntimeSessionStateError, SagaExecutionError) as exc:
+        except (RuntimeSessionStateError, SagaExecutionError, SagaStateTransitionError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/v1/jobs", response_model=list[JobResponse], tags=["jobs"])
@@ -10908,6 +11025,8 @@ def create_app(
             try:
                 row = repository.create_installation(body, installed_by=current_user.id)
             except PluginInstallationBlockedError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except PluginInstallationStateError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             except PluginNotFoundError as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc

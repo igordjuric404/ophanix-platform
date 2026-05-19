@@ -328,27 +328,36 @@ class MarketplaceCatalogRepository:
             self.check_policy(body.plugin_version_id, PluginPolicyCheckRequest())
         if not self.version_install_allowed(body.plugin_version_id):
             raise PluginInstallationBlockedError("Plugin policy result denies installation.")
+        if self._active_installation(
+            body.plugin_version_id,
+            body.environment_id,
+            body.target_agent_id,
+        ) is not None:
+            raise PluginInstallationStateError("Plugin version is already installed for this target.")
         installation_id = generate_id("pluginst")
         now = utc_now_iso()
-        self.connection.execute(
-            """
-            INSERT INTO plugin_installations (
-                id, plugin_version_id, environment_id, target_agent_id,
-                status, installed_by, installed_at, uninstalled_at
+        try:
+            self.connection.execute(
+                """
+                INSERT INTO plugin_installations (
+                    id, plugin_version_id, environment_id, target_agent_id,
+                    status, installed_by, installed_at, uninstalled_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    installation_id,
+                    body.plugin_version_id,
+                    body.environment_id,
+                    body.target_agent_id,
+                    "installed",
+                    installed_by,
+                    now,
+                    None,
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                installation_id,
-                body.plugin_version_id,
-                body.environment_id,
-                body.target_agent_id,
-                "installed",
-                installed_by,
-                now,
-                None,
-            ),
-        )
+        except IntegrityError as exc:
+            raise PluginInstallationStateError("Plugin version is already installed for this target.") from exc
         row = self.get_installation(installation_id)
         if row is None:
             raise PluginInstallationNotFoundError("Created installation could not be loaded.")
@@ -915,6 +924,32 @@ class MarketplaceCatalogRepository:
         ).fetchone()
         if row is None:
             raise PluginNotFoundError("Target agent not found.")
+
+    def _active_installation(
+        self,
+        version_id: str,
+        environment_id: str,
+        target_agent_id: str | None,
+    ) -> Row | None:
+        if target_agent_id is None:
+            target_clause = "target_agent_id IS NULL"
+            values: tuple[object, ...] = (version_id, environment_id)
+        else:
+            target_clause = "target_agent_id = ?"
+            values = (version_id, environment_id, target_agent_id)
+        return self.connection.execute(
+            f"""
+            SELECT *
+            FROM plugin_installations
+            WHERE plugin_version_id = ?
+              AND environment_id = ?
+              AND status = 'installed'
+              AND {target_clause}
+            ORDER BY installed_at DESC, id DESC
+            LIMIT 1
+            """,
+            values,
+        ).fetchone()
 
     def _version_requires_review(self, version_id: str) -> bool:
         version = self.get_version(version_id)

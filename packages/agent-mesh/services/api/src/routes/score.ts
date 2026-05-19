@@ -8,6 +8,14 @@ const router = Router();
 
 router.get("/score/:agentDid", (req: Request, res: Response) => {
   const { agentDid } = req.params;
+  if (!req.authenticatedAgent) {
+    res.status(401).json({ error: "Authentication is required" });
+    return;
+  }
+  if (req.authenticatedAgent.did !== agentDid) {
+    res.status(403).json({ error: "API key is not authorized for this agent" });
+    return;
+  }
   const agent = getAgent(agentDid);
 
   if (!agent) {

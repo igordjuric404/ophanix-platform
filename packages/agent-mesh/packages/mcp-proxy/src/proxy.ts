@@ -83,16 +83,16 @@ export class MCPProxy {
   }
 
   private resolveCommand(command: string): string {
-    // If it's an npm package, use npx
-    if (command.startsWith('@') || !command.includes('/') && !command.includes('\\')) {
-      if (process.platform === 'win32') {
-        return `npx.cmd`;
-      }
-      // On Unix, prepend npx
-      this.options.args = [command, ...this.options.args];
-      return 'npx';
+    const trimmed = command.trim();
+    if (!trimmed) {
+      throw new Error('MCP command is required');
     }
-    return command;
+    if (trimmed.startsWith('@')) {
+      throw new Error(
+        'NPM package specifiers are not executed implicitly. Install the MCP server and pass an explicit executable path or local binary.',
+      );
+    }
+    return trimmed;
   }
 
   private handleClientInput(data: Buffer): void {
@@ -143,6 +143,7 @@ export class MCPProxy {
 
     const toolName = message.params?.name;
     const toolArgs = message.params?.arguments || {};
+    const rateLimitIdentity = this.resolveRateLimitIdentity(message, toolArgs);
 
     // 1. Sanitize inputs
     if (this.options.sanitize !== false) {
@@ -165,7 +166,7 @@ export class MCPProxy {
     }
 
     // 2. Rate limiting
-    if (this.rateLimiter && !this.rateLimiter.allow(toolName)) {
+    if (this.rateLimiter && !this.rateLimiter.allow(toolName, rateLimitIdentity)) {
       this.options.auditLogger.log({
         type: 'ai.agentmesh.ratelimit.exceeded',
         tool: toolName,
@@ -205,6 +206,31 @@ export class MCPProxy {
     }
 
     return message;
+  }
+
+  private resolveRateLimitIdentity(message: any, toolArgs: Record<string, any>): string {
+    const metadata = message.params?._meta || message.params?.meta || {};
+    const agentMeshMetadata = metadata.agentmesh || metadata.agentMesh || {};
+    const candidate =
+      agentMeshMetadata.rate_limit_identity ||
+      agentMeshMetadata.rateLimitIdentity ||
+      agentMeshMetadata.caller_id ||
+      agentMeshMetadata.callerId ||
+      metadata.client_id ||
+      metadata.clientId ||
+      metadata.session_id ||
+      metadata.sessionId ||
+      toolArgs.tenant_id ||
+      toolArgs.tenantId ||
+      toolArgs.organization_id ||
+      toolArgs.organizationId ||
+      toolArgs.agent_id ||
+      toolArgs.agentId ||
+      process.env.AGENTMESH_RATE_LIMIT_IDENTITY;
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return `caller:${candidate.trim()}`;
+    }
+    return `process:${process.ppid}:${this.options.command}`;
   }
 
   private sendErrorResponse(id: number | string, message: string): void {

@@ -6,7 +6,6 @@ export interface AgentRecord {
   sponsor_email: string;
   capabilities: string[];
   public_key: string;
-  private_key: string;
   api_key: string;
   status: "active" | "suspended" | "revoked";
   trust_score: TrustScore;
@@ -49,6 +48,8 @@ export interface RegisterRequest {
   name: string;
   sponsor_email: string;
   capabilities: string[];
+  public_key: string;
+  registration_signature: string;
 }
 
 export interface RegisterResponse {
@@ -60,15 +61,16 @@ export interface RegisterResponse {
 
 export interface VerifyResponse {
   registered: boolean;
-  trust_score: number;
-  sponsor: string;
   status: string;
-  capabilities: string[];
+  trust_score?: number;
+  sponsor?: string;
+  capabilities?: string[];
 }
 
 export interface HandshakeRequest {
   agent_did: string;
   challenge: string;
+  signature: string;
   capabilities_requested: string[];
 }
 
@@ -76,7 +78,7 @@ export interface HandshakeResponse {
   verified: boolean;
   trust_score: number;
   capabilities_granted: string[];
-  signature: string;
+  signature_verified: boolean;
 }
 
 export interface ScoreResponse {

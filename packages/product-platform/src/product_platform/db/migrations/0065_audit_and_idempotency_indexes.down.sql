@@ -1,0 +1,3 @@
+DROP INDEX IF EXISTS idx_tool_invocation_idempotency_status_updated;
+DROP INDEX IF EXISTS idx_audit_events_org_env_type_created;
+DROP INDEX IF EXISTS idx_audit_events_org_env_created;

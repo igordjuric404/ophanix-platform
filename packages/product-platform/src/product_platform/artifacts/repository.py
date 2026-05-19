@@ -239,8 +239,8 @@ class ArtifactRepository:
                 (target_id, self.organization_id, self.environment_id),
             ),
             "audit_export": (
-                "SELECT 1 FROM audit_exports WHERE id = ? AND organization_id = ?",
-                (target_id, self.organization_id),
+                "SELECT 1 FROM audit_exports WHERE id = ? AND organization_id = ? AND environment_id = ?",
+                (target_id, self.organization_id, self.environment_id),
             ),
             "compliance_report": (
                 "SELECT 1 FROM compliance_reports WHERE id = ? AND organization_id = ? AND environment_id = ?",

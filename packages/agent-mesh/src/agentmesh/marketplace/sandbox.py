@@ -4,23 +4,28 @@
 Plugin Sandbox — Subprocess Isolation
 ======================================
 
-Executes plugin code in an isolated subprocess with:
+Executes trusted plugin code in a cooperative subprocess runner with:
 - Blocked dangerous module imports (subprocess, os, ctypes, etc.)
-- Restricted built-in functions at runtime (no exec/eval/breakpoint)
-- JSON-only I/O (stdin → stdout)
+- Restricted built-in functions at runtime (no exec/eval/open/breakpoint)
+- JSON-only I/O (stdin -> stdout)
 - Configurable timeout (default 30s)
-- No access to AgentMesh internals
+- Minimal inherited environment
 
-Security layers (defense-in-depth):
-1. Subprocess isolation — separate process, no shared memory
+Security layers (defense-in-depth for trusted plugins):
+1. Subprocess separation — separate process, no shared memory
 2. Import guard — blocks dangerous modules before AND during execution
-3. Builtin restriction — exec/eval/breakpoint removed AFTER module loading
-   (kept during import because importlib.exec_module needs them)
+3. Builtin restriction — exec/eval/open/input/breakpoint removed
 4. Minimal environment — no secrets leaked via env vars
 5. Timeout — kills runaway processes
 
+This is not an OS sandbox. Untrusted plugin execution must use a container,
+WASM runtime, microVM, or another hardened isolation boundary.
+
 Usage:
-    sandbox = PluginSandbox(plugins_dir=Path("./plugins"))
+    sandbox = PluginSandbox(
+        plugins_dir=Path("./plugins"),
+        allow_unsafe_subprocess=True,  # trusted plugins only
+    )
     result = sandbox.execute(
         plugin_name="my-plugin",
         entry_function="process",
@@ -105,10 +110,8 @@ _RUNNER_TEMPLATE = textwrap.dedent("""\
         json.dump({{"error": f"Entry function '{{entry_func}}' not found in {{module_name}}"}}, sys.stdout)
         sys.exit(1)
 
-    # ── 4. Strip dangerous builtins AFTER import ─────────────────
-    # exec/eval/compile are needed by importlib during module loading,
-    # but must be blocked before running plugin entry code.
-    _STRIP = ("exec", "eval", "breakpoint")
+    # ── 4. Strip dangerous builtins BEFORE running plugin entry code ─
+    _STRIP = ("exec", "eval", "open", "input", "breakpoint")
     if isinstance(__builtins__, dict):
         for _b in _STRIP:
             __builtins__.pop(_b, None)
@@ -157,10 +160,12 @@ class PluginSandbox:
         plugins_dir: Path,
         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
         python_executable: Optional[str] = None,
+        allow_unsafe_subprocess: bool = False,
     ) -> None:
         self._plugins_dir = plugins_dir
         self._timeout = timeout_seconds
         self._python = python_executable or sys.executable
+        self._allow_unsafe_subprocess = allow_unsafe_subprocess
 
     def execute(
         self,
@@ -188,6 +193,12 @@ class PluginSandbox:
         Raises:
             PluginSandboxError: On timeout, crash, or invalid output.
         """
+        if not self._allow_unsafe_subprocess:
+            raise PluginSandboxError(
+                "PluginSandbox provides cooperative subprocess controls only, not a production "
+                "sandbox for untrusted code. Pass allow_unsafe_subprocess=True only for trusted "
+                "plugins, or execute plugins inside an OS-level sandbox."
+            )
         plugin_dir = self._plugins_dir / plugin_name
         if not plugin_dir.is_dir():
             raise PluginSandboxError(f"Plugin not installed: {plugin_name}")

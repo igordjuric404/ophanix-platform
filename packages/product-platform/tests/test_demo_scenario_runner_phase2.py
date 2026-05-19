@@ -92,6 +92,21 @@ class DemoScenarioRunnerPhase2Tests(unittest.TestCase):
         self.assertEqual(payload.step_runs[0].status, DemoStepRunStatus.SUCCEEDED)
         self.assertEqual(payload.step_runs[0].result, {"ok": True})
 
+    def test_unit_step_run_can_only_be_claimed_once(self) -> None:
+        with self.database.transaction() as connection:
+            repository = DemoScenarioRepository(connection, "org_default", "env_default")
+            run = repository.create_run(
+                "customer-support-refund",
+                started_by="user_admin",
+            )
+            next_step = repository.next_pending_step_run(run["id"])
+            self.assertIsNotNone(next_step)
+            first_claim = repository.mark_step_running(next_step["id"])
+            second_claim = repository.mark_step_running(next_step["id"])
+
+        self.assertIsNotNone(first_claim)
+        self.assertIsNone(second_claim)
+
     def test_unit_step_executor_dispatches_by_action_type(self) -> None:
         detail = self.repository.get_detail("customer-support-refund")
         self.assertIsNotNone(detail)

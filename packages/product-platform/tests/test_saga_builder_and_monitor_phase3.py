@@ -189,14 +189,76 @@ class SagaBuilderPhase3Tests(unittest.TestCase):
         with self.database.connect() as connection:
             sessions = connection.execute("SELECT * FROM runtime_sessions").fetchall()
         self.assertEqual(len(sessions), 1)
-        self.assertEqual(sessions[0]["state"], "active")
+        self.assertEqual(sessions[0]["state"], "archived")
+        self.assertIsNotNone(sessions[0]["ended_at"])
 
         event_types = [row["event_type"] for row in self._audit_events()]
         self.assertIn("runtime.session.started", event_types)
+        self.assertIn("runtime.session.ended", event_types)
         self.assertIn("saga.started", event_types)
         self.assertIn("saga.step.committed", event_types)
         self.assertIn("saga.completed", event_types)
         self.assertIn("runtime.action", event_types)
+        self.assertLess(event_types.index("saga.started"), event_types.index("runtime.action"))
+
+    def test_completed_saga_cannot_be_reexecuted(self) -> None:
+        saga = self._build_refund_saga()
+        executed = self.client.post(
+            f"/api/v1/runtime/sagas/{saga['id']}/execute",
+            headers=self._headers(),
+            json={},
+        )
+        self.assertEqual(executed.status_code, 200, executed.text)
+
+        replayed = self.client.post(
+            f"/api/v1/runtime/sagas/{saga['id']}/execute",
+            headers=self._headers(),
+            json={},
+        )
+
+        self.assertEqual(replayed.status_code, 400, replayed.text)
+        self.assertIn("completed", replayed.json()["message"])
+
+    def test_execute_with_caller_supplied_runtime_session_leaves_session_active(self) -> None:
+        saga = self._build_refund_saga()
+        session = self.client.post(
+            "/api/v1/runtime/sessions",
+            headers=self._headers(),
+            json={"agent_id": "agent_claims", "ring": 2, "sponsor_user_id": "user_admin"},
+        )
+        self.assertEqual(session.status_code, 201, session.text)
+
+        executed = self.client.post(
+            f"/api/v1/runtime/sagas/{saga['id']}/execute",
+            headers=self._headers(),
+            json={"runtime_session_id": session.json()["id"]},
+        )
+
+        self.assertEqual(executed.status_code, 200, executed.text)
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT state FROM runtime_sessions WHERE id = ?",
+                (session.json()["id"],),
+            ).fetchone()
+        self.assertEqual(row["state"], "active")
+
+    def test_unknown_saga_action_is_rejected_at_step_creation(self) -> None:
+        saga = self._create_saga()
+
+        added = self.client.post(
+            f"/api/v1/runtime/sagas/{saga['id']}/steps",
+            headers=self._headers(),
+            json={
+                "step_order": 1,
+                "name": "Unknown action",
+                "action_name": "claims.transfer_cash",
+                "target_agent_id": "agent_claims",
+                "required_capability": "claims.lookup",
+            },
+        )
+
+        self.assertEqual(added.status_code, 400, added.text)
+        self.assertIn("supported saga actions", added.json()["message"])
 
     def test_failed_step_emits_compensation_and_runtime_audit(self) -> None:
         saga = self._build_refund_saga()
@@ -229,6 +291,9 @@ class SagaBuilderPhase3Tests(unittest.TestCase):
         denied_payload = json.loads(denied_runtime_actions[0]["payload_json"])
         self.assertEqual(denied_payload["action"], "notifications.send_email")
         self.assertEqual(denied_payload["status"], "failed")
+        with self.database.connect() as connection:
+            session = connection.execute("SELECT * FROM runtime_sessions").fetchone()
+        self.assertEqual(session["state"], "archived")
 
     def test_completed_saga_has_final_status_on_detail(self) -> None:
         saga = self._build_refund_saga()

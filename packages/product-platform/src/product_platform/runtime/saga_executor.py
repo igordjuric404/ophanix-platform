@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from product_platform.db.postgres import Row
-from typing import Any, Iterable
+from typing import Any, Callable, ContextManager, Iterable, Iterator
 
-from product_platform.runtime.sagas import SagaNotFoundError, SagaRepository
+from product_platform.db.postgres import Connection, Row
+from product_platform.runtime.saga_actions import SUPPORTED_SAGA_ACTIONS
+from product_platform.runtime.sagas import (
+    SAGA_EXECUTABLE_STATUSES,
+    SagaNotFoundError,
+    SagaRepository,
+)
 
 
 class SagaExecutionError(ValueError):
@@ -38,14 +44,7 @@ class SagaCompensationResult:
 class DemoSafeActionRunner:
     """Deterministic action runner for demo workflows only."""
 
-    SAFE_ACTIONS = {
-        "claims.lookup_order",
-        "claims.issue_refund",
-        "claims.reverse_refund",
-        "claims.release_lookup_hold",
-        "notifications.send_email",
-        "notifications.retract_email",
-    }
+    SAFE_ACTIONS = SUPPORTED_SAGA_ACTIONS
 
     def __init__(self, *, failure_actions: Iterable[str] | None = None) -> None:
         self.failure_actions = set(failure_actions or [])
@@ -76,31 +75,39 @@ class SagaExecutionService:
         repository: SagaRepository,
         *,
         action_runner: DemoSafeActionRunner | None = None,
+        transaction_factory: Callable[[], ContextManager[Connection]] | None = None,
     ) -> None:
         SagaOrchestrator, _StepState = _load_hypervisor_saga_classes()
         self.repository = repository
         self.action_runner = action_runner or DemoSafeActionRunner()
+        self.transaction_factory = transaction_factory
         self._orchestrator_cls = SagaOrchestrator
 
     async def execute(self, saga_id: str) -> SagaExecutionResult:
         """Execute all pending saga steps in order."""
 
-        saga = self.repository.get_saga(saga_id)
-        if saga is None:
-            raise SagaNotFoundError("Saga not found.")
-        steps = self.repository.list_steps(saga_id)
-        if not steps:
-            raise SagaExecutionError("Saga must have at least one step before execution.")
-        if saga["status"] in {"running", "compensating"}:
-            raise SagaExecutionError("Saga is already executing.")
+        with self._repository_context() as repository:
+            saga = repository.get_saga(saga_id)
+            if saga is None:
+                raise SagaNotFoundError("Saga not found.")
+            steps = repository.list_steps(saga_id)
+            if not steps:
+                raise SagaExecutionError("Saga must have at least one step before execution.")
+            if saga["status"] not in SAGA_EXECUTABLE_STATUSES:
+                raise SagaExecutionError(f"Saga cannot be executed from status: {saga['status']}.")
 
-        self.repository.update_saga_status(saga_id, "running", mark_started=True)
-        self.repository.create_event(
-            saga_id,
-            event_type="saga.started",
-            message="Saga execution started.",
-            payload={"step_count": len(steps)},
-        )
+            repository.update_saga_status(
+                saga_id,
+                "running",
+                mark_started=True,
+                expected_statuses=SAGA_EXECUTABLE_STATUSES,
+            )
+            repository.create_event(
+                saga_id,
+                event_type="saga.started",
+                message="Saga execution started.",
+                payload={"step_count": len(steps)},
+            )
 
         orchestrator = self._orchestrator_cls()
         hypervisor_saga = orchestrator.create_saga(saga["runtime_session_id"] or saga["id"])
@@ -121,18 +128,19 @@ class SagaExecutionService:
 
         executed_step_ids: list[str] = []
         for step, hypervisor_step in step_pairs:
-            self.repository.update_step_status(
-                step["id"],
-                "executing",
-                result={"action_name": step["action_name"]},
-            )
-            self.repository.create_event(
-                saga_id,
-                step_id=step["id"],
-                event_type="saga.step.started",
-                message=f"Step {step['step_order']} started.",
-                payload={"action_name": step["action_name"]},
-            )
+            with self._repository_context() as repository:
+                repository.update_step_status(
+                    step["id"],
+                    "executing",
+                    result={"action_name": step["action_name"]},
+                )
+                repository.create_event(
+                    saga_id,
+                    step_id=step["id"],
+                    event_type="saga.step.started",
+                    message=f"Step {step['step_order']} started.",
+                    payload={"action_name": step["action_name"]},
+                )
             try:
                 result = await orchestrator.execute_step(
                     hypervisor_saga.saga_id,
@@ -144,18 +152,19 @@ class SagaExecutionService:
                     ),
                 )
             except Exception as exc:
-                self.repository.update_step_status(
-                    step["id"],
-                    "failed",
-                    result={"action_name": step["action_name"], "error": str(exc)},
-                )
-                self.repository.create_event(
-                    saga_id,
-                    step_id=step["id"],
-                    event_type="saga.step.failed",
-                    message=f"Step {step['step_order']} failed.",
-                    payload={"action_name": step["action_name"], "error": str(exc)},
-                )
+                with self._repository_context() as repository:
+                    repository.update_step_status(
+                        step["id"],
+                        "failed",
+                        result={"action_name": step["action_name"], "error": str(exc)},
+                    )
+                    repository.create_event(
+                        saga_id,
+                        step_id=step["id"],
+                        event_type="saga.step.failed",
+                        message=f"Step {step['step_order']} failed.",
+                        payload={"action_name": step["action_name"], "error": str(exc)},
+                    )
                 compensation = await self._compensate(
                     orchestrator,
                     hypervisor_saga.saga_id,
@@ -168,17 +177,23 @@ class SagaExecutionService:
                     final_status = "compensated"
                 else:
                     final_status = "failed"
-                self.repository.update_saga_status(saga_id, final_status, mark_finished=True)
-                self.repository.create_event(
-                    saga_id,
-                    event_type=f"saga.{final_status}",
-                    message="Saga execution ended after failure.",
-                    payload={
-                        "failed_step_id": step["id"],
-                        "compensated_step_ids": compensation.compensated_step_ids,
-                        "compensation_failed_step_ids": compensation.failed_step_ids,
-                    },
-                )
+                with self._repository_context() as repository:
+                    repository.update_saga_status(
+                        saga_id,
+                        final_status,
+                        mark_finished=True,
+                        expected_statuses={"running", "compensating"},
+                    )
+                    repository.create_event(
+                        saga_id,
+                        event_type=f"saga.{final_status}",
+                        message="Saga execution ended after failure.",
+                        payload={
+                            "failed_step_id": step["id"],
+                            "compensated_step_ids": compensation.compensated_step_ids,
+                            "compensation_failed_step_ids": compensation.failed_step_ids,
+                        },
+                    )
                 return SagaExecutionResult(
                     saga_id=saga_id,
                     status=final_status,
@@ -189,26 +204,33 @@ class SagaExecutionService:
                 )
 
             executed_step_ids.append(step["id"])
-            self.repository.update_step_status(
-                step["id"],
-                "committed",
-                result=result,
-            )
-            self.repository.create_event(
-                saga_id,
-                step_id=step["id"],
-                event_type="saga.step.committed",
-                message=f"Step {step['step_order']} committed.",
-                payload={"action_name": step["action_name"], "result": result},
-            )
+            with self._repository_context() as repository:
+                repository.update_step_status(
+                    step["id"],
+                    "committed",
+                    result=result,
+                )
+                repository.create_event(
+                    saga_id,
+                    step_id=step["id"],
+                    event_type="saga.step.committed",
+                    message=f"Step {step['step_order']} committed.",
+                    payload={"action_name": step["action_name"], "result": result},
+                )
 
-        self.repository.update_saga_status(saga_id, "completed", mark_finished=True)
-        self.repository.create_event(
-            saga_id,
-            event_type="saga.completed",
-            message="Saga execution completed.",
-            payload={"executed_step_ids": executed_step_ids},
-        )
+        with self._repository_context() as repository:
+            repository.update_saga_status(
+                saga_id,
+                "completed",
+                mark_finished=True,
+                expected_statuses={"running"},
+            )
+            repository.create_event(
+                saga_id,
+                event_type="saga.completed",
+                message="Saga execution completed.",
+                payload={"executed_step_ids": executed_step_ids},
+            )
         return SagaExecutionResult(
             saga_id=saga_id,
             status="completed",
@@ -226,31 +248,37 @@ class SagaExecutionService:
     ) -> SagaCompensationResult:
         """Run reverse compensation through the hypervisor orchestrator."""
 
-        self.repository.update_saga_status(saga["id"], "compensating")
-        self.repository.create_event(
-            saga["id"],
-            event_type="saga.compensating",
-            message="Saga compensation started.",
-            payload={},
-        )
+        with self._repository_context() as repository:
+            repository.update_saga_status(
+                saga["id"],
+                "compensating",
+                expected_statuses={"running"},
+            )
+            repository.create_event(
+                saga["id"],
+                event_type="saga.compensating",
+                message="Saga compensation started.",
+                payload={},
+            )
         compensated_step_ids: list[str] = []
         failed_step_ids: list[str] = []
 
         async def compensator(hypervisor_step: Any) -> dict:
             step = step_by_hypervisor_id[hypervisor_step.step_id]
             action_name = step["compensation_action"]
-            self.repository.update_step_status(
-                step["id"],
-                "compensating",
-                result={"compensation_action": action_name},
-            )
-            self.repository.create_event(
-                saga["id"],
-                step_id=step["id"],
-                event_type="saga.step.compensating",
-                message=f"Step {step['step_order']} compensation started.",
-                payload={"compensation_action": action_name},
-            )
+            with self._repository_context() as repository:
+                repository.update_step_status(
+                    step["id"],
+                    "compensating",
+                    result={"compensation_action": action_name},
+                )
+                repository.create_event(
+                    saga["id"],
+                    step_id=step["id"],
+                    event_type="saga.step.compensating",
+                    message=f"Step {step['step_order']} compensation started.",
+                    payload={"compensation_action": action_name},
+                )
             try:
                 result = await self.action_runner.run(
                     action_name,
@@ -260,27 +288,29 @@ class SagaExecutionService:
                 )
             except Exception as exc:
                 failed_step_ids.append(step["id"])
-                self.repository.update_step_status(
-                    step["id"],
-                    "compensation_failed",
-                    result={"compensation_action": action_name, "error": str(exc)},
-                )
-                self.repository.create_event(
+                with self._repository_context() as repository:
+                    repository.update_step_status(
+                        step["id"],
+                        "compensation_failed",
+                        result={"compensation_action": action_name, "error": str(exc)},
+                    )
+                    repository.create_event(
+                        saga["id"],
+                        step_id=step["id"],
+                        event_type="saga.step.compensation_failed",
+                        message=f"Step {step['step_order']} compensation failed.",
+                        payload={"compensation_action": action_name, "error": str(exc)},
+                    )
+                raise
+            with self._repository_context() as repository:
+                repository.update_step_status(step["id"], "compensated", result=result)
+                repository.create_event(
                     saga["id"],
                     step_id=step["id"],
-                    event_type="saga.step.compensation_failed",
-                    message=f"Step {step['step_order']} compensation failed.",
-                    payload={"compensation_action": action_name, "error": str(exc)},
+                    event_type="saga.step.compensated",
+                    message=f"Step {step['step_order']} compensated.",
+                    payload={"compensation_action": action_name, "result": result},
                 )
-                raise
-            self.repository.update_step_status(step["id"], "compensated", result=result)
-            self.repository.create_event(
-                saga["id"],
-                step_id=step["id"],
-                event_type="saga.step.compensated",
-                message=f"Step {step['step_order']} compensated.",
-                payload={"compensation_action": action_name, "result": result},
-            )
             compensated_step_ids.append(step["id"])
             return result
 
@@ -290,28 +320,41 @@ class SagaExecutionService:
             if step is None or step["id"] in failed_step_ids:
                 continue
             failed_step_ids.append(step["id"])
-            self.repository.update_step_status(
-                step["id"],
-                "compensation_failed",
-                result={
-                    "compensation_action": step["compensation_action"],
-                    "error": hypervisor_step.error or "Compensation failed.",
-                },
-            )
-            self.repository.create_event(
-                saga["id"],
-                step_id=step["id"],
-                event_type="saga.step.compensation_failed",
-                message=f"Step {step['step_order']} compensation failed.",
-                payload={
-                    "compensation_action": step["compensation_action"],
-                    "error": hypervisor_step.error or "Compensation failed.",
-                },
-            )
+            with self._repository_context() as repository:
+                repository.update_step_status(
+                    step["id"],
+                    "compensation_failed",
+                    result={
+                        "compensation_action": step["compensation_action"],
+                        "error": hypervisor_step.error or "Compensation failed.",
+                    },
+                )
+                repository.create_event(
+                    saga["id"],
+                    step_id=step["id"],
+                    event_type="saga.step.compensation_failed",
+                    message=f"Step {step['step_order']} compensation failed.",
+                    payload={
+                        "compensation_action": step["compensation_action"],
+                        "error": hypervisor_step.error or "Compensation failed.",
+                    },
+                )
         return SagaCompensationResult(
             compensated_step_ids=compensated_step_ids,
             failed_step_ids=failed_step_ids,
         )
+
+    @contextmanager
+    def _repository_context(self) -> Iterator[SagaRepository]:
+        if self.transaction_factory is None:
+            yield self.repository
+            return
+        with self.transaction_factory() as connection:
+            yield SagaRepository(
+                connection,
+                self.repository.organization_id,
+                self.repository.environment_id,
+            )
 
 
 def _load_hypervisor_saga_classes() -> tuple[Any, Any]:

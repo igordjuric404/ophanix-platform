@@ -14,6 +14,13 @@ from product_platform.runtime.models import (
     SagaStepCreateRequest,
     SagaStepResponse,
 )
+from product_platform.runtime.saga_actions import validate_saga_action_name
+
+
+SAGA_TERMINAL_STATUSES = frozenset(
+    {"completed", "compensated", "failed", "compensation_failed", "cancelled"}
+)
+SAGA_EXECUTABLE_STATUSES = frozenset({"draft"})
 
 
 class SagaNotFoundError(ValueError):
@@ -22,6 +29,10 @@ class SagaNotFoundError(ValueError):
 
 class SagaStepValidationError(ValueError):
     """Raised when a saga step is invalid."""
+
+
+class SagaStateTransitionError(ValueError):
+    """Raised when a saga lifecycle transition loses a state guard."""
 
 
 class SagaRepository:
@@ -128,6 +139,11 @@ class SagaRepository:
         self._require_active_agent(body.target_agent_id)
         if body.required_capability:
             self._require_agent_capability(body.target_agent_id, body.required_capability)
+        try:
+            validate_saga_action_name(body.action_name, field_name="action_name")
+            validate_saga_action_name(body.compensation_action, field_name="compensation_action")
+        except ValueError as exc:
+            raise SagaStepValidationError(str(exc)) from exc
         step_id = generate_id("sgstep")
         now = utc_now_iso()
         self.connection.execute(
@@ -222,6 +238,7 @@ class SagaRepository:
         *,
         mark_started: bool = False,
         mark_finished: bool = False,
+        expected_statuses: set[str] | frozenset[str] | None = None,
     ) -> Row:
         """Update saga lifecycle status and timestamps."""
 
@@ -235,8 +252,22 @@ class SagaRepository:
             started_at = now
         if mark_finished:
             finished_at = now
-        self.connection.execute(
-            """
+        expected = tuple(sorted(expected_statuses or ()))
+        expected_clause = ""
+        values: list[object] = [
+            status,
+            started_at,
+            finished_at,
+            now,
+            saga_id,
+            self.organization_id,
+            self.environment_id,
+        ]
+        if expected:
+            expected_clause = f" AND status IN ({', '.join('?' for _ in expected)})"
+            values.extend(expected)
+        cursor = self.connection.execute(
+            f"""
             UPDATE sagas
             SET status = ?,
                 started_at = ?,
@@ -245,17 +276,18 @@ class SagaRepository:
             WHERE id = ?
               AND organization_id = ?
               AND environment_id = ?
+              {expected_clause}
             """,
-            (
-                status,
-                started_at,
-                finished_at,
-                now,
-                saga_id,
-                self.organization_id,
-                self.environment_id,
-            ),
+            values,
         )
+        if expected and cursor.rowcount == 0:
+            current = self.get_saga(saga_id)
+            if current is None:
+                raise SagaNotFoundError("Saga not found.")
+            expected_label = ", ".join(expected)
+            raise SagaStateTransitionError(
+                f"Saga cannot transition from {current['status']} to {status}; expected one of: {expected_label}."
+            )
         row = self.get_saga(saga_id)
         if row is None:
             raise SagaNotFoundError("Updated saga could not be loaded.")

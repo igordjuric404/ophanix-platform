@@ -105,7 +105,7 @@ class WorkflowRepository:
 
     def start_run(self, run_id: str, *, environment_id: str) -> Row:
         now = utc_now_iso()
-        self.connection.execute(
+        cursor = self.connection.execute(
             """
             UPDATE workflow_runs
             SET status = ?, started_at = COALESCE(started_at, ?), updated_at = ?
@@ -116,6 +116,11 @@ class WorkflowRepository:
             """,
             ("running", now, now, run_id, self.organization_id, environment_id, "queued"),
         )
+        if cursor.rowcount == 0:
+            row = self.get_run(run_id, environment_id=environment_id)
+            if row is None:
+                raise ValueError("Workflow run not found.")
+            raise RuntimeError("Workflow run is not queued.")
         row = self.get_run(run_id, environment_id=environment_id)
         if row is None:
             raise ValueError("Workflow run not found.")
@@ -130,7 +135,7 @@ class WorkflowRepository:
     ) -> Row:
         now = utc_now_iso()
         status = "succeeded" if result.status == "succeeded" else "failed"
-        self.connection.execute(
+        cursor = self.connection.execute(
             """
             UPDATE workflow_runs
             SET status = ?,
@@ -141,6 +146,7 @@ class WorkflowRepository:
             WHERE id = ?
               AND organization_id = ?
               AND environment_id = ?
+              AND status = ?
             """,
             (
                 status,
@@ -151,8 +157,14 @@ class WorkflowRepository:
                 run_id,
                 self.organization_id,
                 environment_id,
+                "running",
             ),
         )
+        if cursor.rowcount == 0:
+            row = self.get_run(run_id, environment_id=environment_id)
+            if row is None:
+                raise ValueError("Workflow run not found.")
+            raise RuntimeError("Workflow run is not running.")
         self.replace_logs(run_id, result.logs)
         row = self.get_run(run_id, environment_id=environment_id)
         if row is None:
@@ -166,16 +178,19 @@ class WorkflowRepository:
         if row["status"] not in {"queued", "running"}:
             raise RuntimeError("Completed workflow runs cannot be canceled.")
         now = utc_now_iso()
-        self.connection.execute(
+        cursor = self.connection.execute(
             """
             UPDATE workflow_runs
             SET status = ?, finished_at = ?, updated_at = ?
             WHERE id = ?
               AND organization_id = ?
               AND environment_id = ?
+              AND status IN (?, ?)
             """,
-            ("canceled", now, now, run_id, self.organization_id, environment_id),
+            ("canceled", now, now, run_id, self.organization_id, environment_id, "queued", "running"),
         )
+        if cursor.rowcount == 0:
+            raise RuntimeError("Completed workflow runs cannot be canceled.")
         canceled = self.get_run(run_id, environment_id=environment_id)
         if canceled is None:
             raise ValueError("Workflow run not found.")

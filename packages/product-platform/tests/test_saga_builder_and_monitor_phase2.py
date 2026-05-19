@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 import unittest
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from product_platform.db.seed import seed_demo_data
+from product_platform.db.postgres import Connection
 from product_platform.db.testing import create_migrated_test_database
 from product_platform.runtime.models import SagaCreateRequest, SagaStepCreateRequest
 from product_platform.runtime.saga_executor import DemoSafeActionRunner, SagaExecutionService
-from product_platform.runtime.sagas import SagaRepository
+from product_platform.runtime.sagas import SagaRepository, SagaStepValidationError
 
 
 class SagaBuilderPhase2Tests(unittest.TestCase):
@@ -106,6 +109,75 @@ class SagaBuilderPhase2Tests(unittest.TestCase):
             payload = json.loads(step["result_json"])
             self.assertEqual(payload["action_name"], "claims.lookup_order")
             self.assertTrue(payload["demo_safe"])
+
+    def test_completed_saga_cannot_be_executed_again(self) -> None:
+        with self.database.transaction() as connection:
+            repository = self._repository(connection)
+            saga_id = self._create_saga(repository)
+            repository.add_step(
+                saga_id,
+                SagaStepCreateRequest(
+                    step_order=1,
+                    name="Lookup order",
+                    action_name="claims.lookup_order",
+                    target_agent_id="agent_claims",
+                    required_capability="claims.lookup",
+                ),
+            )
+
+            asyncio.run(SagaExecutionService(repository).execute(saga_id))
+
+            with self.assertRaisesRegex(ValueError, "completed"):
+                asyncio.run(SagaExecutionService(repository).execute(saga_id))
+
+    def test_rejects_unknown_saga_action_when_adding_step(self) -> None:
+        with self.database.transaction() as connection:
+            repository = self._repository(connection)
+            saga_id = self._create_saga(repository)
+
+            with self.assertRaisesRegex(SagaStepValidationError, "supported saga actions"):
+                repository.add_step(
+                    saga_id,
+                    SagaStepCreateRequest(
+                        step_order=1,
+                        name="Unknown action",
+                        action_name="claims.transfer_cash",
+                        target_agent_id="agent_claims",
+                        required_capability="claims.lookup",
+                    ),
+                )
+
+    def test_executor_transaction_factory_keeps_execution_in_short_transactions(self) -> None:
+        transaction_count = 0
+
+        @contextmanager
+        def transaction_factory() -> Iterator[Connection]:
+            nonlocal transaction_count
+            transaction_count += 1
+            with self.database.transaction() as connection:
+                yield connection
+
+        with self.database.transaction() as connection:
+            repository = self._repository(connection)
+            saga_id = self._create_saga(repository)
+            repository.add_step(
+                saga_id,
+                SagaStepCreateRequest(
+                    step_order=1,
+                    name="Lookup order",
+                    action_name="claims.lookup_order",
+                    target_agent_id="agent_claims",
+                    required_capability="claims.lookup",
+                ),
+            )
+
+        repository = SagaRepository(self.database.connect(), "org_default", "env_default")
+        result = asyncio.run(
+            SagaExecutionService(repository, transaction_factory=transaction_factory).execute(saga_id)
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertGreaterEqual(transaction_count, 3)
 
     def test_failed_step_triggers_reverse_compensation(self) -> None:
         with self.database.transaction() as connection:

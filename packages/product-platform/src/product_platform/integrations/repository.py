@@ -21,7 +21,7 @@ from product_platform.integrations.models import (
     ProviderCredentialResponse,
 )
 from product_platform.integrations.health import ProviderHealthResult
-from product_platform.integrations.secrets import SecretProvider
+from product_platform.integrations.secrets import SecretProvider, validate_secret_reference_for_provider
 
 
 REQUIRED_CONFIG_KEYS_BY_FRAMEWORK = {
@@ -113,6 +113,10 @@ class IntegrationRegistryRepository:
 
         if body.secret_ref is not None:
             secret_ref = body.secret_ref
+            try:
+                validate_secret_reference_for_provider(secret_ref, secret_provider)
+            except ValueError as exc:
+                raise ProviderCredentialSecretError(str(exc)) from exc
         elif body.secret_value is not None:
             try:
                 secret_ref = secret_provider.store(body.secret_value)

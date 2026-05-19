@@ -153,6 +153,61 @@ class CompliancePhase1AuditExplorerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("Unsupported audit export filter", response.text)
 
+    def test_audit_export_rejects_environment_filter_mismatch(self) -> None:
+        response = self.client.post(
+            "/api/v1/audit/export",
+            headers=self._headers(),
+            json={"format": "json", "filters": {"environment_id": "env_other"}},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("environment filter must match", response.text)
+
+    def test_audit_csv_export_escapes_spreadsheet_formula_cells(self) -> None:
+        with self.database.transaction() as connection:
+            AuditEventRepository(connection).insert(
+                AuditEventEnvelope(
+                    organization_id="org_default",
+                    environment_id="env_default",
+                    event_type="policy.decision",
+                    source_component="policy-engine",
+                    actor_type="user",
+                    actor_id="=HYPERLINK(\"https://attacker.example\",\"click\")",
+                    resource_type="policy_evaluation",
+                    resource_id="@danger",
+                    decision="deny",
+                    severity="warning",
+                    payload_json={"reason": "+SUM(1,1)"},
+                )
+            )
+
+        response = self.client.post(
+            "/api/v1/audit/export",
+            headers=self._headers(),
+            json={
+                "format": "csv",
+                "filters": {
+                    "actor_id": "=HYPERLINK(\"https://attacker.example\",\"click\")",
+                },
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+
+        artifacts = self.client.get(
+            "/api/v1/artifacts",
+            headers=self._headers(),
+            params={"artifact_type": "audit.export"},
+        )
+        artifact_id = artifacts.json()[0]["id"]
+        download = self.client.get(
+            f"/api/v1/artifacts/{artifact_id}/download",
+            headers=self._headers(),
+        )
+        content = base64.b64decode(download.json()["content_base64"]).decode()
+
+        self.assertIn("'=HYPERLINK", content)
+        self.assertIn("'@danger", content)
+
 
 if __name__ == "__main__":
     unittest.main()

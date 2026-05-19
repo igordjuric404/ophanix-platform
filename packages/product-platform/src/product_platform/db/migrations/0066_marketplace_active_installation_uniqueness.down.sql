@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS idx_plugin_installations_unique_active_agent;
+DROP INDEX IF EXISTS idx_plugin_installations_unique_active_environment;

@@ -42,7 +42,10 @@ class AuthPhase4Tests(unittest.TestCase):
             "/api/v1/auth/dev-login",
             json={"email": "admin@example.com", "roles": ["Platform Admin"]},
         )
-        self.admin_headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        self.admin_headers = {
+            "Authorization": f"Bearer {login.json()['access_token']}",
+            "X-Environment-ID": "env_default",
+        }
 
     def _headers_for(self, email: str, roles: list[str]) -> dict[str, str]:
         login = self.client.post(
@@ -50,7 +53,10 @@ class AuthPhase4Tests(unittest.TestCase):
             json={"email": email, "roles": roles},
         )
         self.assertEqual(login.status_code, 200, login.text)
-        return {"Authorization": f"Bearer {login.json()['access_token']}"}
+        return {
+            "Authorization": f"Bearer {login.json()['access_token']}",
+            "X-Environment-ID": "env_default",
+        }
 
     def _create_key(self, scopes: list[str]) -> dict:
         response = self.client.post(
@@ -66,6 +72,7 @@ class AuthPhase4Tests(unittest.TestCase):
 
         self.assertTrue(created["secret"].startswith("opx_"))
         self.assertEqual(created["key"]["name"], "Scoped key")
+        self.assertEqual(created["key"]["environment_ids"], ["env_default"])
         with self.app.state.database.transaction() as connection:
             row = connection.execute(
                 "SELECT hashed_secret FROM api_keys WHERE id = ?",
@@ -154,6 +161,45 @@ class AuthPhase4Tests(unittest.TestCase):
         listed = self.client.get("/api/v1/api-keys", headers=self.admin_headers).json()
         matching = [key for key in listed if key["id"] == key_id][0]
         self.assertIsNotNone(matching["last_used_at"])
+
+    def test_environment_scoped_key_cannot_use_different_environment(self) -> None:
+        created_environment = self.client.post(
+            "/api/v1/environments",
+            json={"name": "Other", "slug": "other", "type": "development"},
+            headers=self.admin_headers,
+        )
+        self.assertEqual(created_environment.status_code, 201, created_environment.text)
+        created = self._create_key([Permission.POLICY_WRITE])
+
+        response = self.client.post(
+            "/api/v1/policies",
+            headers={
+                "Authorization": f"Bearer {created['secret']}",
+                "X-Environment-ID": created_environment.json()["id"],
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["message"], "Environment access is denied.")
+
+    def test_api_key_with_empty_environment_grants_fails_closed_for_environment_routes(self) -> None:
+        created = self._create_key([Permission.POLICY_WRITE])
+        with self.app.state.database.transaction() as connection:
+            connection.execute(
+                "UPDATE api_keys SET environment_ids_json = ? WHERE id = ?",
+                ("[]", created["key"]["id"]),
+            )
+
+        response = self.client.post(
+            "/api/v1/policies",
+            headers={
+                "Authorization": f"Bearer {created['secret']}",
+                "X-Environment-ID": "env_default",
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["message"], "Environment access is denied.")
 
     def test_api_key_authentication_survives_app_recreation(self) -> None:
         created = self._create_key([Permission.TENANT_READ])

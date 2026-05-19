@@ -11,7 +11,7 @@ installed.
 from __future__ import annotations
 
 import contextlib
-from typing import Any, Generator
+from collections.abc import Generator
 
 try:
     from opentelemetry import metrics, trace
@@ -19,11 +19,6 @@ try:
     _HAS_OTEL = True
 except ImportError:
     _HAS_OTEL = False
-
-
-@contextlib.contextmanager
-def _noop_span(*_args: Any, **_kwargs: Any) -> Generator[None, None, None]:
-    yield
 
 
 class GovernanceInstrumentor:
@@ -62,36 +57,34 @@ class GovernanceInstrumentor:
         ):
             yield
 
-    @contextlib.contextmanager
-    def trace_trust_update(self, agent_id: str, old_score: float, new_score: float) -> Generator[None, None, None]:
+    def trace_trust_update(self, agent_id: str, old_score: float, new_score: float) -> None:
         if not self._enabled:
-            yield
             return
         with self._tracer.start_as_current_span(
             "agt.trust.update",
-            attributes={"agt.agent_id": agent_id, "agt.old_score": old_score, "agt.new_score": new_score},
+            attributes={
+                "agt.agent_id": agent_id,
+                "agt.old_score": old_score,
+                "agt.new_score": new_score,
+            },
         ):
-            yield
+            pass
 
-    @contextlib.contextmanager
-    def trace_audit_append(self, entry_seq: int) -> Generator[None, None, None]:
+    def trace_audit_append(self, entry_seq: int) -> None:
         if not self._enabled:
-            yield
             return
         with self._tracer.start_as_current_span(
             "agt.audit.append", attributes={"agt.seq": entry_seq}
         ):
-            yield
+            pass
 
-    @contextlib.contextmanager
-    def trace_identity_operation(self, op: str, did: str) -> Generator[None, None, None]:
+    def trace_identity_operation(self, op: str, did: str) -> None:
         if not self._enabled:
-            yield
             return
         with self._tracer.start_as_current_span(
             f"agt.identity.{op}", attributes={"agt.did": did}
         ):
-            yield
+            pass
 
     def record_policy_decision(self, decision: str, duration_ms: float) -> None:
         if not self._enabled:

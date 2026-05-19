@@ -29,15 +29,17 @@ export class RateLimiter {
     this.perToolConfig.set(tool, config);
   }
 
-  allow(tool: string): boolean {
+  allow(tool: string, identity: string = 'default'): boolean {
+    const scope = this.normalizeIdentity(identity);
+
     // Check per-tool limit first
     const toolConfig = this.perToolConfig.get(tool);
-    if (toolConfig && !this.checkBucket(`tool:${tool}`, toolConfig)) {
+    if (toolConfig && !this.checkBucket(`${scope}:tool:${tool}`, toolConfig)) {
       return false;
     }
 
     // Check global limit
-    return this.checkBucket('global', this.globalConfig);
+    return this.checkBucket(`${scope}:global`, this.globalConfig);
   }
 
   private checkBucket(key: string, config: RateLimitConfig): boolean {
@@ -85,17 +87,18 @@ export class RateLimiter {
     }
   }
 
-  getStatus(): Record<string, { remaining: number; limit: number }> {
+  getStatus(identity: string = 'default'): Record<string, { remaining: number; limit: number }> {
     const status: Record<string, { remaining: number; limit: number }> = {};
+    const scope = this.normalizeIdentity(identity);
     
-    const globalBucket = this.buckets.get('global');
+    const globalBucket = this.buckets.get(`${scope}:global`);
     status['global'] = {
       remaining: globalBucket?.tokens ?? this.globalConfig.requests,
       limit: this.globalConfig.requests,
     };
 
     for (const [tool, config] of this.perToolConfig) {
-      const bucket = this.buckets.get(`tool:${tool}`);
+      const bucket = this.buckets.get(`${scope}:tool:${tool}`);
       status[tool] = {
         remaining: bucket?.tokens ?? config.requests,
         limit: config.requests,
@@ -103,5 +106,13 @@ export class RateLimiter {
     }
 
     return status;
+  }
+
+  private normalizeIdentity(identity: string): string {
+    const trimmed = identity.trim();
+    if (!trimmed) {
+      return 'default';
+    }
+    return trimmed.replace(/[^a-zA-Z0-9._:-]/g, '_');
   }
 }

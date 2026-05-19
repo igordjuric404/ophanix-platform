@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -31,6 +32,7 @@ class AuditExportResponse(BaseModel):
 
     id: str
     organization_id: str
+    environment_id: str
     filters: dict[str, Any] = Field(default_factory=dict)
     format: str
     status: str
@@ -159,10 +161,10 @@ class ComplianceViolationResponse(BaseModel):
 class ComplianceReportCreateRequest(BaseModel):
     framework_id: str = Field(min_length=1)
     name: str = Field(min_length=1)
-    date_from: str = Field(min_length=1)
-    date_to: str = Field(min_length=1)
+    date_from: date
+    date_to: date
 
-    @field_validator("framework_id", "name", "date_from", "date_to")
+    @field_validator("framework_id", "name")
     @classmethod
     def _strip_report_strings(cls, value: str) -> str:
         stripped = value.strip()

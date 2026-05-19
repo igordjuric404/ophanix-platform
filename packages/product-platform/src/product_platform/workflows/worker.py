@@ -130,11 +130,21 @@ class WorkflowRunWorker:
         with self.database.transaction() as connection:
             jobs = JobStateRepository(connection)
             repository = WorkflowRepository(connection, organization_id)
-            completed = repository.complete_run(
-                workflow_run_id,
-                environment_id=environment_id,
-                result=result,
-            )
+            try:
+                completed = repository.complete_run(
+                    workflow_run_id,
+                    environment_id=environment_id,
+                    result=result,
+                )
+            except RuntimeError:
+                current = repository.get_run(workflow_run_id, environment_id=environment_id)
+                if current is not None and current["status"] == "canceled":
+                    return WorkflowJobExecution(
+                        job_id=job["id"],
+                        workflow_run_id=workflow_run_id,
+                        status="canceled",
+                    )
+                raise
             _store_workflow_output_artifact(
                 connection=connection,
                 organization_id=organization_id,

@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 import { AgentRecord, RegisterRequest } from "../types";
-import { generateKeyPair, generateDid, generateApiKey } from "./identity";
+import { generateDid, generateApiKey } from "./identity";
 import { createInitialTrustScore } from "./trust";
 import { appendAuditEntry } from "./audit";
 
@@ -13,16 +13,17 @@ const apiKeyIndex = new Map<string, string>();
 
 export function registerAgent(req: RegisterRequest): AgentRecord {
   const did = generateDid();
-  const keys = generateKeyPair();
   const apiKey = generateApiKey();
+  const capabilities = [...new Set(req.capabilities.map((capability) => capability.trim()))]
+    .filter(Boolean)
+    .sort();
 
   const record: AgentRecord = {
     did,
-    name: req.name,
-    sponsor_email: req.sponsor_email,
-    capabilities: req.capabilities,
-    public_key: keys.publicKey,
-    private_key: keys.privateKey,
+    name: req.name.trim(),
+    sponsor_email: req.sponsor_email.trim(),
+    capabilities,
+    public_key: req.public_key,
     api_key: apiKey,
     status: "active",
     trust_score: createInitialTrustScore(),
@@ -34,9 +35,9 @@ export function registerAgent(req: RegisterRequest): AgentRecord {
   apiKeyIndex.set(apiKey, did);
 
   appendAuditEntry("agent_registered", did, {
-    name: req.name,
-    sponsor_email: req.sponsor_email,
-    capabilities: req.capabilities,
+    name: record.name,
+    sponsor_email: record.sponsor_email,
+    capabilities: record.capabilities,
   });
 
   return record;

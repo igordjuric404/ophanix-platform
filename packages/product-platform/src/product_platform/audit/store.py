@@ -45,7 +45,7 @@ class AuditEventRepository:
         self.connection = connection
 
     def insert(self, event: AuditEventEnvelope) -> AuditEventEnvelope:
-        previous_hash = self._latest_hash(event.organization_id)
+        previous_hash = self._latest_hash(event.organization_id, event.environment_id)
         self.connection.execute(
             """
             INSERT INTO audit_events (
@@ -89,10 +89,21 @@ class AuditEventRepository:
         )
         return event
 
-    def get(self, event_id: str, organization_id: str) -> AuditEventEnvelope | None:
+    def get(
+        self,
+        event_id: str,
+        organization_id: str,
+        *,
+        environment_id: str | None = None,
+    ) -> AuditEventEnvelope | None:
+        clauses = ["id = ?", "organization_id = ?"]
+        values: list[object] = [event_id, organization_id]
+        if environment_id is not None:
+            clauses.append("environment_id = ?")
+            values.append(environment_id)
         row = self.connection.execute(
-            "SELECT * FROM audit_events WHERE id = ? AND organization_id = ?",
-            (event_id, organization_id),
+            f"SELECT * FROM audit_events WHERE {' AND '.join(clauses)}",
+            values,
         ).fetchone()
         return _row_to_event(row) if row else None
 
@@ -138,19 +149,28 @@ class AuditEventRepository:
         self,
         *,
         organization_id: str,
+        environment_id: str | None = None,
         event_type: str | None = None,
         last_event_id: str | None = None,
         limit: int = 100,
     ) -> list[AuditEventEnvelope]:
         clauses = ["organization_id = ?"]
         values: list[object] = [organization_id]
+        if environment_id is not None:
+            clauses.append("environment_id = ?")
+            values.append(environment_id)
         if event_type is not None:
             clauses.append("event_type = ?")
             values.append(event_type)
         if last_event_id is not None:
+            cursor_clauses = ["id = ?", "organization_id = ?"]
+            cursor_values: list[object] = [last_event_id, organization_id]
+            if environment_id is not None:
+                cursor_clauses.append("environment_id = ?")
+                cursor_values.append(environment_id)
             last_row = self.connection.execute(
-                "SELECT created_at, id FROM audit_events WHERE id = ? AND organization_id = ?",
-                (last_event_id, organization_id),
+                f"SELECT created_at, id FROM audit_events WHERE {' AND '.join(cursor_clauses)}",
+                cursor_values,
             ).fetchone()
             if last_row is not None:
                 clauses.append("(created_at > ? OR (created_at = ? AND id > ?))")
@@ -167,8 +187,14 @@ class AuditEventRepository:
         ).fetchall()
         return [_row_to_event(row) for row in rows]
 
-    def verify_event(self, event_id: str, organization_id: str) -> AuditVerificationResult:
-        event = self.get(event_id, organization_id)
+    def verify_event(
+        self,
+        event_id: str,
+        organization_id: str,
+        *,
+        environment_id: str | None = None,
+    ) -> AuditVerificationResult:
+        event = self.get(event_id, organization_id, environment_id=environment_id)
         if event is None:
             return AuditVerificationResult(
                 valid=False,
@@ -197,22 +223,33 @@ class AuditEventRepository:
             )
         return AuditVerificationResult(valid=True, checked_count=1)
 
-    def verify_range(self, organization_id: str) -> AuditVerificationResult:
+    def verify_range(
+        self,
+        organization_id: str,
+        *,
+        environment_id: str | None = None,
+    ) -> AuditVerificationResult:
+        clauses = ["e.organization_id = ?"]
+        values: list[object] = [organization_id]
+        if environment_id is not None:
+            clauses.append("e.environment_id = ?")
+            values.append(environment_id)
         rows = self.connection.execute(
-            """
+            f"""
             SELECT e.*, h.previous_hash, h.current_hash
             FROM audit_events e
             LEFT JOIN audit_event_hashes h ON h.event_id = e.id
-            WHERE e.organization_id = ?
-            ORDER BY e.created_at ASC, e.id ASC
+            WHERE {' AND '.join(clauses)}
+            ORDER BY e.environment_id ASC, e.created_at ASC, e.id ASC
             """,
-            (organization_id,),
+            values,
         ).fetchall()
-        previous_hash: str | None = None
+        previous_hash_by_environment: dict[str | None, str | None] = {}
         checked_count = 0
         for row in rows:
             checked_count += 1
             event = _row_to_event(row)
+            previous_hash = previous_hash_by_environment.get(event.environment_id)
             if row["current_hash"] is None:
                 return AuditVerificationResult(
                     valid=False,
@@ -236,19 +273,27 @@ class AuditEventRepository:
                     reason="hash_mismatch",
                 )
             previous_hash = row["current_hash"]
+            previous_hash_by_environment[event.environment_id] = previous_hash
         return AuditVerificationResult(valid=True, checked_count=checked_count)
 
-    def _latest_hash(self, organization_id: str) -> str | None:
+    def _latest_hash(self, organization_id: str, environment_id: str | None) -> str | None:
+        clauses = ["e.organization_id = ?"]
+        values: list[object] = [organization_id]
+        if environment_id is None:
+            clauses.append("e.environment_id IS NULL")
+        else:
+            clauses.append("e.environment_id = ?")
+            values.append(environment_id)
         row = self.connection.execute(
-            """
+            f"""
             SELECT h.current_hash
             FROM audit_event_hashes h
             JOIN audit_events e ON e.id = h.event_id
-            WHERE e.organization_id = ?
+            WHERE {' AND '.join(clauses)}
             ORDER BY e.created_at DESC, e.id DESC
             LIMIT 1
             """,
-            (organization_id,),
+            values,
         ).fetchone()
         return row["current_hash"] if row else None
 

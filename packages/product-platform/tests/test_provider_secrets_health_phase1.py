@@ -91,14 +91,14 @@ class ProviderCredentialPhase1Tests(unittest.TestCase):
 
     def test_create_credential_accepts_precreated_secret_ref_for_read_only_provider(self) -> None:
         self.app.state.secret_provider = EnvironmentSecretProvider()
-        with patch.dict(os.environ, {"PROVIDER_TOKEN": "sk-demo-secret"}, clear=False):
+        with patch.dict(os.environ, {"OPHANIX_SECRET_PROVIDER_TOKEN": "sk-demo-secret"}, clear=False):
             credential = self.client.post(
                 "/api/v1/integrations/provider-credentials",
                 headers=self._headers(),
                 json={
                     "name": "OpenAI env key",
                     "provider_type": "model_provider",
-                    "secret_ref": "env:PROVIDER_TOKEN",
+                    "secret_ref": "env:OPHANIX_SECRET_PROVIDER_TOKEN",
                 },
             )
             self.assertEqual(credential.status_code, 201, credential.text)
@@ -108,10 +108,26 @@ class ProviderCredentialPhase1Tests(unittest.TestCase):
                 headers=self._headers(),
             )
 
-        self.assertEqual(credential.json()["secret_ref"], "env:PROVIDER_TOKEN")
+        self.assertEqual(credential.json()["secret_ref"], "env:OPHANIX_SECRET_PROVIDER_TOKEN")
         self.assertNotIn("sk-demo-secret", credential.text)
         self.assertEqual(health.status_code, 201, health.text)
         self.assertEqual(health.json()["status"], "healthy")
+
+    def test_create_credential_rejects_unprefixed_env_secret_ref(self) -> None:
+        self.app.state.secret_provider = EnvironmentSecretProvider()
+
+        response = self.client.post(
+            "/api/v1/integrations/provider-credentials",
+            headers=self._headers(),
+            json={
+                "name": "Unsafe env key",
+                "provider_type": "model_provider",
+                "secret_ref": "env:OPHANIX_SESSION_SECRET",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("configured environment secret prefix", response.text)
 
     def test_create_credential_with_read_only_provider_requires_secret_ref(self) -> None:
         self.app.state.secret_provider = EnvironmentSecretProvider()
@@ -141,11 +157,17 @@ class ProviderCredentialPhase1Tests(unittest.TestCase):
 
             self.assertEqual(provider.retrieve("secref_partner"), "partner-secret")
 
-    def test_environment_secret_provider_reads_explicit_env_refs(self) -> None:
-        with patch.dict(os.environ, {"PARTNER_TOKEN": "partner-token"}, clear=False):
+    def test_environment_secret_provider_reads_explicit_prefixed_env_refs(self) -> None:
+        with patch.dict(os.environ, {"OPHANIX_SECRET_PARTNER_TOKEN": "partner-token"}, clear=False):
             provider = EnvironmentSecretProvider()
 
-            self.assertEqual(provider.retrieve("env:PARTNER_TOKEN"), "partner-token")
+            self.assertEqual(provider.retrieve("env:OPHANIX_SECRET_PARTNER_TOKEN"), "partner-token")
+
+    def test_environment_secret_provider_rejects_explicit_unprefixed_env_refs(self) -> None:
+        provider = EnvironmentSecretProvider()
+
+        with self.assertRaisesRegex(ValueError, "configured environment secret prefix"):
+            provider.retrieve("env:PARTNER_TOKEN")
 
     def test_environment_secret_provider_is_read_only(self) -> None:
         provider = EnvironmentSecretProvider()

@@ -24,7 +24,7 @@ class TrustScorePipelinePhase4ApiTests(unittest.TestCase):
                 environment="test",
                 build_sha="test-sha",
                 build_time="2026-05-01T00:00:00Z",
-                dev_login_allowed_emails=["admin@example.com"],
+                dev_login_allowed_emails=["admin@example.com", "viewer@example.com"],
                 session_secret="test-secret",
             ),
             database=self.database,
@@ -40,6 +40,17 @@ class TrustScorePipelinePhase4ApiTests(unittest.TestCase):
     def _headers(self) -> dict[str, str]:
         return {
             "Authorization": f"Bearer {self.token}",
+            "X-Environment-ID": "env_default",
+        }
+
+    def _headers_for_role(self, email: str, role: str) -> dict[str, str]:
+        login = self.client.post(
+            "/api/v1/auth/dev-login",
+            json={"email": email, "roles": [role]},
+        )
+        self.assertEqual(login.status_code, 200, login.text)
+        return {
+            "Authorization": f"Bearer {login.json()['access_token']}",
             "X-Environment-ID": "env_default",
         }
 
@@ -112,6 +123,15 @@ class TrustScorePipelinePhase4ApiTests(unittest.TestCase):
         self.assertEqual(events.json()[0]["source_event_id"][:4], "evt_")
         self.assertEqual(rules.status_code, 200)
         self.assertIn("policy.decision.allow", [rule["event_type"] for rule in rules.json()])
+
+    def test_trust_recalculation_rejects_read_only_users(self) -> None:
+        response = self.client.post(
+            "/api/v1/trust/recalculate",
+            headers=self._headers_for_role("viewer@example.com", "Viewer"),
+            json={"agent_id": "agent_api"},
+        )
+
+        self.assertEqual(response.status_code, 403)
 
     def test_trust_rule_patch_updates_enabled_state(self) -> None:
         rules = self.client.get("/api/v1/trust/rules", headers=self._headers())

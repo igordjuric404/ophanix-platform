@@ -85,6 +85,15 @@ class WorkerPhase4ApiTests(unittest.TestCase):
         self.assertEqual(listed.status_code, 200)
         self.assertIn(job["id"], {item["id"] for item in listed.json()})
 
+    def test_unknown_api_job_type_is_rejected_before_persistence(self) -> None:
+        response = self.client.post(
+            "/api/v1/jobs",
+            json={"job_type": "unknown.job", "payload": {}},
+            headers=self.operator_headers,
+        )
+
+        self.assertEqual(response.status_code, 422)
+
     def test_viewer_cannot_cancel_job(self) -> None:
         job = self._create_job()
 
@@ -211,6 +220,31 @@ class WorkerPhase4ApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 422)
+
+    def test_schedule_rejects_unknown_job_type_and_naive_next_run_time(self) -> None:
+        unknown = self.client.post(
+            "/api/v1/job-schedules",
+            json={
+                "job_type": "unknown.job",
+                "cron_expression": "interval:5m",
+                "payload": {},
+                "next_run_at": "2026-04-30T10:00:00+00:00",
+            },
+            headers=self.operator_headers,
+        )
+        naive = self.client.post(
+            "/api/v1/job-schedules",
+            json={
+                "job_type": "demo.noop",
+                "cron_expression": "interval:5m",
+                "payload": {},
+                "next_run_at": "2026-04-30T10:00:00",
+            },
+            headers=self.operator_headers,
+        )
+
+        self.assertEqual(unknown.status_code, 422)
+        self.assertEqual(naive.status_code, 422)
 
 
 if __name__ == "__main__":

@@ -389,12 +389,16 @@ class TestIdentityLifecycleAttacks:
 class TestPluginSignatureBypass:
     """Test that unsigned or wrongly-signed plugins are handled correctly."""
 
-    def test_unsigned_plugin_accepted_when_no_trusted_keys(self, tmp_path: Path):
-        """If no trusted_keys are configured, ALL plugins are accepted
-        regardless of verify=True. This is a configuration weakness.
-        """
+    def test_unsigned_plugin_rejected_without_trusted_keys(
+        self, tmp_path: Path
+    ):
+        """verify=True fails closed even when no trusted keys are configured."""
         from agentmesh.marketplace import (
-            PluginInstaller, PluginRegistry, PluginManifest, PluginType,
+            MarketplaceError,
+            PluginInstaller,
+            PluginManifest,
+            PluginRegistry,
+            PluginType,
         )
 
         registry = PluginRegistry()
@@ -411,10 +415,8 @@ class TestPluginSignatureBypass:
             registry=registry,
             # No trusted_keys!
         )
-        # This succeeds even with verify=True because there's no signature
-        # AND no trusted key for the author
-        dest = installer.install("unsigned-plugin", verify=True)
-        assert dest.exists()
+        with pytest.raises(MarketplaceError, match="no signature|untrusted"):
+            installer.install("unsigned-plugin", verify=True)
 
     def test_signed_plugin_with_wrong_key_rejected(self, tmp_path: Path):
         """Plugin signed by an unknown key should be rejected if author

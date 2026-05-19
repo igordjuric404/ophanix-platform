@@ -8,8 +8,7 @@
 
 import { readFileSync, existsSync } from 'fs';
 import { parse as parseYaml } from 'yaml';
-import { fileURLToPath } from 'url';
-import { dirname, join, isAbsolute } from 'path';
+import { isAbsolute, join, normalize, relative, resolve } from 'path';
 
 export interface PolicyRule {
   tool: string;
@@ -174,8 +173,7 @@ function matchesRule(
   if (rule.tool !== '*' && rule.tool !== toolName) {
     // Wildcard matching
     if (rule.tool.includes('*')) {
-      const pattern = rule.tool.replace(/\*/g, '.*');
-      if (!new RegExp(`^${pattern}$`).test(toolName)) {
+      if (!globMatches(rule.tool, toolName)) {
         return false;
       }
     } else {
@@ -201,17 +199,23 @@ function evaluateCondition(
 ): boolean {
   // path_starts_with
   if (condition.path_starts_with) {
-    const path = args.path || args.file_path || args.filename || '';
-    if (!path.startsWith(condition.path_starts_with)) {
+    const path = canonicalizePathArgument(args);
+    const expectedRoot = canonicalizePolicyPath(condition.path_starts_with);
+    if (!path || !expectedRoot || !isPathInside(path, expectedRoot)) {
       return false;
     }
   }
 
   // path_not_contains
   if (condition.path_not_contains) {
-    const path = (args.path || args.file_path || args.filename || '').toLowerCase();
+    const path = canonicalizePathArgument(args);
+    if (!path) {
+      return false;
+    }
+    const normalizedPath = path.toLowerCase();
     for (const forbidden of condition.path_not_contains) {
-      if (path.includes(forbidden.toLowerCase())) {
+      const normalizedForbidden = normalizePathString(forbidden).toLowerCase();
+      if (normalizedPath.includes(normalizedForbidden)) {
         return false;
       }
     }
@@ -238,4 +242,45 @@ function evaluateCondition(
   }
 
   return true;
+}
+
+function globMatches(pattern: string, value: string): boolean {
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+  return new RegExp(`^${escaped}$`).test(value);
+}
+
+function canonicalizePathArgument(args: Record<string, any>): string | null {
+  const raw = args.path ?? args.file_path ?? args.filename;
+  if (typeof raw !== 'string') {
+    return null;
+  }
+  return canonicalizePath(raw);
+}
+
+function canonicalizePolicyPath(path: string): string | null {
+  return canonicalizePath(path);
+}
+
+function canonicalizePath(path: string): string | null {
+  const normalizedInput = normalizePathString(path);
+  if (!normalizedInput || normalizedInput.includes('\0')) {
+    return null;
+  }
+  return isAbsolute(normalizedInput)
+    ? normalize(normalizedInput)
+    : resolve(process.cwd(), normalizedInput);
+}
+
+function normalizePathString(path: string): string {
+  const stripped = path.trim();
+  try {
+    return decodeURIComponent(stripped);
+  } catch {
+    return stripped;
+  }
+}
+
+function isPathInside(path: string, expectedRoot: string): boolean {
+  const relativePath = relative(expectedRoot, path);
+  return relativePath === '' || (!relativePath.startsWith('..') && !isAbsolute(relativePath));
 }

@@ -10,7 +10,7 @@ import secrets
 import time
 from dataclasses import dataclass
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from product_platform.api.auth import UserPrincipal
 from product_platform.db.postgres import Connection, Row
@@ -23,6 +23,17 @@ class ApiKeyCreateRequest(BaseModel):
     scopes: list[str] = Field(default_factory=list)
     kind: str = "agent"
     expires_at: int | None = None
+    environment_ids: list[str] = Field(default_factory=list)
+
+    @field_validator("environment_ids")
+    @classmethod
+    def _normalize_environment_ids(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for environment_id in value:
+            stripped = environment_id.strip()
+            if stripped and stripped not in normalized:
+                normalized.append(stripped)
+        return normalized
 
 
 class ApiKeyResponse(BaseModel):
@@ -33,6 +44,7 @@ class ApiKeyResponse(BaseModel):
     name: str
     scopes: list[str]
     kind: str
+    environment_ids: list[str]
     expires_at: int | None
     last_used_at: int | None
     revoked_at: int | None
@@ -56,6 +68,7 @@ class ApiKeyRecord:
     hashed_secret: str
     scopes: list[str]
     kind: str
+    environment_ids: list[str]
     expires_at: int | None
     last_used_at: int | None
     revoked_at: int | None
@@ -68,6 +81,7 @@ class ApiKeyRecord:
             name=self.name,
             scopes=list(self.scopes),
             kind=self.kind,
+            environment_ids=list(self.environment_ids),
             expires_at=self.expires_at,
             last_used_at=self.last_used_at,
             revoked_at=self.revoked_at,
@@ -93,6 +107,7 @@ class ApiKeyStore:
         name: str,
         scopes: list[str],
         kind: str,
+        environment_ids: list[str] | None = None,
         expires_at: int | None = None,
     ) -> tuple[ApiKeyRecord, str]:
         key_id = secrets.token_hex(8)
@@ -105,6 +120,7 @@ class ApiKeyStore:
             hashed_secret=self.hash_secret(secret),
             scopes=list(scopes),
             kind=kind,
+            environment_ids=list(environment_ids or []),
             expires_at=expires_at,
             last_used_at=None,
             revoked_at=None,
@@ -146,6 +162,7 @@ class ApiKeyStore:
             roles=[],
             scopes=list(record.scopes),
             organization_id=record.organization_id,
+            environment_ids=list(record.environment_ids),
             actor_type="api_key",
         )
 
@@ -194,6 +211,7 @@ class DatabaseApiKeyStore(ApiKeyStore):
         name: str,
         scopes: list[str],
         kind: str,
+        environment_ids: list[str] | None = None,
         expires_at: int | None = None,
     ) -> tuple[ApiKeyRecord, str]:
         key_id = secrets.token_hex(8)
@@ -203,9 +221,10 @@ class DatabaseApiKeyStore(ApiKeyStore):
             """
             INSERT INTO api_keys (
                 id, organization_id, name, hashed_secret, scopes_json, kind,
+                environment_ids_json,
                 expires_at, last_used_at, revoked_at, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 key_id,
@@ -214,6 +233,7 @@ class DatabaseApiKeyStore(ApiKeyStore):
                 self.hash_secret(secret),
                 json.dumps(list(scopes), sort_keys=True),
                 kind,
+                json.dumps(list(environment_ids or []), sort_keys=True),
                 _serialize_timestamp(expires_at),
                 None,
                 None,
@@ -274,6 +294,7 @@ class DatabaseApiKeyStore(ApiKeyStore):
             roles=[],
             scopes=list(record.scopes),
             organization_id=record.organization_id,
+            environment_ids=list(record.environment_ids),
             actor_type="api_key",
         )
 
@@ -302,6 +323,7 @@ def _record_from_row(row: Row) -> ApiKeyRecord:
         hashed_secret=row["hashed_secret"],
         scopes=list(json.loads(row["scopes_json"] or "[]")),
         kind=row["kind"],
+        environment_ids=list(json.loads(row["environment_ids_json"] or "[]")),
         expires_at=_parse_timestamp(row["expires_at"]),
         last_used_at=_parse_timestamp(row["last_used_at"]),
         revoked_at=_parse_timestamp(row["revoked_at"]),

@@ -8,7 +8,9 @@ from product_platform import create_app
 from product_platform.audit.events import AuditEventEnvelope, policy_decision_event
 from product_platform.audit.store import AuditEventQuery, AuditEventRepository
 from product_platform.api.settings import Settings
+from product_platform.api.tenancy import Environment, TenantStore
 from product_platform.db.seed import seed_demo_data
+from product_platform.db.time import utc_now_iso
 from product_platform.db.testing import create_migrated_test_database
 
 
@@ -177,6 +179,102 @@ class AuditPhase2ApiTests(unittest.TestCase):
             payload["payload_json"]["_submitted_source_component"],
             "pretend-internal-service",
         )
+
+
+class AuditPhase2EnvironmentScopeApiTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.database = create_migrated_test_database()
+        now = utc_now_iso()
+        with self.database.transaction() as connection:
+            seed_demo_data(connection)
+            connection.execute(
+                """
+                INSERT INTO environments (
+                    id, organization_id, name, slug, type, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("env_other", "org_default", "Other", "other", "development", now, now),
+            )
+            audit = AuditEventRepository(connection)
+            audit.insert(
+                AuditEventEnvelope(
+                    id="evt_default_env",
+                    organization_id="org_default",
+                    environment_id="env_default",
+                    event_type="scope.default",
+                    source_component="tests",
+                    actor_type="system",
+                    payload_json={},
+                )
+            )
+            audit.insert(
+                AuditEventEnvelope(
+                    id="evt_other_env",
+                    organization_id="org_default",
+                    environment_id="env_other",
+                    event_type="scope.other",
+                    source_component="tests",
+                    actor_type="system",
+                    payload_json={},
+                )
+            )
+        tenant_store = TenantStore(
+            environments=[
+                Environment(
+                    id="env_default",
+                    organization_id="org_default",
+                    name="Development",
+                    slug="development",
+                    type="development",
+                    created_at=now,
+                ),
+                Environment(
+                    id="env_other",
+                    organization_id="org_default",
+                    name="Other",
+                    slug="other",
+                    type="development",
+                    created_at=now,
+                ),
+            ]
+        )
+        self.app = create_app(
+            Settings(
+                app_name="Ophanix Test Platform",
+                environment="test",
+                build_sha="test-sha",
+                build_time="2026-04-30T00:00:00Z",
+                dev_login_allowed_emails=["admin@example.com"],
+                session_secret="test-secret",
+            ),
+            database=self.database,
+            tenant_store=tenant_store,
+        )
+        self.client = TestClient(self.app, raise_server_exceptions=False)
+        login = self.client.post(
+            "/api/v1/auth/dev-login",
+            json={"email": "admin@example.com", "roles": ["Platform Admin"]},
+        )
+        self.headers = {
+            "Authorization": f"Bearer {login.json()['access_token']}",
+            "X-Environment-ID": "env_default",
+        }
+
+    def tearDown(self) -> None:
+        self.database.close()
+
+    def test_audit_reads_are_scoped_to_selected_environment(self) -> None:
+        listed = self.client.get("/api/v1/audit/events", headers=self.headers)
+        streamed = self.client.get("/api/v1/audit/events/stream", headers=self.headers)
+        other_detail = self.client.get("/api/v1/audit/events/evt_other_env", headers=self.headers)
+
+        self.assertEqual(listed.status_code, 200, listed.text)
+        event_ids = {event["id"] for event in listed.json()}
+        self.assertIn("evt_default_env", event_ids)
+        self.assertNotIn("evt_other_env", event_ids)
+        self.assertNotIn("scope.other", streamed.text)
+        self.assertEqual(other_detail.status_code, 404)
 
 
 if __name__ == "__main__":

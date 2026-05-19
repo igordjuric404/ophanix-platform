@@ -2,6 +2,13 @@
 // Licensed under the MIT License.
 import * as crypto from "crypto";
 
+export interface RegistrationPayloadInput {
+  name: string;
+  sponsor_email: string;
+  capabilities: string[];
+  public_key: string;
+}
+
 export interface KeyPair {
   publicKey: string;
   privateKey: string;
@@ -41,22 +48,36 @@ export function sign(payload: string, privateKeyBase64: string): string {
   return signature.toString("base64");
 }
 
+/** Canonical payload agents sign to prove key possession during registration. */
+export function registrationPayload(input: RegistrationPayloadInput): string {
+  return JSON.stringify({
+    name: input.name,
+    sponsor_email: input.sponsor_email,
+    capabilities: [...input.capabilities].sort(),
+    public_key: input.public_key,
+  });
+}
+
 /** Verify a signature with an Ed25519 public key (DER, base64). */
 export function verify(
   payload: string,
   signatureBase64: string,
   publicKeyBase64: string,
 ): boolean {
-  const publicKeyDer = Buffer.from(publicKeyBase64, "base64");
-  const keyObject = crypto.createPublicKey({
-    key: publicKeyDer,
-    format: "der",
-    type: "spki",
-  });
-  return crypto.verify(
-    null,
-    Buffer.from(payload),
-    keyObject,
-    Buffer.from(signatureBase64, "base64"),
-  );
+  try {
+    const publicKeyDer = Buffer.from(publicKeyBase64, "base64");
+    const keyObject = crypto.createPublicKey({
+      key: publicKeyDer,
+      format: "der",
+      type: "spki",
+    });
+    return crypto.verify(
+      null,
+      Buffer.from(payload),
+      keyObject,
+      Buffer.from(signatureBase64, "base64"),
+    );
+  } catch {
+    return false;
+  }
 }

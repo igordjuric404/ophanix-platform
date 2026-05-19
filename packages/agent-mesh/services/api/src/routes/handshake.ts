@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 import { Router, Request, Response } from "express";
 import { getAgent } from "../services/registry";
-import { sign } from "../services/identity";
+import { verify } from "../services/identity";
 import { evaluateHandshake } from "../services/trust";
 import { appendAuditEntry } from "../services/audit";
 import { HandshakeRequest, HandshakeResponse } from "../types";
@@ -10,7 +10,7 @@ import { HandshakeRequest, HandshakeResponse } from "../types";
 const router = Router();
 
 router.post("/handshake", (req: Request, res: Response) => {
-  const { agent_did, challenge, capabilities_requested } =
+  const { agent_did, challenge, signature, capabilities_requested } =
     req.body as Partial<HandshakeRequest>;
 
   if (!agent_did || typeof agent_did !== "string") {
@@ -21,8 +21,21 @@ router.post("/handshake", (req: Request, res: Response) => {
     res.status(400).json({ error: "challenge is required" });
     return;
   }
+  if (!signature || typeof signature !== "string") {
+    res.status(400).json({ error: "signature is required", verified: false });
+    return;
+  }
   if (!Array.isArray(capabilities_requested)) {
     res.status(400).json({ error: "capabilities_requested must be an array" });
+    return;
+  }
+
+  if (!req.authenticatedAgent) {
+    res.status(401).json({ error: "Authentication is required", verified: false });
+    return;
+  }
+  if (req.authenticatedAgent.did !== agent_did) {
+    res.status(403).json({ error: "API key is not authorized for this agent", verified: false });
     return;
   }
 
@@ -37,14 +50,16 @@ router.post("/handshake", (req: Request, res: Response) => {
     return;
   }
 
+  if (!verify(challenge, signature, agent.public_key)) {
+    res.status(401).json({ error: "Signature verification failed", verified: false });
+    return;
+  }
+
   const granted = evaluateHandshake(
     agent.capabilities,
     capabilities_requested,
     agent.trust_score,
   );
-
-  // Sign the challenge with the agent's private key
-  const signature = sign(challenge, agent.private_key);
 
   appendAuditEntry("handshake", agent_did, {
     challenge,
@@ -56,7 +71,7 @@ router.post("/handshake", (req: Request, res: Response) => {
     verified: true,
     trust_score: agent.trust_score.total,
     capabilities_granted: granted,
-    signature,
+    signature_verified: true,
   };
 
   res.json(response);

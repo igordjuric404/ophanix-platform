@@ -221,11 +221,11 @@ class DemoScenarioRepository:
             ),
         ).fetchone()
 
-    def mark_step_running(self, step_run_id: str) -> Row:
-        """Mark one pending step run as running."""
+    def mark_step_running(self, step_run_id: str) -> Row | None:
+        """Mark one pending step run as running if it is still claimable."""
 
         now = utc_now_iso()
-        self.connection.execute(
+        cursor = self.connection.execute(
             """
             UPDATE demo_step_runs
             SET status = ?, started_at = COALESCE(started_at, ?), updated_at = ?
@@ -233,6 +233,8 @@ class DemoScenarioRepository:
             """,
             (DemoStepRunStatus.RUNNING, now, now, step_run_id, DemoStepRunStatus.PENDING),
         )
+        if cursor.rowcount == 0:
+            return None
         return self._get_step_run(step_run_id)
 
     def mark_step_succeeded(self, step_run_id: str, result: dict[str, Any]) -> Row:

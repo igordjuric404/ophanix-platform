@@ -38,6 +38,7 @@ class UserPrincipal(BaseModel):
     scopes: list[str] = Field(default_factory=list)
     organization_id: str | None = None
     environment_id: str | None = None
+    environment_ids: list[str] = Field(default_factory=list)
     actor_type: str = "user"
 
 

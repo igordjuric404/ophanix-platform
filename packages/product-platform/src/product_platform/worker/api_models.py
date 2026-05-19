@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
 from product_platform.db.postgres import Row
 from product_platform.worker.scheduler import validate_schedule_expression
+
+API_CREATABLE_JOB_TYPES = {"demo.noop", "discovery.scan"}
 
 
 class JobCreateRequest(BaseModel):
@@ -18,6 +21,17 @@ class JobCreateRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     max_attempts: int = Field(default=3, ge=1, le=25)
     run_immediately: bool = False
+
+    @field_validator("job_type")
+    @classmethod
+    def _validate_job_type(cls, value: str) -> str:
+        normalized = value.strip()
+        if normalized not in API_CREATABLE_JOB_TYPES:
+            raise ValueError(
+                "job_type must be one of: "
+                + ", ".join(sorted(API_CREATABLE_JOB_TYPES))
+            )
+        return normalized
 
 
 class JobRunResponse(BaseModel):
@@ -69,12 +83,33 @@ class JobScheduleCreateRequest(BaseModel):
         except ValueError as exc:
             raise ValueError(str(exc)) from exc
 
+    @field_validator("job_type")
+    @classmethod
+    def _validate_schedule_job_type(cls, value: str) -> str:
+        normalized = value.strip()
+        if normalized not in API_CREATABLE_JOB_TYPES:
+            raise ValueError(
+                "job_type must be one of: "
+                + ", ".join(sorted(API_CREATABLE_JOB_TYPES))
+            )
+        return normalized
+
+    @field_validator("next_run_at")
+    @classmethod
+    def _validate_next_run_at(cls, value: str | None) -> str | None:
+        return _normalize_timezone_aware_datetime(value, "next_run_at")
+
 
 class JobSchedulePatchRequest(BaseModel):
     """Patch mutable schedule controls."""
 
     enabled: bool | None = None
     next_run_at: str | None = None
+
+    @field_validator("next_run_at")
+    @classmethod
+    def _validate_next_run_at(cls, value: str | None) -> str | None:
+        return _normalize_timezone_aware_datetime(value, "next_run_at")
 
 
 class JobScheduleResponse(BaseModel):
@@ -145,3 +180,18 @@ def job_schedule_response(row: Row) -> JobScheduleResponse:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+def _normalize_timezone_aware_datetime(value: str | None, field_name: str) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    try:
+        parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be an ISO-8601 datetime.") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{field_name} must include a timezone.")
+    return parsed.isoformat()

@@ -9,6 +9,8 @@ from product_platform.api.settings import Settings
 from product_platform.audit.store import AuditEventQuery, AuditEventRepository
 from product_platform.db.seed import seed_demo_data
 from product_platform.db.testing import create_migrated_test_database
+from product_platform.workflows.repository import WorkflowRepository
+from product_platform.workflows.runner import WorkflowRunResult
 
 
 VALID_POLICY = """version: "1.0"
@@ -138,6 +140,41 @@ class WorkflowRunnerPhase2ApiTests(unittest.TestCase):
         self.assertEqual(canceled.status_code, 200, canceled.text)
         self.assertEqual(canceled.json()["status"], "canceled")
         self.assertEqual(rejected.status_code, 409, rejected.text)
+
+    def test_worker_completion_cannot_overwrite_canceled_run(self) -> None:
+        queued = self.client.post(
+            "/api/v1/workflows/policy_lint/runs",
+            headers=self._headers(),
+            json={
+                "inputs": {"policy_body": VALID_POLICY, "policy_format": "yaml"},
+                "run_immediately": False,
+            },
+        )
+        self.assertEqual(queued.status_code, 201, queued.text)
+        run_id = queued.json()["id"]
+
+        with self.database.transaction() as connection:
+            repository = WorkflowRepository(connection, "org_default")
+            started = repository.start_run(run_id, environment_id="env_default")
+            self.assertEqual(started["status"], "running")
+            canceled = repository.cancel_run(run_id, environment_id="env_default")
+            self.assertEqual(canceled["status"], "canceled")
+
+            with self.assertRaisesRegex(RuntimeError, "not running"):
+                repository.complete_run(
+                    run_id,
+                    environment_id="env_default",
+                    result=WorkflowRunResult(
+                        status="succeeded",
+                        exit_code=0,
+                        summary={"ok": True},
+                        logs=[],
+                    ),
+                )
+
+            current = repository.get_run(run_id, environment_id="env_default")
+            self.assertIsNotNone(current)
+            self.assertEqual(current["status"], "canceled")
 
     def test_missing_required_input_returns_400(self) -> None:
         response = self.client.post(

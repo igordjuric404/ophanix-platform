@@ -2,11 +2,9 @@
 # Licensed under the MIT License.
 """Tests for AgentMesh Plugin Marketplace."""
 
-import json
 from pathlib import Path
 
 import pytest
-import yaml
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from agentmesh.marketplace import (
@@ -21,7 +19,6 @@ from agentmesh.marketplace import (
     save_manifest,
     verify_signature,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -300,7 +297,7 @@ class TestPluginInstaller:
         registry = PluginRegistry()
         registry.register(manifest)
         installer = PluginInstaller(plugins_dir=tmp_path / "plugins", registry=registry)
-        dest = installer.install("test-plugin")
+        dest = installer.install("test-plugin", verify=False)
         assert (dest / MANIFEST_FILENAME).exists()
         installed = installer.list_installed()
         assert len(installed) == 1
@@ -310,7 +307,7 @@ class TestPluginInstaller:
         registry = PluginRegistry()
         registry.register(manifest)
         installer = PluginInstaller(plugins_dir=tmp_path / "plugins", registry=registry)
-        installer.install("test-plugin")
+        installer.install("test-plugin", verify=False)
         installer.uninstall("test-plugin")
         assert installer.list_installed() == []
 
@@ -327,7 +324,7 @@ class TestPluginInstaller:
         registry.register(dep)
         registry.register(main)
         installer = PluginInstaller(plugins_dir=tmp_path / "plugins", registry=registry)
-        installer.install("main-plugin")
+        installer.install("main-plugin", verify=False)
         installed_names = [p.name for p in installer.list_installed()]
         assert "main-plugin" in installed_names
         assert "dep-plugin" in installed_names
@@ -340,7 +337,7 @@ class TestPluginInstaller:
         registry.register(b)
         installer = PluginInstaller(plugins_dir=tmp_path / "plugins", registry=registry)
         with pytest.raises(MarketplaceError, match="Circular dependency"):
-            installer.install("plugin-a")
+            installer.install("plugin-a", verify=False)
 
     def test_sandbox_allows_safe_modules(self) -> None:
         assert PluginInstaller.check_sandbox("json") is True

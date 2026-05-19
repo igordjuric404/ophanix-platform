@@ -154,6 +154,8 @@ class DemoScenarioRunner:
         if step_run is None:
             return self.repository.refresh_run_status(run_id)
         running_step = self.repository.mark_step_running(step_run["id"])
+        if running_step is None:
+            return self.repository.refresh_run_status(run_id)
         step = self.repository.get_step(running_step["demo_step_id"])
         if step is None:
             raise DemoScenarioNotFoundError("Scenario step not found.")

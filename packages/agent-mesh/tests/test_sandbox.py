@@ -43,7 +43,7 @@ class TestSandboxHappyPath:
 def process(data):
     return {"echo": data}
 """)
-        sandbox = PluginSandbox(plugins_dir)
+        sandbox = PluginSandbox(plugins_dir, allow_unsafe_subprocess=True)
         result = sandbox.execute("echo-plugin", "process", {"msg": "hello"})
         assert result["result"]["echo"]["msg"] == "hello"
 
@@ -52,7 +52,7 @@ def process(data):
 def add(data):
     return {"sum": data["a"] + data["b"]}
 """)
-        sandbox = PluginSandbox(plugins_dir)
+        sandbox = PluginSandbox(plugins_dir, allow_unsafe_subprocess=True)
         result = sandbox.execute("math-plugin", "add", {"a": 3, "b": 7})
         assert result["result"]["sum"] == 10
 
@@ -63,7 +63,7 @@ def add(data):
 def greet(data):
     return {"greeting": f"Hello, {data['name']}!"}
 """, encoding="utf-8")
-        sandbox = PluginSandbox(plugins_dir)
+        sandbox = PluginSandbox(plugins_dir, allow_unsafe_subprocess=True)
         result = sandbox.execute(
             "my-plugin", "greet", {"name": "World"},
             module_name="custom_mod",
@@ -75,7 +75,7 @@ def greet(data):
 def items(data):
     return [1, 2, 3]
 """)
-        sandbox = PluginSandbox(plugins_dir)
+        sandbox = PluginSandbox(plugins_dir, allow_unsafe_subprocess=True)
         result = sandbox.execute("list-plugin", "items", {})
         assert result["result"] == [1, 2, 3]
 
@@ -84,7 +84,7 @@ def items(data):
 def say(data):
     return "ok"
 """)
-        sandbox = PluginSandbox(plugins_dir)
+        sandbox = PluginSandbox(plugins_dir, allow_unsafe_subprocess=True)
         result = sandbox.execute("str-plugin", "say", {})
         assert result["result"] == "ok"
 
@@ -107,7 +107,7 @@ import {module}
 def run(data):
     return "should not reach here"
 """)
-        sandbox = PluginSandbox(plugins_dir)
+        sandbox = PluginSandbox(plugins_dir, allow_unsafe_subprocess=True)
         result = sandbox.execute("evil-plugin", "run", {})
         assert "error" in result
         assert "blocked" in result["error"].lower() or "import" in result["error"].lower()
@@ -118,7 +118,7 @@ import os.path
 def run(data):
     return os.path.exists("/etc/passwd")
 """)
-        sandbox = PluginSandbox(plugins_dir)
+        sandbox = PluginSandbox(plugins_dir, allow_unsafe_subprocess=True)
         result = sandbox.execute("os-path-plugin", "run", {})
         assert "error" in result
 
@@ -128,7 +128,7 @@ from subprocess import Popen
 def run(data):
     return "nope"
 """)
-        sandbox = PluginSandbox(plugins_dir)
+        sandbox = PluginSandbox(plugins_dir, allow_unsafe_subprocess=True)
         result = sandbox.execute("from-import-plugin", "run", {})
         assert "error" in result
 
@@ -138,7 +138,7 @@ def run(data):
     mod = __import__("subprocess")
     return mod.check_output(["whoami"]).decode()
 """)
-        sandbox = PluginSandbox(plugins_dir)
+        sandbox = PluginSandbox(plugins_dir, allow_unsafe_subprocess=True)
         result = sandbox.execute("dynamic-plugin", "run", {})
         assert "error" in result
 
@@ -151,7 +151,7 @@ import re
 def run(data):
     return {"pi": math.pi, "hash": hashlib.sha256(b"test").hexdigest()}
 """)
-        sandbox = PluginSandbox(plugins_dir)
+        sandbox = PluginSandbox(plugins_dir, allow_unsafe_subprocess=True)
         result = sandbox.execute("safe-plugin", "run", {})
         assert "result" in result
         assert result["result"]["pi"] == 3.141592653589793
@@ -170,7 +170,7 @@ class TestSandboxRestrictedBuiltins:
 def run(data):
     return eval("1+1")
 """)
-        sandbox = PluginSandbox(plugins_dir)
+        sandbox = PluginSandbox(plugins_dir, allow_unsafe_subprocess=True)
         result = sandbox.execute("eval-plugin", "run", {})
         assert "error" in result
 
@@ -180,7 +180,7 @@ def run(data):
     exec("x = 1")
     return x
 """)
-        sandbox = PluginSandbox(plugins_dir)
+        sandbox = PluginSandbox(plugins_dir, allow_unsafe_subprocess=True)
         result = sandbox.execute("exec-plugin", "run", {})
         assert "error" in result
 
@@ -193,7 +193,7 @@ def run(data):
     code = compile("__import__('subprocess')", "<string>", "eval")
     return eval(code)
 """)
-        sandbox = PluginSandbox(plugins_dir)
+        sandbox = PluginSandbox(plugins_dir, allow_unsafe_subprocess=True)
         result = sandbox.execute("compile-exec-plugin", "run", {})
         assert "error" in result
 
@@ -213,7 +213,7 @@ def run(data):
     time.sleep(999)
     return "never"
 """)
-        sandbox = PluginSandbox(plugins_dir, timeout_seconds=2)
+        sandbox = PluginSandbox(plugins_dir, allow_unsafe_subprocess=True, timeout_seconds=2)
         with pytest.raises(PluginSandboxError, match="timeout"):
             sandbox.execute("hang-plugin", "run", {})
 
@@ -224,7 +224,7 @@ def run(data):
     time.sleep(10)
     return "done"
 """)
-        sandbox = PluginSandbox(plugins_dir, timeout_seconds=60)
+        sandbox = PluginSandbox(plugins_dir, allow_unsafe_subprocess=True, timeout_seconds=60)
         with pytest.raises(PluginSandboxError, match="timeout"):
             sandbox.execute("slow-plugin", "run", {}, timeout=2)
 
@@ -238,7 +238,7 @@ class TestSandboxErrorHandling:
     """Errors in plugins are captured cleanly."""
 
     def test_plugin_not_installed(self, plugins_dir: Path):
-        sandbox = PluginSandbox(plugins_dir)
+        sandbox = PluginSandbox(plugins_dir, allow_unsafe_subprocess=True)
         with pytest.raises(PluginSandboxError, match="not installed"):
             sandbox.execute("ghost-plugin", "run", {})
 
@@ -247,7 +247,7 @@ class TestSandboxErrorHandling:
 def other():
     pass
 """)
-        sandbox = PluginSandbox(plugins_dir)
+        sandbox = PluginSandbox(plugins_dir, allow_unsafe_subprocess=True)
         result = sandbox.execute("no-func-plugin", "run", {})
         assert "error" in result
         assert "not found" in result["error"]
@@ -257,7 +257,7 @@ def other():
 def run(data):
     raise ValueError("something went wrong")
 """)
-        sandbox = PluginSandbox(plugins_dir)
+        sandbox = PluginSandbox(plugins_dir, allow_unsafe_subprocess=True)
         result = sandbox.execute("error-plugin", "run", {})
         assert "error" in result
         assert "something went wrong" in result["error"]
@@ -267,7 +267,7 @@ def run(data):
 def run(data):
     return object()
 """)
-        sandbox = PluginSandbox(plugins_dir)
+        sandbox = PluginSandbox(plugins_dir, allow_unsafe_subprocess=True)
         # object() can't be serialized — either JSON error or sandbox error
         try:
             result = sandbox.execute("bad-result-plugin", "run", {})
@@ -280,7 +280,7 @@ def run(data):
 def run(data)
     return "missing colon"
 """)
-        sandbox = PluginSandbox(plugins_dir)
+        sandbox = PluginSandbox(plugins_dir, allow_unsafe_subprocess=True)
         # Syntax errors prevent module loading — subprocess crashes
         with pytest.raises(PluginSandboxError):
             sandbox.execute("syntax-plugin", "run", {})
@@ -294,6 +294,15 @@ def run(data)
 class TestSandboxIsolation:
     """Subprocess has minimal environment."""
 
+    def test_default_refuses_cooperative_runner_for_untrusted_plugins(self, plugins_dir: Path):
+        _create_plugin(plugins_dir, "echo-plugin", """
+def process(data):
+    return {"echo": data}
+""")
+        sandbox = PluginSandbox(plugins_dir)
+        with pytest.raises(PluginSandboxError, match="OS-level sandbox"):
+            sandbox.execute("echo-plugin", "process", {"msg": "hello"})
+
     def test_no_env_vars_leaked(self, plugins_dir: Path):
         """os module is blocked, so plugins can't read env vars."""
         _create_plugin(plugins_dir, "env-plugin", """
@@ -301,7 +310,7 @@ def run(data):
     import os
     return {"home": os.environ.get("HOME", "")}
 """)
-        sandbox = PluginSandbox(plugins_dir)
+        sandbox = PluginSandbox(plugins_dir, allow_unsafe_subprocess=True)
         result = sandbox.execute("env-plugin", "run", {})
         assert "error" in result  # os is blocked
 
@@ -311,6 +320,16 @@ def run(data):
     import os
     return {"files": os.listdir("/")}
 """)
-        sandbox = PluginSandbox(plugins_dir)
+        sandbox = PluginSandbox(plugins_dir, allow_unsafe_subprocess=True)
         result = sandbox.execute("fs-plugin", "run", {})
         assert "error" in result  # os is blocked
+
+    def test_open_builtin_is_blocked_for_entry_function(self, plugins_dir: Path):
+        _create_plugin(plugins_dir, "open-plugin", """
+def run(data):
+    with open("/etc/passwd", "r", encoding="utf-8") as handle:
+        return handle.read(10)
+""")
+        sandbox = PluginSandbox(plugins_dir, allow_unsafe_subprocess=True)
+        result = sandbox.execute("open-plugin", "run", {})
+        assert "error" in result
