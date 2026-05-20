@@ -215,6 +215,11 @@ class RuntimeDurableExecutionPhase2Tests(unittest.TestCase):
         self.assertIn("saga.checkpoint.restored", event_types)
         self.assertIn("saga.checkpoint.created", event_types)
 
+    def test_saga_checkpoint_replay_skips_completed_step(self) -> None:
+        """Selected audit regression: checkpoint replay skips an already completed step."""
+
+        self.test_resume_restores_checkpoint_without_reexecuting_completed_side_effect()
+
 
 if __name__ == "__main__":
     unittest.main()

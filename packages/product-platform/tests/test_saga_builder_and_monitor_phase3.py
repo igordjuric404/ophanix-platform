@@ -202,6 +202,95 @@ class SagaBuilderPhase3Tests(unittest.TestCase):
         self.assertIn("runtime.action", event_types)
         self.assertLess(event_types.index("saga.started"), event_types.index("runtime.action"))
 
+    def test_saga_step_executes_through_worker_activity(self) -> None:
+        """Selected audit regression: saga steps execute through persistent worker jobs."""
+
+        saga = self._build_refund_saga()
+
+        executed = self.client.post(
+            f"/api/v1/runtime/sagas/{saga['id']}/execute",
+            headers=self._headers(),
+            json={},
+        )
+
+        self.assertEqual(executed.status_code, 200, executed.text)
+        with self.database.connect() as connection:
+            jobs = connection.execute(
+                """
+                SELECT id, job_type, status, attempts, payload_json
+                FROM background_jobs
+                WHERE job_type = 'saga.activity'
+                ORDER BY created_at ASC, id ASC
+                """
+            ).fetchall()
+            job_runs = connection.execute(
+                """
+                SELECT jr.job_id, jr.status, jr.result_json
+                FROM job_runs jr
+                JOIN background_jobs bj ON bj.id = jr.job_id
+                WHERE bj.job_type = 'saga.activity'
+                ORDER BY jr.created_at ASC, jr.id ASC
+                """
+            ).fetchall()
+            activity_results = connection.execute(
+                """
+                SELECT worker_job_id, idempotency_key, external_operation_id, result_json
+                FROM saga_activity_results
+                WHERE saga_id = ?
+                ORDER BY created_at ASC, id ASC
+                """,
+                (saga["id"],),
+            ).fetchall()
+            run_steps = connection.execute(
+                """
+                SELECT metadata_json
+                FROM runtime_run_steps
+                WHERE saga_id = ?
+                ORDER BY step_order ASC, id ASC
+                """,
+                (saga["id"],),
+            ).fetchall()
+
+        self.assertEqual(len(jobs), 3)
+        self.assertEqual({job["status"] for job in jobs}, {"succeeded"})
+        self.assertEqual({job["attempts"] for job in jobs}, {1})
+        self.assertEqual(len(job_runs), 3)
+        self.assertEqual({run["status"] for run in job_runs}, {"succeeded"})
+        self.assertEqual(
+            {row["worker_job_id"] for row in activity_results},
+            {job["id"] for job in jobs},
+        )
+        for row in activity_results:
+            result = json.loads(row["result_json"])
+            self.assertTrue(result["worker"])
+            self.assertEqual(result["worker_job_id"], row["worker_job_id"])
+            self.assertEqual(result["idempotency_key"], row["idempotency_key"])
+            self.assertEqual(result["external_operation_id"], row["external_operation_id"])
+        self.assertEqual(len(run_steps), 3)
+        run_step_metadata = [json.loads(row["metadata_json"]) for row in run_steps]
+        self.assertEqual(
+            {item["worker_job_id"] for item in run_step_metadata},
+            {job["id"] for job in jobs},
+        )
+        runtime_action_audits = [
+            json.loads(row["payload_json"])
+            for row in self._audit_events()
+            if row["event_type"] == "runtime.action" and row["decision"] == "allow"
+        ]
+        worker_payloads = [
+            payload for payload in runtime_action_audits
+            if payload.get("saga_id") == saga["id"] and payload.get("worker_job_id")
+        ]
+        self.assertEqual(len(worker_payloads), 3)
+        self.assertEqual(
+            {payload["worker_job_id"] for payload in worker_payloads},
+            {job["id"] for job in jobs},
+        )
+        self.assertTrue(all(payload["idempotency_key"].startswith("saga:") for payload in worker_payloads))
+        self.assertTrue(
+            all(payload["external_operation_id"].startswith("saga-op-") for payload in worker_payloads)
+        )
+
     def test_completed_saga_cannot_be_reexecuted(self) -> None:
         saga = self._build_refund_saga()
         executed = self.client.post(

@@ -8,6 +8,7 @@ from product_platform import create_app
 from product_platform.api.settings import Settings
 from product_platform.db.seed import seed_demo_data
 from product_platform.db.testing import create_migrated_test_database
+from product_platform.runtime.saga_actions import SAGA_ACTION_DEFINITIONS, SagaActionDefinition
 
 
 class SagaBuilderPhase1Tests(unittest.TestCase):
@@ -169,6 +170,34 @@ class SagaBuilderPhase1Tests(unittest.TestCase):
 
         self.assertEqual(rejected.status_code, 400)
         self.assertIn("approved capability", rejected.json()["message"])
+
+    def test_non_idempotent_activity_retry_is_rejected(self) -> None:
+        saga = self._create_saga()
+        SAGA_ACTION_DEFINITIONS["claims.manual_payout"] = SagaActionDefinition(
+            name="claims.manual_payout",
+            supports_idempotency=False,
+        )
+        try:
+            rejected = self.client.post(
+                f"/api/v1/runtime/sagas/{saga['id']}/steps",
+                headers=self._headers(),
+                json={
+                    "step_order": 1,
+                    "name": "Manual payout",
+                    "action_name": "claims.manual_payout",
+                    "target_agent_id": "agent_claims",
+                    "required_capability": "claims.refund",
+                    "retry_count": 1,
+                },
+            )
+        finally:
+            SAGA_ACTION_DEFINITIONS.pop("claims.manual_payout", None)
+
+        self.assertEqual(rejected.status_code, 400)
+        self.assertIn(
+            "Non-idempotent saga action retries require explicit approval",
+            rejected.json()["message"],
+        )
 
 
 if __name__ == "__main__":

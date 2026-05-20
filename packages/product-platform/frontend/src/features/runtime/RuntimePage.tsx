@@ -835,6 +835,7 @@ function SagaMonitor({
                 <TableHead>Agent</TableHead>
                 <TableHead>Capability</TableHead>
                 <TableHead>Compensation</TableHead>
+                <TableHead>Activity</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -848,6 +849,7 @@ function SagaMonitor({
                   <TableCell>{step.target_agent_name ?? step.target_agent_id}</TableCell>
                   <TableCell>{step.required_capability ?? "n/a"}</TableCell>
                   <TableCell>{step.compensation_action ?? "none"}</TableCell>
+                  <TableCell><SagaActivityEvidence result={step.result} /></TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -878,6 +880,22 @@ function SagaMonitor({
         )}
       </CardContent>
     </Card>
+  );
+}
+
+function SagaActivityEvidence({ result }: { result?: Record<string, unknown> }) {
+  const workerJobId = optionalText(result?.worker_job_id);
+  const idempotencyKey = optionalText(result?.idempotency_key);
+  const externalOperationId = optionalText(result?.external_operation_id);
+  if (!workerJobId && !idempotencyKey && !externalOperationId) {
+    return <span className="text-muted-foreground">pending</span>;
+  }
+  return (
+    <div className="space-y-1 break-all text-xs">
+      {workerJobId ? <div><span className="text-muted-foreground">Job</span> {workerJobId}</div> : null}
+      {idempotencyKey ? <div><span className="text-muted-foreground">Key</span> {idempotencyKey}</div> : null}
+      {externalOperationId ? <div><span className="text-muted-foreground">Op</span> {externalOperationId}</div> : null}
+    </div>
   );
 }
 
@@ -1182,6 +1200,10 @@ function Metadata({ label, value }: { label: string; value: ReactNode }) {
       <dd className="mt-1 break-words text-sm font-medium">{value}</dd>
     </div>
   );
+}
+
+function optionalText(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
 }
 
 function MetricCard({ icon, label, value }: { icon: ReactNode; label: string; value: ReactNode }) {

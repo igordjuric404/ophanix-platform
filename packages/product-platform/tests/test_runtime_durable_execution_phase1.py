@@ -163,18 +163,32 @@ class RuntimeDurableExecutionPhase1Tests(unittest.TestCase):
             )
             steps = repository.list_steps(saga_id)
             activity_results = repository.list_activity_results(saga_id)
+            activity_attempts = repository.list_activity_attempts(saga_id)
             event_types = [event["event_type"] for event in repository.list_events(saga_id)]
 
         self.assertEqual(result.status, "completed")
         self.assertEqual([step["status"] for step in steps], ["committed", "committed"])
         self.assertEqual(runner.calls, [("claims.issue_refund", "execute")])
         self.assertEqual(len(activity_results), 2)
+        self.assertEqual(len(activity_attempts), 2)
         self.assertEqual(
             json.loads(activity_results[0]["result_json"])["action_name"],
             "claims.lookup_order",
         )
+        self.assertTrue(activity_results[0]["idempotency_key"].startswith("saga:"))
+        self.assertTrue(activity_results[0]["external_operation_id"].startswith("saga-op-"))
+        self.assertEqual(
+            activity_attempts[0]["idempotency_key"],
+            activity_results[0]["idempotency_key"],
+        )
+        self.assertEqual(activity_attempts[0]["status"], "succeeded")
         self.assertIn("saga.recovered", event_types)
         self.assertIn("saga.activity.replayed", event_types)
+
+    def test_saga_execution_survives_process_restart(self) -> None:
+        """Selected audit regression: saga state survives restart and resumes from persistence."""
+
+        self.test_durable_run_recovers_after_worker_restart_without_duplicating_completed_side_effect()
 
     def test_activity_completion_is_idempotent_for_retried_worker_commit(self) -> None:
         """Duplicate worker commits reuse the original durable activity row."""
@@ -213,10 +227,72 @@ class RuntimeDurableExecutionPhase1Tests(unittest.TestCase):
                 result={"action_name": "claims.issue_refund", "unexpected": True},
             )
             activity_results = repository.list_activity_results(saga_id)
+            activity_attempts = repository.list_activity_attempts(saga_id)
 
         self.assertEqual(first_completion["id"], duplicate_completion["id"])
         self.assertEqual(len(activity_results), 1)
+        self.assertEqual(len(activity_attempts), 1)
         self.assertEqual(json.loads(activity_results[0]["result_json"]), original)
+        self.assertEqual(activity_results[0]["idempotency_key"], first_completion["idempotency_key"])
+        self.assertEqual(
+            activity_results[0]["external_operation_id"],
+            first_completion["external_operation_id"],
+        )
+        self.assertEqual(activity_attempts[0]["idempotency_key"], first_completion["idempotency_key"])
+        self.assertEqual(activity_attempts[0]["external_operation_id"], first_completion["external_operation_id"])
+        self.assertEqual(activity_attempts[0]["status"], "succeeded")
+
+    def test_saga_activity_retry_uses_idempotency_key(self) -> None:
+        """Selected audit regression: duplicate attempts reuse one deterministic idempotency key."""
+
+        with self.database.transaction() as connection:
+            repository = self._repository(connection)
+            saga_id, steps = self._create_two_step_saga(repository)
+            first_step = steps[0]
+            first_attempt = repository.start_activity_result(
+                saga_id=saga_id,
+                step_id=first_step["id"],
+                mode="execute",
+                action_name=first_step["action_name"],
+            )
+            repository.fail_activity_result(
+                saga_id=saga_id,
+                step_id=first_step["id"],
+                mode="execute",
+                action_name=first_step["action_name"],
+                error_message="temporary timeout",
+            )
+            second_attempt = repository.start_activity_result(
+                saga_id=saga_id,
+                step_id=first_step["id"],
+                mode="execute",
+                action_name=first_step["action_name"],
+            )
+            completed = repository.complete_activity_result(
+                saga_id=saga_id,
+                step_id=first_step["id"],
+                mode="execute",
+                action_name=first_step["action_name"],
+                result={
+                    "action_name": first_step["action_name"],
+                    "mode": "execute",
+                    "saga_id": saga_id,
+                    "step_id": first_step["id"],
+                },
+            )
+            attempts = repository.list_activity_attempts(saga_id)
+
+        self.assertEqual(first_attempt["id"], second_attempt["id"])
+        self.assertEqual(first_attempt["idempotency_key"], second_attempt["idempotency_key"])
+        self.assertEqual(first_attempt["external_operation_id"], second_attempt["external_operation_id"])
+        self.assertEqual(completed["idempotency_key"], first_attempt["idempotency_key"])
+        self.assertEqual(completed["external_operation_id"], first_attempt["external_operation_id"])
+        self.assertEqual([attempt["status"] for attempt in attempts], ["failed", "succeeded"])
+        self.assertEqual({attempt["idempotency_key"] for attempt in attempts}, {completed["idempotency_key"]})
+        self.assertEqual(
+            {attempt["external_operation_id"] for attempt in attempts},
+            {completed["external_operation_id"]},
+        )
 
 
 if __name__ == "__main__":

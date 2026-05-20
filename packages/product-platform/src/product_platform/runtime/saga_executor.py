@@ -16,11 +16,31 @@ from product_platform.runtime.sagas import (
     SAGA_RECOVERABLE_STATUSES,
     SagaNotFoundError,
     SagaRepository,
+    saga_activity_idempotency_key,
+    saga_external_operation_id,
 )
+from product_platform.worker.store import JobStateRepository
 
 
 class SagaExecutionError(ValueError):
     """Raised when a saga cannot be executed safely."""
+
+
+class SagaWorkerActivityError(SagaExecutionError):
+    """Raised when a worker-backed saga activity fails."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        worker_job_id: str,
+        idempotency_key: str,
+        external_operation_id: str,
+    ) -> None:
+        super().__init__(message)
+        self.worker_job_id = worker_job_id
+        self.idempotency_key = idempotency_key
+        self.external_operation_id = external_operation_id
 
 
 @dataclass(frozen=True)
@@ -68,6 +88,115 @@ class DemoSafeActionRunner:
             "target_agent_id": step["target_agent_id"],
             "demo_safe": True,
         }
+
+
+SAGA_ACTIVITY_JOB_TYPE = "saga.activity"
+
+
+class WorkerBackedSagaActionRunner:
+    """Execute saga activities through the persistent background job state model."""
+
+    def __init__(
+        self,
+        *,
+        transaction_factory: Callable[[], ContextManager[Connection]],
+        action_runner: DemoSafeActionRunner | None = None,
+        failure_actions: Iterable[str] | None = None,
+        worker_id: str = "saga-activity-worker",
+    ) -> None:
+        self.transaction_factory = transaction_factory
+        self.action_runner = action_runner or DemoSafeActionRunner(failure_actions=failure_actions)
+        self.worker_id = worker_id
+
+    async def run(
+        self,
+        action_name: str,
+        *,
+        saga: Row,
+        step: Row,
+        compensation: bool = False,
+    ) -> dict:
+        """Create, claim, and complete a durable worker job for one saga activity."""
+
+        mode = "compensation" if compensation else "execute"
+        idempotency_key = saga_activity_idempotency_key(
+            saga["id"],
+            step["id"],
+            mode,
+            action_name,
+        )
+        external_operation_id = saga_external_operation_id(idempotency_key)
+        job_payload = {
+            "saga_id": saga["id"],
+            "step_id": step["id"],
+            "mode": mode,
+            "action_name": action_name,
+            "idempotency_key": idempotency_key,
+            "external_operation_id": external_operation_id,
+            "runtime_session_id": saga["runtime_session_id"],
+            "correlation_id": saga["correlation_id"],
+            "target_agent_id": step["target_agent_id"],
+        }
+        with self.transaction_factory() as connection:
+            jobs = JobStateRepository(connection)
+            job = jobs.create_job(
+                organization_id=saga["organization_id"],
+                environment_id=saga["environment_id"],
+                job_type=SAGA_ACTIVITY_JOB_TYPE,
+                payload=job_payload,
+                max_attempts=max(1, int(step["retry_count"] or 0) + 1),
+            )
+            running = jobs.mark_running(job["id"])
+
+        try:
+            result = await self.action_runner.run(
+                action_name,
+                saga=saga,
+                step=step,
+                compensation=compensation,
+            )
+        except Exception as exc:
+            with self.transaction_factory() as connection:
+                jobs = JobStateRepository(connection)
+                jobs.mark_failed(
+                    job["id"],
+                    expected_attempt=int(running["attempts"]),
+                    error_message=str(exc),
+                    logs=[
+                        "queued saga.activity",
+                        f"claimed by {self.worker_id}",
+                        f"failed {mode}:{action_name}",
+                    ],
+                )
+            raise SagaWorkerActivityError(
+                str(exc),
+                worker_job_id=job["id"],
+                idempotency_key=idempotency_key,
+                external_operation_id=external_operation_id,
+            ) from exc
+
+        worker_result = {
+            **result,
+            "worker": True,
+            "worker_job_id": job["id"],
+            "worker_id": self.worker_id,
+            "idempotency_key": idempotency_key,
+            "external_operation_id": external_operation_id,
+        }
+        with self.transaction_factory() as connection:
+            jobs = JobStateRepository(connection)
+            jobs.mark_succeeded(
+                job["id"],
+                expected_attempt=int(running["attempts"]),
+                logs=[
+                    "queued saga.activity",
+                    f"claimed by {self.worker_id}",
+                    f"completed {mode}:{action_name}",
+                ],
+                metrics={"saga_activity_count": 1},
+                result=worker_result,
+            )
+        return worker_result
 
 
 class SagaExecutionService:
@@ -154,12 +283,6 @@ class SagaExecutionService:
                 continue
 
             with self._repository_context() as repository:
-                repository.start_activity_result(
-                    saga_id=saga_id,
-                    step_id=step["id"],
-                    mode="execute",
-                    action_name=step["action_name"],
-                )
                 repository.update_step_status(
                     step["id"],
                     "executing",
@@ -176,10 +299,11 @@ class SagaExecutionService:
                 result = await orchestrator.execute_step(
                     hypervisor_saga.saga_id,
                     hypervisor_step.step_id,
-                    lambda step=step: self.action_runner.run(
-                        step["action_name"],
+                    lambda step=step: self._run_activity(
                         saga=saga,
                         step=step,
+                        mode="execute",
+                        action_name=step["action_name"],
                     ),
                 )
             except Exception as exc:
@@ -190,6 +314,8 @@ class SagaExecutionService:
                         mode="execute",
                         action_name=step["action_name"],
                         error_message=str(exc),
+                        worker_job_id=getattr(exc, "worker_job_id", None),
+                        external_operation_id=getattr(exc, "external_operation_id", None),
                     )
                     repository.update_step_status(
                         step["id"],
@@ -472,11 +598,11 @@ class SagaExecutionService:
                 if existing is not None:
                     result = _loads_mapping(existing["result_json"])
                 else:
-                    result = await self.action_runner.run(
-                        action_name,
+                    result = await self._run_activity(
                         saga=saga,
                         step=step,
-                        compensation=True,
+                        mode="compensation",
+                        action_name=action_name,
                     )
                     with self._repository_context() as repository:
                         repository.complete_activity_result(
@@ -519,6 +645,8 @@ class SagaExecutionService:
                         mode="compensation",
                         action_name=action_name,
                         error_message=str(exc),
+                        worker_job_id=getattr(exc, "worker_job_id", None),
+                        external_operation_id=getattr(exc, "external_operation_id", None),
                     )
                     repository.update_step_status(
                         step["id"],
@@ -574,6 +702,44 @@ class SagaExecutionService:
             compensated_step_ids=compensated_step_ids,
             failed_step_ids=failed_step_ids,
         )
+
+    async def _run_activity(
+        self,
+        *,
+        saga: Row,
+        step: Row,
+        mode: str,
+        action_name: str,
+    ) -> dict:
+        """Start and run one saga activity attempt through the configured runner."""
+
+        compensation = mode == "compensation"
+        with self._repository_context() as repository:
+            repository.start_activity_result(
+                saga_id=saga["id"],
+                step_id=step["id"],
+                mode=mode,
+                action_name=action_name,
+            )
+        try:
+            return await self.action_runner.run(
+                action_name,
+                saga=saga,
+                step=step,
+                compensation=compensation,
+            )
+        except Exception as exc:
+            with self._repository_context() as repository:
+                repository.fail_activity_result(
+                    saga_id=saga["id"],
+                    step_id=step["id"],
+                    mode=mode,
+                    action_name=action_name,
+                    error_message=str(exc),
+                    worker_job_id=getattr(exc, "worker_job_id", None),
+                    external_operation_id=getattr(exc, "external_operation_id", None),
+                )
+            raise
 
     @contextmanager
     def _repository_context(self) -> Iterator[SagaRepository]:

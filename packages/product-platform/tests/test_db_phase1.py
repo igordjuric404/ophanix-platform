@@ -118,6 +118,7 @@ FEATURE_MIGRATIONS = [
     "0088",
     "0089",
     "0090",
+    "0091",
 ]
 
 ALL_EXPECTED_MIGRATIONS = [*EXPECTED_MIGRATIONS, *FEATURE_MIGRATIONS]
@@ -257,6 +258,25 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertIn("activity_key", saga_activity_result_columns)
             self.assertIn("attempt_count", saga_activity_result_columns)
             self.assertIn("result_json", saga_activity_result_columns)
+            self.assertIn("idempotency_key", saga_activity_result_columns)
+            self.assertIn("external_operation_id", saga_activity_result_columns)
+            self.assertIn("worker_job_id", saga_activity_result_columns)
+            self.assertIn("repair_status", saga_activity_result_columns)
+            self.assertIn("repair_reason", saga_activity_result_columns)
+            self.assertIn("lease_owner", saga_activity_result_columns)
+            self.assertIn("lease_expires_at", saga_activity_result_columns)
+            self.assertIn("side_effect_started_at", saga_activity_result_columns)
+            self.assertIn("side_effect_completed_at", saga_activity_result_columns)
+            self.assertIn("saga_activity_attempts", tables)
+            saga_activity_attempt_columns = column_names(connection, "saga_activity_attempts")
+            self.assertIn("idempotency_key", saga_activity_attempt_columns)
+            self.assertIn("external_operation_id", saga_activity_attempt_columns)
+            self.assertIn("worker_job_id", saga_activity_attempt_columns)
+            self.assertIn("lease_owner", saga_activity_attempt_columns)
+            self.assertIn("lease_expires_at", saga_activity_attempt_columns)
+            self.assertIn("side_effect_started_at", saga_activity_attempt_columns)
+            self.assertIn("side_effect_completed_at", saga_activity_attempt_columns)
+            self.assertIn("metadata_json", saga_activity_attempt_columns)
             self.assertIn("saga_checkpoints", tables)
             saga_checkpoint_columns = column_names(connection, "saga_checkpoints")
             self.assertIn("checkpoint_key", saga_checkpoint_columns)
@@ -519,6 +539,14 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
                     self.assertNotIn("memory_scope", runtime_session_columns)
                     self.assertNotIn("thread_id", runtime_session_columns)
                     self.assertIn("saga_checkpoints", tables)
+                if migration == "0091":
+                    self.assertNotIn("saga_activity_attempts", tables)
+                    saga_activity_result_columns = column_names(connection, "saga_activity_results")
+                    self.assertNotIn("idempotency_key", saga_activity_result_columns)
+                    self.assertNotIn("external_operation_id", saga_activity_result_columns)
+                    self.assertNotIn("worker_job_id", saga_activity_result_columns)
+                    self.assertNotIn("repair_status", saga_activity_result_columns)
+                    self.assertNotIn("lease_owner", saga_activity_result_columns)
                 if migration == "0070":
                     audit_export_columns = column_names(connection, "audit_exports")
                     self.assertNotIn("event_count", audit_export_columns)

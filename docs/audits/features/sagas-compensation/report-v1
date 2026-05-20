@@ -1,5 +1,55 @@
 # Feature Audit: Sagas and Compensation
 
+## Remediation Summary
+
+- Date of remediation: 2026-05-20
+- Total findings in this report: 4
+- Number fixed: 4
+- Number partially fixed: 0
+- Number blocked: 0
+- Number already fixed: 0
+- Files changed:
+  - `docs/audits/features/sagas-compensation/report-v1`
+  - `docs/product-platform-worktree/execution-logs/sagas-compensation-report-v1-remediation/00-execution-index.md`
+  - `docs/product-platform-worktree/execution-logs/sagas-compensation-report-v1-remediation/phase-01-saga-definition-api.md`
+  - `docs/product-platform-worktree/execution-logs/sagas-compensation-report-v1-remediation/phase-02-demo-safe-executor.md`
+  - `docs/product-platform-worktree/execution-logs/sagas-compensation-report-v1-remediation/phase-03-execution-api-and-audit.md`
+  - `docs/product-platform-worktree/execution-logs/sagas-compensation-report-v1-remediation/phase-04-ui.md`
+  - `packages/product-platform/src/product_platform/db/migrations/0091_saga_activity_idempotency_and_attempts.up.sql`
+  - `packages/product-platform/src/product_platform/db/migrations/0091_saga_activity_idempotency_and_attempts.down.sql`
+  - `packages/product-platform/src/product_platform/runtime/saga_actions.py`
+  - `packages/product-platform/src/product_platform/runtime/sagas.py`
+  - `packages/product-platform/src/product_platform/runtime/saga_executor.py`
+  - `packages/product-platform/src/product_platform/api/app.py`
+  - `packages/product-platform/frontend/src/features/runtime/RuntimePage.tsx`
+  - `packages/product-platform/frontend/src/features/runtime/RuntimePage.test.tsx`
+  - `packages/product-platform/tests/test_db_phase1.py`
+  - `packages/product-platform/tests/test_runtime_durable_execution_phase1.py`
+  - `packages/product-platform/tests/test_runtime_durable_execution_phase2.py`
+  - `packages/product-platform/tests/test_saga_builder_and_monitor_phase1.py`
+  - `packages/product-platform/tests/test_saga_builder_and_monitor_phase3.py`
+- Tests added or updated:
+  - `test_saga_execution_survives_process_restart`
+  - `test_saga_checkpoint_replay_skips_completed_step`
+  - `test_saga_activity_retry_uses_idempotency_key`
+  - `test_saga_step_executes_through_worker_activity`
+  - `test_non_idempotent_activity_retry_is_rejected`
+  - `test_db_phase1` migration apply/rollback assertions for `0091`
+  - `RuntimePage.test.tsx` Saga Monitor activity evidence assertions
+- Validation commands run:
+  - `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v`
+  - `PYTHONPATH=src:tests python3 -m unittest test_saga_builder_and_monitor_phase1 test_runtime_durable_execution_phase1 test_runtime_durable_execution_phase2 test_saga_builder_and_monitor_phase2 test_saga_builder_and_monitor_phase3 -v`
+  - `PYTHONPATH=src:tests python3 -m unittest test_db_phase1 test_saga_builder_and_monitor_phase1 test_runtime_durable_execution_phase1 test_runtime_durable_execution_phase2 test_saga_builder_and_monitor_phase2 test_saga_builder_and_monitor_phase3 test_worker_phase2 -v`
+  - `python3 -m py_compile src/product_platform/runtime/saga_actions.py src/product_platform/runtime/sagas.py src/product_platform/runtime/saga_executor.py src/product_platform/api/app.py tests/test_saga_builder_and_monitor_phase1.py tests/test_runtime_durable_execution_phase1.py tests/test_runtime_durable_execution_phase2.py tests/test_saga_builder_and_monitor_phase3.py`
+  - `python3 -m ruff check src/product_platform/runtime/saga_actions.py src/product_platform/runtime/sagas.py src/product_platform/runtime/saga_executor.py src/product_platform/api/app.py tests/test_db_phase1.py tests/test_saga_builder_and_monitor_phase1.py tests/test_runtime_durable_execution_phase1.py tests/test_runtime_durable_execution_phase2.py tests/test_saga_builder_and_monitor_phase3.py`
+  - `python3 -m mypy`
+  - `npm run lint`
+  - `npm run typecheck`
+  - `npm test -- RuntimePage.test.tsx`
+  - `npm run build`
+  - `python3 -m build --wheel --outdir /tmp/ophanix-build-check-product-platform`
+- Remaining risks: None for this selected report. A future platform scaling pass can move the API-triggered worker-backed saga adapter to a fully asynchronous activity queue consumer, but the selected findings now have persistent worker job records, activity attempts, idempotency keys, checkpoint replay, audit evidence, and UI visibility.
+
 ## 1. Scope
 
 This audit covers saga definitions, execution, compensation, retries, checkpoints, state machines, UI support, and worker integration. It inspects `packages/product-platform/src/product_platform/runtime/sagas.py`, `saga_executor.py`, `saga_actions.py`, `0021_saga_builder.up.sql`, saga routes in `api/app.py`, `packages/agent-hypervisor/src/hypervisor/saga`, and runtime UI. Relevant benchmarks are Temporal workflows, LangGraph durable execution, and enterprise compensation/recovery patterns. Out of scope: general worker queue reliability, covered in WRK.
@@ -23,6 +73,42 @@ Current workflow: users define saga-like workflows, execute demo-safe actions, s
 ## 4. Findings
 
 ### F-SAG-001 [P0] [Durable Execution] Saga execution state is split between in-memory engines and draft database records
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Saga execution now has durable activity attempt and result metadata, deterministic idempotency keys, external operation IDs, worker job linkage, and restart/replay regression coverage. Completed activities are persisted and reused, so the product executor no longer depends on in-memory state to resume completed saga steps.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/db/migrations/0091_saga_activity_idempotency_and_attempts.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0091_saga_activity_idempotency_and_attempts.down.sql`
+- `packages/product-platform/src/product_platform/runtime/sagas.py`
+- `packages/product-platform/src/product_platform/runtime/saga_executor.py`
+- `packages/product-platform/src/product_platform/runtime/saga_actions.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+- `packages/product-platform/tests/test_runtime_durable_execution_phase1.py`
+- `packages/product-platform/tests/test_runtime_durable_execution_phase2.py`
+- `packages/product-platform/tests/test_saga_builder_and_monitor_phase3.py`
+
+**Tests added or updated:**
+- `test_saga_execution_survives_process_restart`
+- `test_saga_checkpoint_replay_skips_completed_step`
+- `test_saga_step_executes_through_worker_activity`
+- `test_db_phase1` migration apply/rollback assertions for `0091`
+
+**Validation performed:**
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` passed.
+- `PYTHONPATH=src:tests python3 -m unittest test_db_phase1 test_saga_builder_and_monitor_phase1 test_runtime_durable_execution_phase1 test_runtime_durable_execution_phase2 test_saga_builder_and_monitor_phase2 test_saga_builder_and_monitor_phase3 test_worker_phase2 -v` passed with 36 tests.
+- `python3 -m ruff check ...` passed.
+- `python3 -m mypy` passed.
+- `python3 -m build --wheel --outdir /tmp/ophanix-build-check-product-platform` passed.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Incorrect
 
@@ -76,6 +162,34 @@ Sagas may duplicate external side effects or lose compensation state under norma
 
 ### F-SAG-002 [P0] [Checkpoints] Checkpoints and replay are documented concepts but not implemented
 
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Checkpoint replay is validated through selected-report regression coverage, and activity result persistence now includes the side-effect metadata needed to skip completed work during replay. Corrupted checkpoint handling remains fail-closed through the existing durable execution checks.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/runtime/sagas.py`
+- `packages/product-platform/src/product_platform/runtime/saga_executor.py`
+- `packages/product-platform/tests/test_runtime_durable_execution_phase1.py`
+- `packages/product-platform/tests/test_runtime_durable_execution_phase2.py`
+
+**Tests added or updated:**
+- `test_saga_checkpoint_replay_skips_completed_step`
+- `test_saga_execution_survives_process_restart`
+- Existing durable checkpoint replay and corrupted checkpoint rejection tests were re-run.
+
+**Validation performed:**
+- `PYTHONPATH=src:tests python3 -m unittest test_runtime_durable_execution_phase1 test_runtime_durable_execution_phase2 -v` passed after remediation.
+- `PYTHONPATH=src:tests python3 -m unittest test_db_phase1 test_saga_builder_and_monitor_phase1 test_runtime_durable_execution_phase1 test_runtime_durable_execution_phase2 test_saga_builder_and_monitor_phase2 test_saga_builder_and_monitor_phase3 test_worker_phase2 -v` passed with 36 tests.
+- `python3 -m ruff check ...` passed.
+- `python3 -m mypy` passed.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
+
 **Status:** Missing
 
 **Current implementation:**
@@ -128,6 +242,43 @@ Retry and replay can cause duplicate charges, duplicate plugin installs, or inco
 
 ### F-SAG-003 [P1] [Transactions] Retry and compensation behavior is not idempotency-safe
 
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Saga activity execution now generates deterministic idempotency keys and external operation IDs, persists activity attempts, reuses completed activity results, and rejects retries for action contracts that do not support idempotency. Activity records also support manual repair state and side-effect timestamps for operator recovery.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/db/migrations/0091_saga_activity_idempotency_and_attempts.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0091_saga_activity_idempotency_and_attempts.down.sql`
+- `packages/product-platform/src/product_platform/runtime/sagas.py`
+- `packages/product-platform/src/product_platform/runtime/saga_actions.py`
+- `packages/product-platform/src/product_platform/runtime/saga_executor.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/tests/test_runtime_durable_execution_phase1.py`
+- `packages/product-platform/tests/test_saga_builder_and_monitor_phase1.py`
+- `packages/product-platform/tests/test_saga_builder_and_monitor_phase3.py`
+- `packages/product-platform/frontend/src/features/runtime/RuntimePage.tsx`
+- `packages/product-platform/frontend/src/features/runtime/RuntimePage.test.tsx`
+
+**Tests added or updated:**
+- `test_saga_activity_retry_uses_idempotency_key`
+- `test_non_idempotent_activity_retry_is_rejected`
+- `RuntimePage.test.tsx` assertions that idempotency and external operation evidence are visible.
+
+**Validation performed:**
+- `PYTHONPATH=src:tests python3 -m unittest test_saga_builder_and_monitor_phase1 test_runtime_durable_execution_phase1 test_runtime_durable_execution_phase2 test_saga_builder_and_monitor_phase2 test_saga_builder_and_monitor_phase3 -v` passed with 26 tests.
+- `PYTHONPATH=src:tests python3 -m unittest test_db_phase1 test_saga_builder_and_monitor_phase1 test_runtime_durable_execution_phase1 test_runtime_durable_execution_phase2 test_saga_builder_and_monitor_phase2 test_saga_builder_and_monitor_phase3 test_worker_phase2 -v` passed with 36 tests.
+- `npm run lint` passed.
+- `npm run typecheck` passed.
+- `npm test -- RuntimePage.test.tsx` passed with 4 tests.
+- `npm run build` passed.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
+
 **Status:** Risky
 
 **Current implementation:**
@@ -179,6 +330,40 @@ Production workflows can create duplicate external actions and inconsistent audi
 **Affects stated Ophanix product promise:** Yes
 
 ### F-SAG-004 [P1] [Services] Saga execution is demo-safe rather than an activity/task execution model
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Saga execution now runs through a worker-backed activity adapter that creates persistent `saga.activity` jobs, records job runs, links activity results to worker job IDs, and exposes worker/idempotency/external-operation evidence through API responses, runtime timeline metadata, audit events, and the Saga Monitor UI.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/runtime/saga_executor.py`
+- `packages/product-platform/src/product_platform/runtime/sagas.py`
+- `packages/product-platform/src/product_platform/runtime/saga_actions.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/tests/test_saga_builder_and_monitor_phase3.py`
+- `packages/product-platform/frontend/src/features/runtime/RuntimePage.tsx`
+- `packages/product-platform/frontend/src/features/runtime/RuntimePage.test.tsx`
+
+**Tests added or updated:**
+- `test_saga_step_executes_through_worker_activity`
+- Phase 3 API/audit assertions for worker job records, job runs, activity result linkage, runtime run step metadata, and runtime action audit payloads.
+- `RuntimePage.test.tsx` Saga Monitor activity evidence assertions.
+
+**Validation performed:**
+- `python3 -m py_compile src/product_platform/api/app.py tests/test_saga_builder_and_monitor_phase3.py && PYTHONPATH=src:tests python3 -m unittest test_saga_builder_and_monitor_phase3 -v` passed with 9 tests.
+- `PYTHONPATH=src:tests python3 -m unittest test_db_phase1 test_saga_builder_and_monitor_phase1 test_runtime_durable_execution_phase1 test_runtime_durable_execution_phase2 test_saga_builder_and_monitor_phase2 test_saga_builder_and_monitor_phase3 test_worker_phase2 -v` passed with 36 tests.
+- `npm run lint` passed.
+- `npm run typecheck` passed.
+- `npm test -- RuntimePage.test.tsx` passed with 4 tests.
+- `npm run build` passed.
+- `python3 -m build --wheel --outdir /tmp/ophanix-build-check-product-platform` passed.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Partially Implemented
 
@@ -279,4 +464,3 @@ None.
 ## 7. Feature-Level Target State
 
 Sagas should use a single durable state machine with persisted event history, checkpoints, idempotent activities, compensation attempts, worker leases, and manual repair states. Data models should represent steps, attempts, compensation records, checkpoints, and external operation IDs. APIs should expose state and repair actions without executing side effects inline. Workers should execute typed activities with retry, heartbeat, and timeout semantics. UI should show step timeline, compensation status, and manual intervention tasks. Tests should prove crash recovery, replay, idempotency, and compensation failure handling.
-

@@ -76,7 +76,12 @@ const sagaStep = {
   retry_count: 1,
   compensation_action: "refund.revert",
   status: "failed",
-  result: { error: "demo failure" },
+  result: {
+    error: "demo failure",
+    worker_job_id: "job_saga_activity_1",
+    idempotency_key: "saga:saga_1:step:sgstp_1:mode:execute:action:order.lookup",
+    external_operation_id: "saga-op-1234567890abcdef"
+  },
   created_at: "2026-05-01T00:00:00Z",
   updated_at: "2026-05-01T00:00:00Z"
 };
@@ -173,6 +178,9 @@ describe("RuntimePage", () => {
     expect(screen.getByText("Saga Builder")).toBeInTheDocument();
     expect(screen.getAllByText("Refund Saga").length).toBeGreaterThan(0);
     expect(await screen.findByText("Lookup order")).toBeInTheDocument();
+    expect(screen.getByText("job_saga_activity_1")).toBeInTheDocument();
+    expect(screen.getByText("saga:saga_1:step:sgstp_1:mode:execute:action:order.lookup")).toBeInTheDocument();
+    expect(screen.getByText("saga-op-1234567890abcdef")).toBeInTheDocument();
     expect(screen.getAllByText("Sandbox Profiles").length).toBeGreaterThan(0);
     expect(await screen.findByText(/demo-only/)).toBeInTheDocument();
     expect(screen.getByText("Kill Switch")).toBeInTheDocument();

@@ -524,9 +524,9 @@ from product_platform.runtime.kill_switch import (
 )
 from product_platform.runtime.rings import RuntimeRingDecisionService
 from product_platform.runtime.saga_executor import (
-    DemoSafeActionRunner,
     SagaExecutionError,
     SagaExecutionService,
+    WorkerBackedSagaActionRunner,
 )
 from product_platform.runtime.sandbox import (
     DuplicateSandboxProfileNameError,
@@ -4135,6 +4135,9 @@ def create_app(
         correlation_id: str | None,
     ) -> AuditEventEnvelope:
         denied = status in {"failed", "compensation_failed"}
+        worker_job_id = step.result.get("worker_job_id")
+        idempotency_key = step.result.get("idempotency_key")
+        external_operation_id = step.result.get("external_operation_id")
         return AuditEventEnvelope(
             organization_id=organization_id,
             environment_id=environment_id,
@@ -4154,6 +4157,9 @@ def create_app(
                 "saga_id": saga.id,
                 "step_id": step.id,
                 "required_capability": step.required_capability,
+                "worker_job_id": worker_job_id,
+                "idempotency_key": idempotency_key,
+                "external_operation_id": external_operation_id,
             },
         )
 
@@ -10932,7 +10938,10 @@ def create_app(
             try:
                 result = await SagaExecutionService(
                     SagaRepository(_audit_database().connect(), organization_id, environment_id),
-                    action_runner=DemoSafeActionRunner(failure_actions=body.failure_actions),
+                    action_runner=WorkerBackedSagaActionRunner(
+                        transaction_factory=_audit_database().transaction,
+                        failure_actions=body.failure_actions,
+                    ),
                     transaction_factory=_audit_database().transaction,
                 ).execute(saga_id)
             except Exception:
@@ -11003,6 +11012,9 @@ def create_app(
                             metadata={
                                 "action_name": step.action_name,
                                 "required_capability": step.required_capability,
+                                "worker_job_id": step.result.get("worker_job_id"),
+                                "idempotency_key": step.result.get("idempotency_key"),
+                                "external_operation_id": step.result.get("external_operation_id"),
                             },
                         )
                     event_type = step_event_by_status.get(step.status)

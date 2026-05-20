@@ -15,7 +15,10 @@ from product_platform.runtime.models import (
     SagaStepCreateRequest,
     SagaStepResponse,
 )
-from product_platform.runtime.saga_actions import validate_saga_action_name
+from product_platform.runtime.saga_actions import (
+    saga_action_supports_idempotency,
+    validate_saga_action_name,
+)
 
 
 SAGA_TERMINAL_STATUSES = frozenset(
@@ -156,6 +159,11 @@ class SagaRepository:
             validate_saga_action_name(body.compensation_action, field_name="compensation_action")
         except ValueError as exc:
             raise SagaStepValidationError(str(exc)) from exc
+        if body.retry_count > 0 and not saga_action_supports_idempotency(body.action_name):
+            raise SagaStepValidationError(
+                "Non-idempotent saga action retries require explicit approval; "
+                "set retry_count to 0 or choose an idempotent action."
+            )
         step_id = generate_id("sgstep")
         now = utc_now_iso()
         self.connection.execute(
@@ -403,30 +411,66 @@ class SagaRepository:
         step_id: str,
         mode: str,
         action_name: str,
+        worker_job_id: str | None = None,
+        lease_owner: str | None = None,
+        lease_expires_at: str | None = None,
     ) -> Row:
         """Record an activity attempt before executing a side effect."""
 
         mode = _validate_activity_mode(mode)
         existing = self.get_activity_result(step_id, mode)
         now = utc_now_iso()
+        activity_key = _activity_key(saga_id, step_id, mode)
+        idempotency_key = _activity_idempotency_key(saga_id, step_id, mode, action_name)
+        external_operation_id = _external_operation_id(idempotency_key)
         if existing is not None:
             if existing["status"] == "succeeded":
                 return existing
+            attempt_number = int(existing["attempt_count"]) + 1
             self.connection.execute(
                 """
                 UPDATE saga_activity_results
                 SET status = ?,
                     action_name = ?,
+                    idempotency_key = ?,
+                    external_operation_id = ?,
+                    worker_job_id = COALESCE(?, worker_job_id),
+                    lease_owner = ?,
+                    lease_expires_at = ?,
+                    side_effect_started_at = COALESCE(side_effect_started_at, ?),
+                    repair_status = ?,
+                    repair_reason = NULL,
                     attempt_count = attempt_count + 1,
                     error_message = NULL,
                     updated_at = ?
                 WHERE id = ?
                 """,
-                ("started", action_name, now, existing["id"]),
+                (
+                    "started",
+                    action_name,
+                    idempotency_key,
+                    external_operation_id,
+                    worker_job_id,
+                    lease_owner,
+                    lease_expires_at,
+                    now,
+                    "none",
+                    now,
+                    existing["id"],
+                ),
             )
             row = self.get_activity_result(step_id, mode)
             if row is None:
                 raise SagaActivityResultError("Started activity result could not be loaded.")
+            self._record_activity_attempt(
+                row,
+                attempt_number=attempt_number,
+                status="running",
+                worker_job_id=worker_job_id,
+                lease_owner=lease_owner,
+                lease_expires_at=lease_expires_at,
+                side_effect_started_at=now,
+            )
             return row
         self._require_saga_step(saga_id, step_id)
         activity_id = generate_id("sgact")
@@ -434,20 +478,30 @@ class SagaRepository:
             """
             INSERT INTO saga_activity_results (
                 id, saga_id, step_id, activity_key, action_name, mode, status,
-                attempt_count, result_json, error_message, created_at, updated_at
+                attempt_count, result_json, error_message, idempotency_key,
+                external_operation_id, worker_job_id, lease_owner, lease_expires_at,
+                side_effect_started_at, repair_status, repair_reason, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 activity_id,
                 saga_id,
                 step_id,
-                _activity_key(saga_id, step_id, mode),
+                activity_key,
                 action_name,
                 mode,
                 "started",
                 1,
                 "{}",
+                None,
+                idempotency_key,
+                external_operation_id,
+                worker_job_id,
+                lease_owner,
+                lease_expires_at,
+                now,
+                "none",
                 None,
                 now,
                 now,
@@ -456,6 +510,15 @@ class SagaRepository:
         row = self.get_activity_result(step_id, mode)
         if row is None:
             raise SagaActivityResultError("Created activity result could not be loaded.")
+        self._record_activity_attempt(
+            row,
+            attempt_number=1,
+            status="running",
+            worker_job_id=worker_job_id,
+            lease_owner=lease_owner,
+            lease_expires_at=lease_expires_at,
+            side_effect_started_at=now,
+        )
         return row
 
     def complete_activity_result(
@@ -473,6 +536,14 @@ class SagaRepository:
         existing = self.get_activity_result(step_id, mode)
         now = utc_now_iso()
         payload = json.dumps(result or {}, sort_keys=True)
+        idempotency_key = _activity_idempotency_key(saga_id, step_id, mode, action_name)
+        external_operation_id = str(
+            (result or {}).get("external_operation_id")
+            or (result or {}).get("operation_id")
+            or _external_operation_id(idempotency_key)
+        )
+        worker_job_id = (result or {}).get("worker_job_id")
+        worker_job_id = str(worker_job_id) if worker_job_id else None
         if existing is None:
             self._require_saga_step(saga_id, step_id)
             activity_id = generate_id("sgact")
@@ -480,9 +551,11 @@ class SagaRepository:
                 """
                 INSERT INTO saga_activity_results (
                     id, saga_id, step_id, activity_key, action_name, mode, status,
-                    attempt_count, result_json, error_message, created_at, updated_at
+                    attempt_count, result_json, error_message, idempotency_key,
+                    external_operation_id, worker_job_id, side_effect_started_at,
+                    side_effect_completed_at, repair_status, repair_reason, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     activity_id,
@@ -494,6 +567,13 @@ class SagaRepository:
                     "succeeded",
                     1,
                     payload,
+                    None,
+                    idempotency_key,
+                    external_operation_id,
+                    worker_job_id,
+                    now,
+                    now,
+                    "none",
                     None,
                     now,
                     now,
@@ -507,14 +587,44 @@ class SagaRepository:
                     status = ?,
                     result_json = ?,
                     error_message = NULL,
+                    idempotency_key = ?,
+                    external_operation_id = ?,
+                    worker_job_id = COALESCE(?, worker_job_id),
+                    side_effect_started_at = COALESCE(side_effect_started_at, ?),
+                    side_effect_completed_at = ?,
+                    lease_owner = NULL,
+                    lease_expires_at = NULL,
+                    repair_status = ?,
+                    repair_reason = NULL,
                     updated_at = ?
                 WHERE id = ?
                 """,
-                (action_name, "succeeded", payload, now, existing["id"]),
+                (
+                    action_name,
+                    "succeeded",
+                    payload,
+                    idempotency_key,
+                    external_operation_id,
+                    worker_job_id,
+                    now,
+                    now,
+                    "none",
+                    now,
+                    existing["id"],
+                ),
             )
         row = self.get_activity_result(step_id, mode)
         if row is None:
             raise SagaActivityResultError("Completed activity result could not be loaded.")
+        self._record_activity_attempt(
+            row,
+            attempt_number=int(row["attempt_count"]),
+            status="succeeded",
+            external_operation_id=external_operation_id,
+            worker_job_id=worker_job_id or row["worker_job_id"],
+            side_effect_started_at=row["side_effect_started_at"],
+            side_effect_completed_at=now,
+        )
         return row
 
     def fail_activity_result(
@@ -525,12 +635,16 @@ class SagaRepository:
         mode: str,
         action_name: str,
         error_message: str,
+        worker_job_id: str | None = None,
+        external_operation_id: str | None = None,
     ) -> Row:
         """Persist a failed activity attempt."""
 
         mode = _validate_activity_mode(mode)
         existing = self.get_activity_result(step_id, mode)
         now = utc_now_iso()
+        idempotency_key = _activity_idempotency_key(saga_id, step_id, mode, action_name)
+        external_operation_id = external_operation_id or _external_operation_id(idempotency_key)
         if existing is None:
             self._require_saga_step(saga_id, step_id)
             activity_id = generate_id("sgact")
@@ -538,9 +652,11 @@ class SagaRepository:
                 """
                 INSERT INTO saga_activity_results (
                     id, saga_id, step_id, activity_key, action_name, mode, status,
-                    attempt_count, result_json, error_message, created_at, updated_at
+                    attempt_count, result_json, error_message, idempotency_key,
+                    external_operation_id, worker_job_id, side_effect_started_at, repair_status,
+                    repair_reason, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     activity_id,
@@ -553,6 +669,12 @@ class SagaRepository:
                     1,
                     "{}",
                     error_message,
+                    idempotency_key,
+                    external_operation_id,
+                    worker_job_id,
+                    now,
+                    "none",
+                    None,
                     now,
                     now,
                 ),
@@ -564,14 +686,37 @@ class SagaRepository:
                 SET action_name = ?,
                     status = ?,
                     error_message = ?,
+                    idempotency_key = ?,
+                    external_operation_id = COALESCE(external_operation_id, ?),
+                    worker_job_id = COALESCE(?, worker_job_id),
+                    lease_owner = NULL,
+                    lease_expires_at = NULL,
                     updated_at = ?
                 WHERE id = ?
                 """,
-                (action_name, "failed", error_message, now, existing["id"]),
+                (
+                    action_name,
+                    "failed",
+                    error_message,
+                    idempotency_key,
+                    external_operation_id,
+                    worker_job_id,
+                    now,
+                    existing["id"],
+                ),
             )
         row = self.get_activity_result(step_id, mode)
         if row is None:
             raise SagaActivityResultError("Failed activity result could not be loaded.")
+        self._record_activity_attempt(
+            row,
+            attempt_number=int(row["attempt_count"]),
+            status="failed",
+            external_operation_id=row["external_operation_id"],
+            worker_job_id=worker_job_id or row["worker_job_id"],
+            error_message=error_message,
+            side_effect_started_at=row["side_effect_started_at"],
+        )
         return row
 
     def get_activity_result(self, step_id: str, mode: str) -> Row | None:
@@ -606,6 +751,59 @@ class SagaRepository:
             """,
             (saga_id, self.organization_id, self.environment_id),
         ).fetchall()
+
+    def list_activity_attempts(self, saga_id: str) -> list[Row]:
+        """List durable activity attempts for one saga."""
+
+        return self.connection.execute(
+            """
+            SELECT saa.*
+            FROM saga_activity_attempts saa
+            JOIN sagas s ON s.id = saa.saga_id
+            WHERE saa.saga_id = ?
+              AND s.organization_id = ?
+              AND s.environment_id = ?
+            ORDER BY saa.created_at ASC, saa.id ASC
+            """,
+            (saga_id, self.organization_id, self.environment_id),
+        ).fetchall()
+
+    def mark_activity_manual_repair(
+        self,
+        *,
+        step_id: str,
+        mode: str,
+        reason: str,
+    ) -> Row:
+        """Mark an activity as requiring manual repair before another side effect retry."""
+
+        mode = _validate_activity_mode(mode)
+        existing = self.get_activity_result(step_id, mode)
+        if existing is None:
+            raise SagaActivityResultError("Activity result not found for manual repair.")
+        now = utc_now_iso()
+        self.connection.execute(
+            """
+            UPDATE saga_activity_results
+            SET repair_status = ?,
+                repair_reason = ?,
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            ("required", reason, now, existing["id"]),
+        )
+        row = self.get_activity_result(step_id, mode)
+        if row is None:
+            raise SagaActivityResultError("Manual repair activity result could not be loaded.")
+        self._record_activity_attempt(
+            row,
+            attempt_number=int(row["attempt_count"]),
+            status="manual_repair",
+            error_message=reason,
+        )
+        return row
 
     def create_checkpoint(
         self,
@@ -842,6 +1040,88 @@ class SagaRepository:
         if checkpoint["payload_hash"] != expected:
             raise SagaCheckpointError("Checkpoint integrity verification failed.")
 
+    def _record_activity_attempt(
+        self,
+        activity_result: Row,
+        *,
+        attempt_number: int,
+        status: str,
+        external_operation_id: str | None = None,
+        worker_job_id: str | None = None,
+        lease_owner: str | None = None,
+        lease_expires_at: str | None = None,
+        side_effect_started_at: str | None = None,
+        side_effect_completed_at: str | None = None,
+        error_message: str | None = None,
+        metadata: dict | None = None,
+    ) -> Row:
+        """Upsert the durable attempt row for one activity attempt."""
+
+        now = utc_now_iso()
+        attempt_id = generate_id("sgatt")
+        values = (
+            attempt_id,
+            self.organization_id,
+            self.environment_id,
+            activity_result["saga_id"],
+            activity_result["step_id"],
+            activity_result["id"],
+            activity_result["activity_key"],
+            activity_result["mode"],
+            activity_result["action_name"],
+            attempt_number,
+            activity_result["idempotency_key"],
+            external_operation_id or activity_result["external_operation_id"],
+            worker_job_id or activity_result["worker_job_id"],
+            status,
+            lease_owner or activity_result["lease_owner"],
+            lease_expires_at or activity_result["lease_expires_at"],
+            side_effect_started_at,
+            side_effect_completed_at,
+            error_message,
+            json.dumps(metadata or {}, sort_keys=True),
+            now,
+            now,
+            status,
+            external_operation_id or activity_result["external_operation_id"],
+            worker_job_id or activity_result["worker_job_id"],
+            lease_owner or activity_result["lease_owner"],
+            lease_expires_at or activity_result["lease_expires_at"],
+            side_effect_started_at,
+            side_effect_completed_at,
+            error_message,
+            json.dumps(metadata or {}, sort_keys=True),
+            now,
+        )
+        row = self.connection.execute(
+            """
+            INSERT INTO saga_activity_attempts (
+                id, organization_id, environment_id, saga_id, step_id,
+                activity_result_id, activity_key, mode, action_name, attempt_number,
+                idempotency_key, external_operation_id, worker_job_id, status,
+                lease_owner, lease_expires_at, side_effect_started_at,
+                side_effect_completed_at, error_message, metadata_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (saga_id, step_id, mode, attempt_number)
+            DO UPDATE SET status = ?,
+                          external_operation_id = COALESCE(?, saga_activity_attempts.external_operation_id),
+                          worker_job_id = COALESCE(?, saga_activity_attempts.worker_job_id),
+                          lease_owner = ?,
+                          lease_expires_at = ?,
+                          side_effect_started_at = COALESCE(?, saga_activity_attempts.side_effect_started_at),
+                          side_effect_completed_at = COALESCE(?, saga_activity_attempts.side_effect_completed_at),
+                          error_message = ?,
+                          metadata_json = ?,
+                          updated_at = ?
+            RETURNING *
+            """,
+            values,
+        ).fetchone()
+        if row is None:
+            raise SagaActivityResultError("Activity attempt could not be recorded.")
+        return row
+
 
 def _validate_activity_mode(mode: str) -> str:
     normalized = mode.strip().lower()
@@ -853,6 +1133,32 @@ def _validate_activity_mode(mode: str) -> str:
 
 def _activity_key(saga_id: str, step_id: str, mode: str) -> str:
     return f"{saga_id}:{step_id}:{mode}"
+
+
+def saga_activity_idempotency_key(
+    saga_id: str,
+    step_id: str,
+    mode: str,
+    action_name: str,
+) -> str:
+    """Return the deterministic idempotency key for one saga activity boundary."""
+
+    return f"saga:{saga_id}:step:{step_id}:mode:{mode}:action:{action_name}"
+
+
+def saga_external_operation_id(idempotency_key: str) -> str:
+    """Return a stable external operation identifier for an idempotent activity."""
+
+    digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
+    return f"saga-op-{digest[:32]}"
+
+
+def _activity_idempotency_key(saga_id: str, step_id: str, mode: str, action_name: str) -> str:
+    return saga_activity_idempotency_key(saga_id, step_id, mode, action_name)
+
+
+def _external_operation_id(idempotency_key: str) -> str:
+    return saga_external_operation_id(idempotency_key)
 
 
 def _checkpoint_key(saga_id: str, step_id: str, mode: str) -> str:
