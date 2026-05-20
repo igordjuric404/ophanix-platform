@@ -9,6 +9,7 @@ from product_platform import create_app
 from product_platform.api.settings import Settings
 from product_platform.db.seed import seed_demo_data
 from product_platform.db.testing import create_migrated_test_database
+from product_platform.runtime.sagas import SagaRepository
 
 
 class SagaBuilderPhase3Tests(unittest.TestCase):
@@ -218,6 +219,85 @@ class SagaBuilderPhase3Tests(unittest.TestCase):
 
         self.assertEqual(replayed.status_code, 400, replayed.text)
         self.assertIn("completed", replayed.json()["message"])
+
+    def test_running_saga_recovers_replayed_activity_and_audits_recovery(self) -> None:
+        saga = self._build_refund_saga()
+        with self.database.transaction() as connection:
+            repository = SagaRepository(connection, "org_default", "env_default")
+            steps = repository.list_steps(saga["id"])
+            first_step = steps[0]
+            repository.update_saga_status(
+                saga["id"],
+                "running",
+                mark_started=True,
+                expected_statuses={"draft"},
+            )
+            repository.update_step_status(
+                first_step["id"],
+                "executing",
+                result={"action_name": first_step["action_name"]},
+            )
+            durable_result = {
+                "action_name": first_step["action_name"],
+                "mode": "execute",
+                "saga_id": saga["id"],
+                "step_id": first_step["id"],
+                "correlation_id": "order-demo-001",
+                "target_agent_id": "agent_claims",
+                "demo_safe": True,
+            }
+            repository.complete_activity_result(
+                saga_id=saga["id"],
+                step_id=first_step["id"],
+                mode="execute",
+                action_name=first_step["action_name"],
+                result=durable_result,
+            )
+            repository.create_checkpoint(
+                saga_id=saga["id"],
+                step_id=first_step["id"],
+                mode="execute",
+                payload={
+                    "result": durable_result,
+                    "side_effect_boundary": "after_activity_before_step_commit",
+                },
+                policy_snapshot={"required_capability": first_step["required_capability"]},
+                tool_calls=[{"action_name": first_step["action_name"], "mode": "execute"}],
+            )
+
+        recovered = self.client.post(
+            f"/api/v1/runtime/sagas/{saga['id']}/execute",
+            headers=self._headers(),
+            json={},
+        )
+
+        self.assertEqual(recovered.status_code, 200, recovered.text)
+        payload = recovered.json()
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["replayed_step_ids"], [first_step["id"]])
+        self.assertEqual([step["status"] for step in payload["saga"]["steps"]], ["committed"] * 3)
+        saga_event_types = [event["event_type"] for event in payload["saga"]["events"]]
+        self.assertIn("saga.recovered", saga_event_types)
+        self.assertIn("saga.activity.replayed", saga_event_types)
+        self.assertIn("saga.checkpoint.restored", saga_event_types)
+        self.assertIn("saga.checkpoint.created", saga_event_types)
+
+        audit_rows = self._audit_events()
+        event_types = [row["event_type"] for row in audit_rows]
+        self.assertIn("saga.recovered", event_types)
+        self.assertIn("saga.activity.replayed", event_types)
+        self.assertIn("saga.checkpoint.restored", event_types)
+        self.assertIn("saga.checkpoint.created", event_types)
+        recovered_audit = next(row for row in audit_rows if row["event_type"] == "saga.recovered")
+        replayed_audit = next(row for row in audit_rows if row["event_type"] == "saga.activity.replayed")
+        checkpoint_audit = next(row for row in audit_rows if row["event_type"] == "saga.checkpoint.restored")
+        self.assertEqual(recovered_audit["decision"], "allow")
+        self.assertEqual(replayed_audit["decision"], "allow")
+        self.assertEqual(checkpoint_audit["decision"], "allow")
+        self.assertEqual(json.loads(replayed_audit["payload_json"])["step_id"], first_step["id"])
+        self.assertTrue(
+            json.loads(checkpoint_audit["payload_json"])["payload_hash"].startswith("sha256:")
+        )
 
     def test_execute_with_caller_supplied_runtime_session_leaves_session_active(self) -> None:
         saga = self._build_refund_saga()

@@ -115,7 +115,6 @@ class TestFanOut:
 
 
 class TestCheckpoints:
-    @pytest.mark.skip("Feature not available in Public Preview")
     def test_save_and_check(self):
         mgr = CheckpointManager()
         ckpt = mgr.save("saga-1", "s1", "Database migrated", {"version": 5})
@@ -126,7 +125,6 @@ class TestCheckpoints:
         mgr = CheckpointManager()
         assert not mgr.is_achieved("saga-1", "Database migrated", "s1")
 
-    @pytest.mark.skip("Feature not available in Public Preview")
     def test_invalidate_checkpoint(self):
         mgr = CheckpointManager()
         mgr.save("saga-1", "s1", "Schema created")
@@ -134,9 +132,14 @@ class TestCheckpoints:
         assert count == 1
         assert not mgr.is_achieved("saga-1", "Schema created", "s1")
 
-    @pytest.mark.skip("Feature not available in Public Preview")
     def test_get_checkpoint(self):
-        pass
+        mgr = CheckpointManager()
+        saved = mgr.save("saga-1", "s1", "Schema created", {"version": 1})
+
+        loaded = mgr.get_checkpoint("saga-1", "Schema created", "s1")
+
+        assert loaded == saved
+        assert loaded.state_snapshot == {"version": 1}
 
     def test_get_saga_checkpoints(self):
         mgr = CheckpointManager()
@@ -147,13 +150,20 @@ class TestCheckpoints:
         ckpts = mgr.get_saga_checkpoints("saga-1")
         assert len(ckpts) == 2
 
-    @pytest.mark.skip("Feature not available in Public Preview")
     def test_replay_plan(self):
-        pass
+        mgr = CheckpointManager()
+        mgr.save("saga-1", "s1", "Step 1 done")
 
-    @pytest.mark.skip("Feature not available in Public Preview")
+        assert mgr.get_replay_plan("saga-1", ["s1", "s2"]) == ["s2"]
+
     def test_total_and_valid_counts(self):
-        pass
+        mgr = CheckpointManager()
+        mgr.save("saga-1", "s1", "Step 1 done")
+        mgr.save("saga-1", "s2", "Step 2 done")
+        mgr.invalidate("saga-1", "s1", "changed")
+
+        assert mgr.total_checkpoints == 2
+        assert mgr.valid_checkpoints == 1
 
     def test_goal_hash_deterministic(self):
         h1 = SemanticCheckpoint.compute_goal_hash("Deploy", "s1")

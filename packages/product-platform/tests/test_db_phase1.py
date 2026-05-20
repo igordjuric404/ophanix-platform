@@ -115,6 +115,9 @@ FEATURE_MIGRATIONS = [
     "0085",
     "0086",
     "0087",
+    "0088",
+    "0089",
+    "0090",
 ]
 
 ALL_EXPECTED_MIGRATIONS = [*EXPECTED_MIGRATIONS, *FEATURE_MIGRATIONS]
@@ -228,12 +231,39 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertIn("release_error", mcp_approval_columns)
             self.assertIn("mcp_rate_limits", tables)
             self.assertIn("runtime_sessions", tables)
+            runtime_session_columns = column_names(connection, "runtime_sessions")
+            self.assertIn("created_by_user_id", runtime_session_columns)
+            self.assertIn("memory_scope", runtime_session_columns)
+            self.assertIn("thread_id", runtime_session_columns)
             self.assertIn("runtime_actions", tables)
+            self.assertIn("runtime_runs", tables)
+            runtime_run_columns = column_names(connection, "runtime_runs")
+            self.assertIn("thread_id", runtime_run_columns)
+            self.assertIn("started_by_user_id", runtime_run_columns)
+            self.assertIn("recovery_state_json", runtime_run_columns)
+            self.assertIn("runtime_run_steps", tables)
+            runtime_run_step_columns = column_names(connection, "runtime_run_steps")
+            self.assertIn("runtime_action_id", runtime_run_step_columns)
+            self.assertIn("policy_decision_id", runtime_run_step_columns)
+            self.assertIn("checkpoint_id", runtime_run_step_columns)
+            self.assertIn("artifact_links_json", runtime_run_step_columns)
             self.assertIn("runtime_ring_decisions", tables)
             self.assertIn("runtime_ring_rules", tables)
             self.assertIn("sagas", tables)
             self.assertIn("saga_steps", tables)
             self.assertIn("saga_events", tables)
+            self.assertIn("saga_activity_results", tables)
+            saga_activity_result_columns = column_names(connection, "saga_activity_results")
+            self.assertIn("activity_key", saga_activity_result_columns)
+            self.assertIn("attempt_count", saga_activity_result_columns)
+            self.assertIn("result_json", saga_activity_result_columns)
+            self.assertIn("saga_checkpoints", tables)
+            saga_checkpoint_columns = column_names(connection, "saga_checkpoints")
+            self.assertIn("checkpoint_key", saga_checkpoint_columns)
+            self.assertIn("payload_hash", saga_checkpoint_columns)
+            self.assertIn("policy_snapshot_json", saga_checkpoint_columns)
+            self.assertIn("tool_calls_json", saga_checkpoint_columns)
+            self.assertIn("restored_at", saga_checkpoint_columns)
             self.assertIn("sandbox_profiles", tables)
             self.assertIn("sandbox_decisions", tables)
             self.assertIn("kill_switch_events", tables)
@@ -475,6 +505,20 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
                 if migration == "0087":
                     self.assertNotIn("plugin_runtime_tool_grants", tables)
                     self.assertIn("plugin_installations", tables)
+                if migration == "0088":
+                    self.assertNotIn("saga_activity_results", tables)
+                    self.assertIn("saga_events", tables)
+                if migration == "0089":
+                    self.assertNotIn("saga_checkpoints", tables)
+                    self.assertIn("saga_activity_results", tables)
+                if migration == "0090":
+                    self.assertNotIn("runtime_runs", tables)
+                    self.assertNotIn("runtime_run_steps", tables)
+                    runtime_session_columns = column_names(connection, "runtime_sessions")
+                    self.assertNotIn("created_by_user_id", runtime_session_columns)
+                    self.assertNotIn("memory_scope", runtime_session_columns)
+                    self.assertNotIn("thread_id", runtime_session_columns)
+                    self.assertIn("saga_checkpoints", tables)
                 if migration == "0070":
                     audit_export_columns = column_names(connection, "audit_exports")
                     self.assertNotIn("event_count", audit_export_columns)

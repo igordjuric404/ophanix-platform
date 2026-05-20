@@ -70,6 +70,8 @@ GATEWAY_CAPABILITIES_PATH = "/api/v1/gateway/capabilities"
 GATEWAY_AUTHORIZATION_STATUS_PATH_PREFIX = "/api/v1/gateway/authorizations"
 GATEWAY_TOOL_INVOKE_PATH_PREFIX = "/api/v1/tools"
 GATEWAY_TOOL_INVOKE_PATH_SUFFIX = "/invoke"
+RUNTIME_SESSIONS_PATH = "/api/v1/runtime/sessions"
+RUNTIME_EVENTS_STREAM_PATH = "/api/v1/audit/events/stream"
 SDK_GATEWAY_CONTRACT_VERSION = "tool-gateway.v1"
 SDK_VERSION = _sdk_version()
 SDK_USER_AGENT = f"ophanix-tool-gateway-python/{SDK_VERSION}"
@@ -316,6 +318,134 @@ class ToolDefinition:
     required_scope: str
     input_schema_json: dict[str, Any] | None = None
     output_schema_json: dict[str, Any] | None = None
+    raw: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RuntimeSession:
+    """SDK view of a Product Platform runtime session."""
+
+    id: str
+    organization_id: str
+    environment_id: str
+    agent_id: str
+    state: str
+    ring: int
+    agent_name: str | None = None
+    sponsor_user_id: str | None = None
+    created_by_user_id: str | None = None
+    memory_scope: str = "session"
+    thread_id: str | None = None
+    trace_id: str | None = None
+    span_id: str | None = None
+    parent_span_id: str | None = None
+    traceparent: str | None = None
+    tracestate: str | None = None
+    baggage: str | None = None
+    started_at: str | None = None
+    ended_at: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    raw: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RuntimeRunStep:
+    """SDK view of one runtime run step."""
+
+    id: str
+    run_id: str
+    session_id: str
+    step_order: int
+    step_type: str
+    name: str
+    status: str
+    parent_step_id: str | None = None
+    runtime_action_id: str | None = None
+    saga_id: str | None = None
+    saga_step_id: str | None = None
+    checkpoint_id: str | None = None
+    policy_decision_id: str | None = None
+    trace_id: str | None = None
+    span_id: str | None = None
+    parent_span_id: str | None = None
+    correlation_id: str | None = None
+    artifact_links: tuple[Mapping[str, Any], ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    started_at: str | None = None
+    ended_at: str | None = None
+    updated_at: str | None = None
+    raw: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RuntimeRun:
+    """SDK view of a runtime run timeline."""
+
+    id: str
+    organization_id: str
+    environment_id: str
+    session_id: str
+    thread_id: str
+    run_type: str
+    status: str
+    source_type: str | None = None
+    source_id: str | None = None
+    started_by_user_id: str | None = None
+    trace_id: str | None = None
+    span_id: str | None = None
+    parent_span_id: str | None = None
+    correlation_id: str | None = None
+    recovery_state: Mapping[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    started_at: str | None = None
+    ended_at: str | None = None
+    updated_at: str | None = None
+    steps: tuple[RuntimeRunStep, ...] = ()
+    raw: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RuntimeCheckpointReference:
+    """SDK checkpoint view derived from a runtime run step."""
+
+    checkpoint_id: str
+    session_id: str
+    run_id: str
+    step_id: str
+    step_type: str
+    name: str
+    status: str
+    recovery_state: Mapping[str, Any] = field(default_factory=dict)
+    trace_id: str | None = None
+    correlation_id: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    raw: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RuntimeEvent:
+    """SDK view of a runtime/audit event streamed by the Product Platform."""
+
+    id: str
+    organization_id: str
+    environment_id: str
+    event_type: str
+    source_component: str
+    actor_type: str
+    actor_id: str | None = None
+    agent_id: str | None = None
+    resource_type: str | None = None
+    resource_id: str | None = None
+    decision: str | None = None
+    severity: str = "info"
+    correlation_id: str | None = None
+    trace_id: str | None = None
+    policy_id: str | None = None
+    policy_version_id: str | None = None
+    trust_delta: float | None = None
+    payload_json: Mapping[str, Any] = field(default_factory=dict)
+    created_at: str | None = None
+    sse_event: str | None = None
     raw: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -666,6 +796,8 @@ class OphanixToolGatewayClient:
         traceparent: str | None = None,
         tracestate: str | None = None,
         baggage: str | None = None,
+        runtime_session_id: str | None = None,
+        runtime_run_id: str | None = None,
     ) -> ToolCallResult:
         """Invoke one registered gateway tool with bearer authentication."""
 
@@ -689,6 +821,11 @@ class OphanixToolGatewayClient:
             traceparent=traceparent,
             tracestate=tracestate,
             baggage=baggage,
+        )
+        _set_optional_runtime_context_headers(
+            headers,
+            runtime_session_id=runtime_session_id,
+            runtime_run_id=runtime_run_id,
         )
         self._emit_event(
             {
@@ -806,6 +943,206 @@ class OphanixToolGatewayClient:
             }
         )
         return result
+
+    def create_runtime_session(
+        self,
+        *,
+        agent_id: str,
+        environment_id: str,
+        ring: int = 2,
+        sponsor_user_id: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        correlation_id: str | None = None,
+        traceparent: str | None = None,
+        tracestate: str | None = None,
+        baggage: str | None = None,
+    ) -> RuntimeSession:
+        """Create a Product Platform runtime session."""
+
+        self._ensure_open()
+        auth_context = self._auth_context()
+        headers = _runtime_control_headers(
+            auth_context.headers,
+            environment_id=environment_id,
+            correlation_id=correlation_id,
+            traceparent=traceparent,
+            tracestate=tracestate,
+            baggage=baggage,
+        )
+        body: dict[str, Any] = {
+            "agent_id": _require_text(agent_id, "agent_id"),
+            "ring": _require_integer(ring, "ring"),
+            "metadata": dict(metadata or {}),
+        }
+        if sponsor_user_id is not None:
+            body["sponsor_user_id"] = _require_text(sponsor_user_id, "sponsor_user_id")
+        try:
+            response = _send_limited_sync_request(
+                self._http_client,
+                "POST",
+                f"{self.base_url}{RUNTIME_SESSIONS_PATH}",
+                max_response_bytes=self.max_response_bytes,
+                json=body,
+                headers=headers,
+                timeout=self.timeout_seconds,
+            )
+        except httpx.HTTPError as exc:
+            raise ToolGatewayError("Runtime session transport error.", code="transport_error") from exc
+        response_body = _response_json(response, max_response_bytes=self.max_response_bytes)
+        if response.status_code >= 400:
+            _raise_gateway_error(
+                response_body,
+                response.status_code,
+                retry_after_seconds=_retry_after_seconds(response),
+            )
+        return _runtime_session(response_body)
+
+    def get_runtime_session(
+        self,
+        session_id: str,
+        *,
+        environment_id: str,
+        correlation_id: str | None = None,
+    ) -> RuntimeSession:
+        """Fetch one runtime session."""
+
+        self._ensure_open()
+        auth_context = self._auth_context()
+        headers = _runtime_control_headers(
+            auth_context.headers,
+            environment_id=environment_id,
+            correlation_id=correlation_id,
+        )
+        try:
+            response = _send_limited_sync_request(
+                self._http_client,
+                "GET",
+                f"{self.base_url}{RUNTIME_SESSIONS_PATH}/{quote(_require_text(session_id, 'session_id'), safe='')}",
+                max_response_bytes=self.max_response_bytes,
+                headers=headers,
+                timeout=self.timeout_seconds,
+            )
+        except httpx.HTTPError as exc:
+            raise ToolGatewayError("Runtime session transport error.", code="transport_error") from exc
+        response_body = _response_json(response, max_response_bytes=self.max_response_bytes)
+        if response.status_code >= 400:
+            _raise_gateway_error(
+                response_body,
+                response.status_code,
+                retry_after_seconds=_retry_after_seconds(response),
+            )
+        return _runtime_session(response_body)
+
+    def list_runtime_session_runs(
+        self,
+        session_id: str,
+        *,
+        environment_id: str,
+        correlation_id: str | None = None,
+    ) -> list[RuntimeRun]:
+        """List runtime runs and steps for one session."""
+
+        self._ensure_open()
+        auth_context = self._auth_context()
+        headers = _runtime_control_headers(
+            auth_context.headers,
+            environment_id=environment_id,
+            correlation_id=correlation_id,
+        )
+        try:
+            response = _send_limited_sync_request(
+                self._http_client,
+                "GET",
+                (
+                    f"{self.base_url}{RUNTIME_SESSIONS_PATH}/"
+                    f"{quote(_require_text(session_id, 'session_id'), safe='')}/runs"
+                ),
+                max_response_bytes=self.max_response_bytes,
+                headers=headers,
+                timeout=self.timeout_seconds,
+            )
+        except httpx.HTTPError as exc:
+            raise ToolGatewayError("Runtime run transport error.", code="transport_error") from exc
+        response_data = _response_data(response, max_response_bytes=self.max_response_bytes)
+        if response.status_code >= 400:
+            _raise_gateway_error(
+                _mapping_response(response_data),
+                response.status_code,
+                retry_after_seconds=_retry_after_seconds(response),
+            )
+        if not isinstance(response_data, list):
+            raise ToolGatewayError("Runtime API returned an invalid run list.", code="invalid_response")
+        return [_runtime_run(_require_mapping(item, "runtime run")) for item in response_data]
+
+    def list_runtime_checkpoints(
+        self,
+        session_id: str,
+        *,
+        environment_id: str,
+        correlation_id: str | None = None,
+    ) -> list[RuntimeCheckpointReference]:
+        """List checkpoint references visible in a session run timeline."""
+
+        runs = self.list_runtime_session_runs(
+            session_id,
+            environment_id=environment_id,
+            correlation_id=correlation_id,
+        )
+        return _runtime_checkpoint_references(runs)
+
+    def stream_runtime_events(
+        self,
+        *,
+        environment_id: str,
+        event_type: str | None = None,
+        last_event_id: str | None = None,
+        limit: int = 100,
+        runtime_session_id: str | None = None,
+        runtime_run_id: str | None = None,
+        correlation_id: str | None = None,
+    ) -> list[RuntimeEvent]:
+        """Read the Product Platform runtime/audit SSE stream as typed events."""
+
+        self._ensure_open()
+        auth_context = self._auth_context()
+        headers = _runtime_control_headers(
+            auth_context.headers,
+            environment_id=environment_id,
+            correlation_id=correlation_id,
+        )
+        params = _runtime_event_stream_params(
+            event_type=event_type,
+            last_event_id=last_event_id,
+            limit=limit,
+        )
+        try:
+            response = _send_limited_sync_request(
+                self._http_client,
+                "GET",
+                f"{self.base_url}{RUNTIME_EVENTS_STREAM_PATH}",
+                max_response_bytes=self.max_response_bytes,
+                params=dict(params),
+                headers=headers,
+                timeout=self.timeout_seconds,
+            )
+        except httpx.HTTPError as exc:
+            raise ToolGatewayError("Runtime event stream transport error.", code="transport_error") from exc
+        if response.status_code >= 400:
+            _raise_gateway_error(
+                _response_json(response, max_response_bytes=self.max_response_bytes),
+                response.status_code,
+                retry_after_seconds=_retry_after_seconds(response),
+            )
+        events = _runtime_events_from_sse(response.text)
+        return [
+            event
+            for event in events
+            if _runtime_event_matches(
+                event,
+                runtime_session_id=runtime_session_id,
+                runtime_run_id=runtime_run_id,
+            )
+        ]
 
     def get_authorization_status(self, authorization_session_id: str) -> AuthorizationStatus:
         """Poll the Tool Gateway for a delegated authorization session status."""
@@ -1457,6 +1794,8 @@ class AsyncOphanixToolGatewayClient:
         traceparent: str | None = None,
         tracestate: str | None = None,
         baggage: str | None = None,
+        runtime_session_id: str | None = None,
+        runtime_run_id: str | None = None,
     ) -> ToolCallResult:
         """Invoke one registered gateway tool with bearer authentication."""
 
@@ -1480,6 +1819,11 @@ class AsyncOphanixToolGatewayClient:
             traceparent=traceparent,
             tracestate=tracestate,
             baggage=baggage,
+        )
+        _set_optional_runtime_context_headers(
+            headers,
+            runtime_session_id=runtime_session_id,
+            runtime_run_id=runtime_run_id,
         )
         self._emit_event(
             {
@@ -1597,6 +1941,206 @@ class AsyncOphanixToolGatewayClient:
             }
         )
         return result
+
+    async def create_runtime_session(
+        self,
+        *,
+        agent_id: str,
+        environment_id: str,
+        ring: int = 2,
+        sponsor_user_id: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        correlation_id: str | None = None,
+        traceparent: str | None = None,
+        tracestate: str | None = None,
+        baggage: str | None = None,
+    ) -> RuntimeSession:
+        """Create a Product Platform runtime session."""
+
+        self._ensure_open()
+        auth_context = await self._auth_context()
+        headers = _runtime_control_headers(
+            auth_context.headers,
+            environment_id=environment_id,
+            correlation_id=correlation_id,
+            traceparent=traceparent,
+            tracestate=tracestate,
+            baggage=baggage,
+        )
+        body: dict[str, Any] = {
+            "agent_id": _require_text(agent_id, "agent_id"),
+            "ring": _require_integer(ring, "ring"),
+            "metadata": dict(metadata or {}),
+        }
+        if sponsor_user_id is not None:
+            body["sponsor_user_id"] = _require_text(sponsor_user_id, "sponsor_user_id")
+        try:
+            response = await _send_limited_async_request(
+                self._http_client,
+                "POST",
+                f"{self.base_url}{RUNTIME_SESSIONS_PATH}",
+                max_response_bytes=self.max_response_bytes,
+                json=body,
+                headers=headers,
+                timeout=self.timeout_seconds,
+            )
+        except httpx.HTTPError as exc:
+            raise ToolGatewayError("Runtime session transport error.", code="transport_error") from exc
+        response_body = _response_json(response, max_response_bytes=self.max_response_bytes)
+        if response.status_code >= 400:
+            _raise_gateway_error(
+                response_body,
+                response.status_code,
+                retry_after_seconds=_retry_after_seconds(response),
+            )
+        return _runtime_session(response_body)
+
+    async def get_runtime_session(
+        self,
+        session_id: str,
+        *,
+        environment_id: str,
+        correlation_id: str | None = None,
+    ) -> RuntimeSession:
+        """Fetch one runtime session."""
+
+        self._ensure_open()
+        auth_context = await self._auth_context()
+        headers = _runtime_control_headers(
+            auth_context.headers,
+            environment_id=environment_id,
+            correlation_id=correlation_id,
+        )
+        try:
+            response = await _send_limited_async_request(
+                self._http_client,
+                "GET",
+                f"{self.base_url}{RUNTIME_SESSIONS_PATH}/{quote(_require_text(session_id, 'session_id'), safe='')}",
+                max_response_bytes=self.max_response_bytes,
+                headers=headers,
+                timeout=self.timeout_seconds,
+            )
+        except httpx.HTTPError as exc:
+            raise ToolGatewayError("Runtime session transport error.", code="transport_error") from exc
+        response_body = _response_json(response, max_response_bytes=self.max_response_bytes)
+        if response.status_code >= 400:
+            _raise_gateway_error(
+                response_body,
+                response.status_code,
+                retry_after_seconds=_retry_after_seconds(response),
+            )
+        return _runtime_session(response_body)
+
+    async def list_runtime_session_runs(
+        self,
+        session_id: str,
+        *,
+        environment_id: str,
+        correlation_id: str | None = None,
+    ) -> list[RuntimeRun]:
+        """List runtime runs and steps for one session."""
+
+        self._ensure_open()
+        auth_context = await self._auth_context()
+        headers = _runtime_control_headers(
+            auth_context.headers,
+            environment_id=environment_id,
+            correlation_id=correlation_id,
+        )
+        try:
+            response = await _send_limited_async_request(
+                self._http_client,
+                "GET",
+                (
+                    f"{self.base_url}{RUNTIME_SESSIONS_PATH}/"
+                    f"{quote(_require_text(session_id, 'session_id'), safe='')}/runs"
+                ),
+                max_response_bytes=self.max_response_bytes,
+                headers=headers,
+                timeout=self.timeout_seconds,
+            )
+        except httpx.HTTPError as exc:
+            raise ToolGatewayError("Runtime run transport error.", code="transport_error") from exc
+        response_data = _response_data(response, max_response_bytes=self.max_response_bytes)
+        if response.status_code >= 400:
+            _raise_gateway_error(
+                _mapping_response(response_data),
+                response.status_code,
+                retry_after_seconds=_retry_after_seconds(response),
+            )
+        if not isinstance(response_data, list):
+            raise ToolGatewayError("Runtime API returned an invalid run list.", code="invalid_response")
+        return [_runtime_run(_require_mapping(item, "runtime run")) for item in response_data]
+
+    async def list_runtime_checkpoints(
+        self,
+        session_id: str,
+        *,
+        environment_id: str,
+        correlation_id: str | None = None,
+    ) -> list[RuntimeCheckpointReference]:
+        """List checkpoint references visible in a session run timeline."""
+
+        runs = await self.list_runtime_session_runs(
+            session_id,
+            environment_id=environment_id,
+            correlation_id=correlation_id,
+        )
+        return _runtime_checkpoint_references(runs)
+
+    async def stream_runtime_events(
+        self,
+        *,
+        environment_id: str,
+        event_type: str | None = None,
+        last_event_id: str | None = None,
+        limit: int = 100,
+        runtime_session_id: str | None = None,
+        runtime_run_id: str | None = None,
+        correlation_id: str | None = None,
+    ) -> list[RuntimeEvent]:
+        """Read the Product Platform runtime/audit SSE stream as typed events."""
+
+        self._ensure_open()
+        auth_context = await self._auth_context()
+        headers = _runtime_control_headers(
+            auth_context.headers,
+            environment_id=environment_id,
+            correlation_id=correlation_id,
+        )
+        params = _runtime_event_stream_params(
+            event_type=event_type,
+            last_event_id=last_event_id,
+            limit=limit,
+        )
+        try:
+            response = await _send_limited_async_request(
+                self._http_client,
+                "GET",
+                f"{self.base_url}{RUNTIME_EVENTS_STREAM_PATH}",
+                max_response_bytes=self.max_response_bytes,
+                params=dict(params),
+                headers=headers,
+                timeout=self.timeout_seconds,
+            )
+        except httpx.HTTPError as exc:
+            raise ToolGatewayError("Runtime event stream transport error.", code="transport_error") from exc
+        if response.status_code >= 400:
+            _raise_gateway_error(
+                _response_json(response, max_response_bytes=self.max_response_bytes),
+                response.status_code,
+                retry_after_seconds=_retry_after_seconds(response),
+            )
+        events = _runtime_events_from_sse(response.text)
+        return [
+            event
+            for event in events
+            if _runtime_event_matches(
+                event,
+                runtime_session_id=runtime_session_id,
+                runtime_run_id=runtime_run_id,
+            )
+        ]
 
     async def get_authorization_status(self, authorization_session_id: str) -> AuthorizationStatus:
         """Poll the Tool Gateway for a delegated authorization session status."""
@@ -2358,6 +2902,27 @@ def _tool_cursor_list_params(
     return params
 
 
+def _runtime_event_stream_params(
+    *,
+    event_type: str | None,
+    last_event_id: str | None,
+    limit: int,
+) -> list[tuple[str, str]]:
+    normalized_limit = _require_integer(limit, "limit")
+    if normalized_limit <= 0:
+        raise ToolGatewayValidationError("limit must be greater than zero")
+    if normalized_limit > 500:
+        raise ToolGatewayValidationError("limit must be less than or equal to 500")
+    params: list[tuple[str, str]] = [("limit", str(normalized_limit))]
+    normalized_event_type = _optional_text(event_type)
+    if normalized_event_type is not None:
+        params.append(("event_type", normalized_event_type))
+    normalized_last_event_id = _optional_text(last_event_id)
+    if normalized_last_event_id is not None:
+        params.append(("last_event_id", normalized_last_event_id))
+    return params
+
+
 def _list_cache_key(credential_cache_key: str, params: list[tuple[str, str]]) -> _ListCacheKey:
     return (("__credential", credential_cache_key), *params)
 
@@ -2439,6 +3004,218 @@ def _tool_definition(body: dict[str, Any]) -> ToolDefinition:
         output_schema_json=_optional_response_mapping_field(body, "output_schema_json"),
         raw=_immutable_mapping(body),
     )
+
+
+def _runtime_session(body: dict[str, Any]) -> RuntimeSession:
+    return RuntimeSession(
+        id=_required_response_string(body, "id"),
+        organization_id=_required_response_string(body, "organization_id"),
+        environment_id=_required_response_string(body, "environment_id"),
+        agent_id=_required_response_string(body, "agent_id"),
+        agent_name=_optional_response_string_field(body, "agent_name"),
+        state=_required_response_string(body, "state"),
+        ring=_required_response_integer_field(body, "ring"),
+        sponsor_user_id=_optional_response_string_field(body, "sponsor_user_id"),
+        created_by_user_id=_optional_response_string_field(body, "created_by_user_id"),
+        memory_scope=_optional_response_string_field(body, "memory_scope") or "session",
+        thread_id=_optional_response_string_field(body, "thread_id"),
+        trace_id=_optional_response_string_field(body, "trace_id"),
+        span_id=_optional_response_string_field(body, "span_id"),
+        parent_span_id=_optional_response_string_field(body, "parent_span_id"),
+        traceparent=_optional_response_string_field(body, "traceparent"),
+        tracestate=_optional_response_string_field(body, "tracestate"),
+        baggage=_optional_response_string_field(body, "baggage"),
+        started_at=_optional_response_string_field(body, "started_at"),
+        ended_at=_optional_response_string_field(body, "ended_at"),
+        metadata=_immutable_mapping(_optional_response_mapping_field(body, "metadata") or {}),
+        raw=_immutable_mapping(body),
+    )
+
+
+def _runtime_run_step(body: dict[str, Any]) -> RuntimeRunStep:
+    artifact_links = body.get("artifact_links")
+    if artifact_links is None:
+        artifact_link_tuple: tuple[Mapping[str, Any], ...] = ()
+    elif isinstance(artifact_links, list):
+        artifact_link_tuple = tuple(
+            _immutable_mapping(_require_mapping(item, "artifact link"))
+            for item in artifact_links
+        )
+    else:
+        raise ToolGatewayError("Runtime API returned an invalid artifact link list.", code="invalid_response")
+    return RuntimeRunStep(
+        id=_required_response_string(body, "id"),
+        run_id=_required_response_string(body, "run_id"),
+        session_id=_required_response_string(body, "session_id"),
+        parent_step_id=_optional_response_string_field(body, "parent_step_id"),
+        runtime_action_id=_optional_response_string_field(body, "runtime_action_id"),
+        saga_id=_optional_response_string_field(body, "saga_id"),
+        saga_step_id=_optional_response_string_field(body, "saga_step_id"),
+        checkpoint_id=_optional_response_string_field(body, "checkpoint_id"),
+        policy_decision_id=_optional_response_string_field(body, "policy_decision_id"),
+        step_order=_required_response_integer_field(body, "step_order"),
+        step_type=_required_response_string(body, "step_type"),
+        name=_required_response_string(body, "name"),
+        status=_required_response_string(body, "status"),
+        trace_id=_optional_response_string_field(body, "trace_id"),
+        span_id=_optional_response_string_field(body, "span_id"),
+        parent_span_id=_optional_response_string_field(body, "parent_span_id"),
+        correlation_id=_optional_response_string_field(body, "correlation_id"),
+        artifact_links=artifact_link_tuple,
+        metadata=_immutable_mapping(_optional_response_mapping_field(body, "metadata") or {}),
+        started_at=_optional_response_string_field(body, "started_at"),
+        ended_at=_optional_response_string_field(body, "ended_at"),
+        updated_at=_optional_response_string_field(body, "updated_at"),
+        raw=_immutable_mapping(body),
+    )
+
+
+def _runtime_run(body: dict[str, Any]) -> RuntimeRun:
+    steps = body.get("steps")
+    if steps is None:
+        step_tuple: tuple[RuntimeRunStep, ...] = ()
+    elif isinstance(steps, list):
+        step_tuple = tuple(_runtime_run_step(_require_mapping(item, "runtime run step")) for item in steps)
+    else:
+        raise ToolGatewayError("Runtime API returned an invalid run step list.", code="invalid_response")
+    return RuntimeRun(
+        id=_required_response_string(body, "id"),
+        organization_id=_required_response_string(body, "organization_id"),
+        environment_id=_required_response_string(body, "environment_id"),
+        session_id=_required_response_string(body, "session_id"),
+        thread_id=_required_response_string(body, "thread_id"),
+        run_type=_required_response_string(body, "run_type"),
+        status=_required_response_string(body, "status"),
+        source_type=_optional_response_string_field(body, "source_type"),
+        source_id=_optional_response_string_field(body, "source_id"),
+        started_by_user_id=_optional_response_string_field(body, "started_by_user_id"),
+        trace_id=_optional_response_string_field(body, "trace_id"),
+        span_id=_optional_response_string_field(body, "span_id"),
+        parent_span_id=_optional_response_string_field(body, "parent_span_id"),
+        correlation_id=_optional_response_string_field(body, "correlation_id"),
+        recovery_state=_immutable_mapping(_optional_response_mapping_field(body, "recovery_state") or {}),
+        metadata=_immutable_mapping(_optional_response_mapping_field(body, "metadata") or {}),
+        started_at=_optional_response_string_field(body, "started_at"),
+        ended_at=_optional_response_string_field(body, "ended_at"),
+        updated_at=_optional_response_string_field(body, "updated_at"),
+        steps=step_tuple,
+        raw=_immutable_mapping(body),
+    )
+
+
+def _runtime_checkpoint_references(runs: list[RuntimeRun]) -> list[RuntimeCheckpointReference]:
+    checkpoints: list[RuntimeCheckpointReference] = []
+    for run in runs:
+        for step in run.steps:
+            if step.checkpoint_id is None:
+                continue
+            checkpoints.append(
+                RuntimeCheckpointReference(
+                    checkpoint_id=step.checkpoint_id,
+                    session_id=step.session_id,
+                    run_id=run.id,
+                    step_id=step.id,
+                    step_type=step.step_type,
+                    name=step.name,
+                    status=step.status,
+                    recovery_state=run.recovery_state,
+                    trace_id=step.trace_id or run.trace_id,
+                    correlation_id=step.correlation_id or run.correlation_id,
+                    metadata=step.metadata,
+                    raw=_immutable_mapping(
+                        {
+                            "run": _mutable_mapping(run.raw),
+                            "step": _mutable_mapping(step.raw),
+                        }
+                    ),
+                )
+            )
+    return checkpoints
+
+
+def _runtime_event(body: dict[str, Any], *, sse_event: str | None = None) -> RuntimeEvent:
+    return RuntimeEvent(
+        id=_required_response_string(body, "id"),
+        organization_id=_required_response_string(body, "organization_id"),
+        environment_id=_required_response_string(body, "environment_id"),
+        event_type=_required_response_string(body, "event_type"),
+        source_component=_required_response_string(body, "source_component"),
+        actor_type=_required_response_string(body, "actor_type"),
+        actor_id=_optional_response_string_field(body, "actor_id"),
+        agent_id=_optional_response_string_field(body, "agent_id"),
+        resource_type=_optional_response_string_field(body, "resource_type"),
+        resource_id=_optional_response_string_field(body, "resource_id"),
+        decision=_optional_response_string_field(body, "decision"),
+        severity=_optional_response_string_field(body, "severity") or "info",
+        correlation_id=_optional_response_string_field(body, "correlation_id"),
+        trace_id=_optional_response_string_field(body, "trace_id"),
+        policy_id=_optional_response_string_field(body, "policy_id"),
+        policy_version_id=_optional_response_string_field(body, "policy_version_id"),
+        trust_delta=_optional_response_number_field(body, "trust_delta"),
+        payload_json=_immutable_mapping(_optional_response_mapping_field(body, "payload_json") or {}),
+        created_at=_optional_response_string_field(body, "created_at"),
+        sse_event=sse_event,
+        raw=_immutable_mapping(body),
+    )
+
+
+def _runtime_events_from_sse(text: str) -> list[RuntimeEvent]:
+    events: list[RuntimeEvent] = []
+    for block in text.replace("\r\n", "\n").replace("\r", "\n").split("\n\n"):
+        if not block.strip():
+            continue
+        sse_event: str | None = None
+        data_lines: list[str] = []
+        for line in block.split("\n"):
+            if not line or line.startswith(":"):
+                continue
+            field_name, separator, value = line.partition(":")
+            if not separator:
+                continue
+            if value.startswith(" "):
+                value = value[1:]
+            if field_name == "event":
+                sse_event = value
+            elif field_name == "data":
+                data_lines.append(value)
+        if not data_lines:
+            continue
+        try:
+            data = json.loads("\n".join(data_lines))
+        except ValueError as exc:
+            raise ToolGatewayError(
+                "Runtime event stream returned invalid JSON data.",
+                code="invalid_response",
+            ) from exc
+        events.append(_runtime_event(_require_mapping(data, "runtime event"), sse_event=sse_event))
+    return events
+
+
+def _runtime_event_matches(
+    event: RuntimeEvent,
+    *,
+    runtime_session_id: str | None,
+    runtime_run_id: str | None,
+) -> bool:
+    normalized_session_id = _optional_text(runtime_session_id)
+    normalized_run_id = _optional_text(runtime_run_id)
+    if normalized_session_id is not None:
+        session_matches = (
+            event.resource_id == normalized_session_id
+            or event.payload_json.get("session_id") == normalized_session_id
+            or event.payload_json.get("runtime_session_id") == normalized_session_id
+        )
+        if not session_matches:
+            return False
+    if normalized_run_id is not None:
+        run_matches = (
+            event.resource_id == normalized_run_id
+            or event.payload_json.get("run_id") == normalized_run_id
+            or event.payload_json.get("runtime_run_id") == normalized_run_id
+        )
+        if not run_matches:
+            return False
+    return True
 
 
 def _gateway_compatibility(body: dict[str, Any]) -> GatewayCompatibility:
@@ -2798,6 +3575,30 @@ def _optional_response_integer_field(body: dict[str, Any], field_name: str) -> i
     return cast(int, value)
 
 
+def _required_response_integer_field(body: dict[str, Any], field_name: str) -> int:
+    value = _optional_response_integer_field(body, field_name)
+    if value is None:
+        raise ToolGatewayError(
+            f"Tool Gateway response is missing required field: {field_name}.",
+            code="invalid_response",
+            response_body=body,
+        )
+    return value
+
+
+def _optional_response_number_field(body: dict[str, Any], field_name: str) -> float | None:
+    value = body.get(field_name)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        raise ToolGatewayError(
+            f"Tool Gateway response field must be a finite number: {field_name}.",
+            code="invalid_response",
+            response_body=body,
+        )
+    return float(value)
+
+
 def _optional_response_bool_field(body: dict[str, Any], field_name: str) -> bool | None:
     value = body.get(field_name)
     if value is None:
@@ -2961,6 +3762,43 @@ def _set_optional_trace_context_headers(
         normalized = _optional_header_text(value, field_name)
         if normalized is not None:
             headers[header_name] = normalized
+
+
+def _runtime_control_headers(
+    base_headers: dict[str, str],
+    *,
+    environment_id: str,
+    correlation_id: str | None = None,
+    traceparent: str | None = None,
+    tracestate: str | None = None,
+    baggage: str | None = None,
+) -> dict[str, str]:
+    headers = dict(base_headers)
+    headers["X-Environment-ID"] = _require_header_text(environment_id, "environment_id")
+    normalized_correlation_id = _optional_header_text(correlation_id, "correlation_id")
+    if normalized_correlation_id is not None:
+        headers["X-Correlation-ID"] = normalized_correlation_id
+    _set_optional_trace_context_headers(
+        headers,
+        traceparent=traceparent,
+        tracestate=tracestate,
+        baggage=baggage,
+    )
+    return headers
+
+
+def _set_optional_runtime_context_headers(
+    headers: dict[str, str],
+    *,
+    runtime_session_id: str | None,
+    runtime_run_id: str | None,
+) -> None:
+    normalized_session_id = _optional_header_text(runtime_session_id, "runtime_session_id")
+    if normalized_session_id is not None:
+        headers["X-Runtime-Session-ID"] = normalized_session_id
+    normalized_run_id = _optional_header_text(runtime_run_id, "runtime_run_id")
+    if normalized_run_id is not None:
+        headers["X-Runtime-Run-ID"] = normalized_run_id
 
 
 def _optional_idempotency_key(value: object | None) -> str | None:

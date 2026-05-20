@@ -44,7 +44,12 @@ the SDK's fixed nesting-depth cap of 50 levels.
 
 Methods:
 
-- `call_tool(tool_name: str, payload: dict[str, Any], correlation_id: str | None = None, idempotency_key: str | None = None) -> ToolCallResult`
+- `call_tool(tool_name: str, payload: dict[str, Any], correlation_id: str | None = None, idempotency_key: str | None = None, traceparent: str | None = None, tracestate: str | None = None, baggage: str | None = None, runtime_session_id: str | None = None, runtime_run_id: str | None = None) -> ToolCallResult`
+- `create_runtime_session(agent_id: str, environment_id: str, ring: int = 2, sponsor_user_id: str | None = None, metadata: Mapping[str, Any] | None = None, correlation_id: str | None = None, traceparent: str | None = None, tracestate: str | None = None, baggage: str | None = None) -> RuntimeSession`
+- `get_runtime_session(session_id: str, environment_id: str, correlation_id: str | None = None) -> RuntimeSession`
+- `list_runtime_session_runs(session_id: str, environment_id: str, correlation_id: str | None = None) -> list[RuntimeRun]`
+- `list_runtime_checkpoints(session_id: str, environment_id: str, correlation_id: str | None = None) -> list[RuntimeCheckpointReference]`
+- `stream_runtime_events(environment_id: str, event_type: str | None = None, last_event_id: str | None = None, limit: int = 100, runtime_session_id: str | None = None, runtime_run_id: str | None = None, correlation_id: str | None = None) -> list[RuntimeEvent]`
 - `check_compatibility() -> GatewayCompatibility`
 - `list_tools(status: Literal["active"] | None = None, owner_team: str | None = None, limit: int = 50, offset: int = 0) -> list[ToolDefinition]`
 - `list_all_tools(owner_team: str | None = None, page_size: int = 200, max_total: int | None = 10000) -> list[ToolDefinition]`
@@ -55,10 +60,10 @@ Methods:
 ### `AsyncOphanixToolGatewayClient`
 
 Async client with the same constructor options and method names. `call_tool`,
-`check_compatibility`, `list_tools`, `list_all_tools`, `get_tool`,
-`aclear_tool_cache`, and `close` are awaitable. Prefer
-`await client.aclear_tool_cache()` in async runtimes so cache mutation uses the
-async lock.
+the runtime session/run/checkpoint/event helpers, `check_compatibility`,
+`list_tools`, `list_all_tools`, `get_tool`, `aclear_tool_cache`, and `close`
+are awaitable. Prefer `await client.aclear_tool_cache()` in async runtimes so
+cache mutation uses the async lock.
 
 ### `ToolGatewayClientConfig`
 
@@ -115,6 +120,17 @@ be 4096 characters or fewer.
   metadata. `body` unwraps the standard gateway execution envelope when present.
   `raw` omits the potentially sensitive `result` field unless
   `include_raw_response=True` is configured.
+- `RuntimeSession`: Product Platform runtime session binding with
+  organization, environment, agent, creator, ring, memory scope, thread ID,
+  trace context, metadata, and raw response metadata.
+- `RuntimeRun`: session run timeline with status, source, trace/correlation
+  IDs, recovery state, metadata, timestamps, and `RuntimeRunStep` children.
+- `RuntimeRunStep`: timeline step linked to runtime actions, saga steps,
+  checkpoint IDs, policy decisions, trace spans, artifacts, and metadata.
+- `RuntimeCheckpointReference`: checkpoint view derived from run steps with the
+  checkpoint ID, run/session/step IDs, status, recovery state, and metadata.
+- `RuntimeEvent`: typed audit/SSE event with actor, agent, resource, decision,
+  severity, correlation/trace IDs, payload, and created timestamp.
 - `GatewayCompatibility`: `compatible`, `sdk_version`,
   `expected_gateway_contract_version`, `gateway_contract_version`,
   `min_sdk_version`, `min_sdk_version_satisfied`, `incompatibility_reason`,

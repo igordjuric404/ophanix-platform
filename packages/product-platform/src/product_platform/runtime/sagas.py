@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from product_platform.db.postgres import Connection, Row
 
@@ -21,6 +22,9 @@ SAGA_TERMINAL_STATUSES = frozenset(
     {"completed", "compensated", "failed", "compensation_failed", "cancelled"}
 )
 SAGA_EXECUTABLE_STATUSES = frozenset({"draft"})
+SAGA_RECOVERABLE_STATUSES = frozenset({"running"})
+SAGA_ACTIVITY_MODES = frozenset({"execute", "compensation"})
+SAGA_ACTIVITY_STATUSES = frozenset({"started", "succeeded", "failed"})
 
 
 class SagaNotFoundError(ValueError):
@@ -33,6 +37,14 @@ class SagaStepValidationError(ValueError):
 
 class SagaStateTransitionError(ValueError):
     """Raised when a saga lifecycle transition loses a state guard."""
+
+
+class SagaActivityResultError(ValueError):
+    """Raised when a durable saga activity result is invalid."""
+
+
+class SagaCheckpointError(ValueError):
+    """Raised when a durable saga checkpoint is invalid."""
 
 
 class SagaRepository:
@@ -384,6 +396,353 @@ class SagaRepository:
         )
         return self.connection.execute("SELECT * FROM saga_events WHERE id = ?", (event_id,)).fetchone()
 
+    def start_activity_result(
+        self,
+        *,
+        saga_id: str,
+        step_id: str,
+        mode: str,
+        action_name: str,
+    ) -> Row:
+        """Record an activity attempt before executing a side effect."""
+
+        mode = _validate_activity_mode(mode)
+        existing = self.get_activity_result(step_id, mode)
+        now = utc_now_iso()
+        if existing is not None:
+            if existing["status"] == "succeeded":
+                return existing
+            self.connection.execute(
+                """
+                UPDATE saga_activity_results
+                SET status = ?,
+                    action_name = ?,
+                    attempt_count = attempt_count + 1,
+                    error_message = NULL,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                ("started", action_name, now, existing["id"]),
+            )
+            row = self.get_activity_result(step_id, mode)
+            if row is None:
+                raise SagaActivityResultError("Started activity result could not be loaded.")
+            return row
+        self._require_saga_step(saga_id, step_id)
+        activity_id = generate_id("sgact")
+        self.connection.execute(
+            """
+            INSERT INTO saga_activity_results (
+                id, saga_id, step_id, activity_key, action_name, mode, status,
+                attempt_count, result_json, error_message, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                activity_id,
+                saga_id,
+                step_id,
+                _activity_key(saga_id, step_id, mode),
+                action_name,
+                mode,
+                "started",
+                1,
+                "{}",
+                None,
+                now,
+                now,
+            ),
+        )
+        row = self.get_activity_result(step_id, mode)
+        if row is None:
+            raise SagaActivityResultError("Created activity result could not be loaded.")
+        return row
+
+    def complete_activity_result(
+        self,
+        *,
+        saga_id: str,
+        step_id: str,
+        mode: str,
+        action_name: str,
+        result: dict,
+    ) -> Row:
+        """Persist a completed activity result for future replay."""
+
+        mode = _validate_activity_mode(mode)
+        existing = self.get_activity_result(step_id, mode)
+        now = utc_now_iso()
+        payload = json.dumps(result or {}, sort_keys=True)
+        if existing is None:
+            self._require_saga_step(saga_id, step_id)
+            activity_id = generate_id("sgact")
+            self.connection.execute(
+                """
+                INSERT INTO saga_activity_results (
+                    id, saga_id, step_id, activity_key, action_name, mode, status,
+                    attempt_count, result_json, error_message, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    activity_id,
+                    saga_id,
+                    step_id,
+                    _activity_key(saga_id, step_id, mode),
+                    action_name,
+                    mode,
+                    "succeeded",
+                    1,
+                    payload,
+                    None,
+                    now,
+                    now,
+                ),
+            )
+        elif existing["status"] != "succeeded":
+            self.connection.execute(
+                """
+                UPDATE saga_activity_results
+                SET action_name = ?,
+                    status = ?,
+                    result_json = ?,
+                    error_message = NULL,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (action_name, "succeeded", payload, now, existing["id"]),
+            )
+        row = self.get_activity_result(step_id, mode)
+        if row is None:
+            raise SagaActivityResultError("Completed activity result could not be loaded.")
+        return row
+
+    def fail_activity_result(
+        self,
+        *,
+        saga_id: str,
+        step_id: str,
+        mode: str,
+        action_name: str,
+        error_message: str,
+    ) -> Row:
+        """Persist a failed activity attempt."""
+
+        mode = _validate_activity_mode(mode)
+        existing = self.get_activity_result(step_id, mode)
+        now = utc_now_iso()
+        if existing is None:
+            self._require_saga_step(saga_id, step_id)
+            activity_id = generate_id("sgact")
+            self.connection.execute(
+                """
+                INSERT INTO saga_activity_results (
+                    id, saga_id, step_id, activity_key, action_name, mode, status,
+                    attempt_count, result_json, error_message, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    activity_id,
+                    saga_id,
+                    step_id,
+                    _activity_key(saga_id, step_id, mode),
+                    action_name,
+                    mode,
+                    "failed",
+                    1,
+                    "{}",
+                    error_message,
+                    now,
+                    now,
+                ),
+            )
+        else:
+            self.connection.execute(
+                """
+                UPDATE saga_activity_results
+                SET action_name = ?,
+                    status = ?,
+                    error_message = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (action_name, "failed", error_message, now, existing["id"]),
+            )
+        row = self.get_activity_result(step_id, mode)
+        if row is None:
+            raise SagaActivityResultError("Failed activity result could not be loaded.")
+        return row
+
+    def get_activity_result(self, step_id: str, mode: str) -> Row | None:
+        """Get the durable activity result for one step and mode."""
+
+        mode = _validate_activity_mode(mode)
+        return self.connection.execute(
+            """
+            SELECT ar.*
+            FROM saga_activity_results ar
+            JOIN sagas s ON s.id = ar.saga_id
+            WHERE ar.step_id = ?
+              AND ar.mode = ?
+              AND s.organization_id = ?
+              AND s.environment_id = ?
+            """,
+            (step_id, mode, self.organization_id, self.environment_id),
+        ).fetchone()
+
+    def list_activity_results(self, saga_id: str) -> list[Row]:
+        """List durable activity results for one saga."""
+
+        return self.connection.execute(
+            """
+            SELECT ar.*
+            FROM saga_activity_results ar
+            JOIN sagas s ON s.id = ar.saga_id
+            WHERE ar.saga_id = ?
+              AND s.organization_id = ?
+              AND s.environment_id = ?
+            ORDER BY ar.created_at ASC, ar.id ASC
+            """,
+            (saga_id, self.organization_id, self.environment_id),
+        ).fetchall()
+
+    def create_checkpoint(
+        self,
+        *,
+        saga_id: str,
+        step_id: str,
+        mode: str,
+        payload: dict,
+        policy_snapshot: dict | None = None,
+        tool_calls: list[dict] | None = None,
+        error: dict | None = None,
+        schema_version: str = "saga-checkpoint.v1",
+    ) -> Row:
+        """Create a durable, hash-verified checkpoint for one saga step."""
+
+        mode = _validate_activity_mode(mode)
+        context = self._require_saga_step_context(saga_id, step_id)
+        saga = context["saga"]
+        payload_json = json.dumps(payload or {}, sort_keys=True)
+        policy_snapshot_json = json.dumps(policy_snapshot or {}, sort_keys=True)
+        tool_calls_json = json.dumps(tool_calls or [], sort_keys=True)
+        error_json = json.dumps(error or {}, sort_keys=True)
+        payload_hash = _checkpoint_hash(
+            schema_version=schema_version,
+            payload_json=payload_json,
+            policy_snapshot_json=policy_snapshot_json,
+            tool_calls_json=tool_calls_json,
+            error_json=error_json,
+        )
+        existing = self.get_checkpoint(step_id, mode)
+        if existing is not None:
+            if existing["payload_hash"] != payload_hash:
+                raise SagaCheckpointError("Existing checkpoint hash differs from requested payload.")
+            self._verify_checkpoint_row(existing)
+            return existing
+
+        checkpoint_id = generate_id("sgchk")
+        now = utc_now_iso()
+        self.connection.execute(
+            """
+            INSERT INTO saga_checkpoints (
+                id, organization_id, environment_id, saga_id, step_id, runtime_session_id,
+                checkpoint_key, mode, schema_version, status, payload_json,
+                policy_snapshot_json, tool_calls_json, error_json, payload_hash,
+                hash_algorithm, restored_at, invalidated_reason, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                checkpoint_id,
+                self.organization_id,
+                self.environment_id,
+                saga_id,
+                step_id,
+                saga["runtime_session_id"],
+                _checkpoint_key(saga_id, step_id, mode),
+                mode,
+                schema_version,
+                "valid",
+                payload_json,
+                policy_snapshot_json,
+                tool_calls_json,
+                error_json,
+                payload_hash,
+                "sha256",
+                None,
+                None,
+                now,
+                now,
+            ),
+        )
+        row = self.get_checkpoint(step_id, mode)
+        if row is None:
+            raise SagaCheckpointError("Created checkpoint could not be loaded.")
+        return row
+
+    def get_checkpoint(self, step_id: str, mode: str) -> Row | None:
+        """Return the durable checkpoint for one step and mode."""
+
+        mode = _validate_activity_mode(mode)
+        return self.connection.execute(
+            """
+            SELECT sc.*
+            FROM saga_checkpoints sc
+            WHERE sc.step_id = ?
+              AND sc.mode = ?
+              AND sc.organization_id = ?
+              AND sc.environment_id = ?
+            """,
+            (step_id, mode, self.organization_id, self.environment_id),
+        ).fetchone()
+
+    def restore_checkpoint(self, step_id: str, mode: str) -> Row:
+        """Verify and mark a checkpoint as restored for replay."""
+
+        checkpoint = self.get_checkpoint(step_id, mode)
+        if checkpoint is None:
+            raise SagaCheckpointError("Checkpoint not found.")
+        self._verify_checkpoint_row(checkpoint)
+        now = utc_now_iso()
+        self.connection.execute(
+            """
+            UPDATE saga_checkpoints
+            SET restored_at = ?,
+                updated_at = ?
+            WHERE id = ?
+              AND organization_id = ?
+              AND environment_id = ?
+            """,
+            (
+                now,
+                now,
+                checkpoint["id"],
+                self.organization_id,
+                self.environment_id,
+            ),
+        )
+        row = self.get_checkpoint(step_id, mode)
+        if row is None:
+            raise SagaCheckpointError("Restored checkpoint could not be loaded.")
+        return row
+
+    def list_checkpoints(self, saga_id: str) -> list[Row]:
+        """List durable checkpoints for one saga."""
+
+        return self.connection.execute(
+            """
+            SELECT sc.*
+            FROM saga_checkpoints sc
+            WHERE sc.saga_id = ?
+              AND sc.organization_id = ?
+              AND sc.environment_id = ?
+            ORDER BY sc.created_at ASC, sc.id ASC
+            """,
+            (saga_id, self.organization_id, self.environment_id),
+        ).fetchall()
+
     def list_events(self, saga_id: str) -> list[Row]:
         """List saga events in chronological order."""
 
@@ -443,6 +802,84 @@ class SagaRepository:
         ).fetchone()
         if row is None:
             raise SagaStepValidationError(f"Agent does not have approved capability: {capability}.")
+
+    def _require_saga_step(self, saga_id: str, step_id: str) -> None:
+        row = self.connection.execute(
+            """
+            SELECT 1
+            FROM saga_steps st
+            JOIN sagas s ON s.id = st.saga_id
+            WHERE st.id = ?
+              AND st.saga_id = ?
+              AND s.organization_id = ?
+              AND s.environment_id = ?
+            """,
+            (step_id, saga_id, self.organization_id, self.environment_id),
+        ).fetchone()
+        if row is None:
+            raise SagaActivityResultError("Saga step not found for activity result.")
+
+    def _require_saga_step_context(self, saga_id: str, step_id: str) -> dict[str, Row]:
+        saga = self.get_saga(saga_id)
+        if saga is None:
+            raise SagaNotFoundError("Saga not found.")
+        step = self.get_step(step_id)
+        if step is None or step["saga_id"] != saga_id:
+            raise SagaCheckpointError("Saga step not found for checkpoint.")
+        return {"saga": saga, "step": step}
+
+    def _verify_checkpoint_row(self, checkpoint: Row) -> None:
+        if checkpoint["status"] != "valid":
+            reason = checkpoint["invalidated_reason"] or "Checkpoint is not valid."
+            raise SagaCheckpointError(reason)
+        expected = _checkpoint_hash(
+            schema_version=checkpoint["schema_version"],
+            payload_json=checkpoint["payload_json"],
+            policy_snapshot_json=checkpoint["policy_snapshot_json"],
+            tool_calls_json=checkpoint["tool_calls_json"],
+            error_json=checkpoint["error_json"],
+        )
+        if checkpoint["payload_hash"] != expected:
+            raise SagaCheckpointError("Checkpoint integrity verification failed.")
+
+
+def _validate_activity_mode(mode: str) -> str:
+    normalized = mode.strip().lower()
+    if normalized not in SAGA_ACTIVITY_MODES:
+        supported = ", ".join(sorted(SAGA_ACTIVITY_MODES))
+        raise SagaActivityResultError(f"activity mode must be one of: {supported}.")
+    return normalized
+
+
+def _activity_key(saga_id: str, step_id: str, mode: str) -> str:
+    return f"{saga_id}:{step_id}:{mode}"
+
+
+def _checkpoint_key(saga_id: str, step_id: str, mode: str) -> str:
+    return f"{saga_id}:{step_id}:{mode}:checkpoint"
+
+
+def _checkpoint_hash(
+    *,
+    schema_version: str,
+    payload_json: str,
+    policy_snapshot_json: str,
+    tool_calls_json: str,
+    error_json: str,
+) -> str:
+    canonical = json.dumps(
+        {
+            "schema_version": schema_version,
+            "payload": json.loads(payload_json),
+            "policy_snapshot": json.loads(policy_snapshot_json),
+            "tool_calls": json.loads(tool_calls_json),
+            "error": json.loads(error_json),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
 
 
 def saga_step_response(row: Row) -> SagaStepResponse:

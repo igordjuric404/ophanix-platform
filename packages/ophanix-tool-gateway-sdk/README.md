@@ -90,6 +90,13 @@ same timeout, cache, retry, and response-limit settings.
 
 Recommended starting profiles:
 
+- Tool Gateway-only agent: call `list_tools()` / `call_tool()` with a gateway
+  token when the Product Platform runtime control-plane APIs are not available
+  to that process.
+- Runtime-control-plane agent: create or fetch a runtime session first, list
+  the session runs, pass `runtime_session_id` and `runtime_run_id` into
+  `call_tool()`, and read runtime events/checkpoints from the Product Platform
+  APIs for recovery evidence.
 - Controlled pilot: use the defaults, pass a unique `idempotency_key` for any
   invocation that may be retried, and leave `cache_tools=False` until contract
   churn is low.
@@ -151,11 +158,27 @@ Common constructor options:
 
 Main methods:
 
-- `call_tool(tool_name, payload, correlation_id=None, idempotency_key=None)`:
+- `call_tool(tool_name, payload, correlation_id=None, idempotency_key=None,
+  traceparent=None, tracestate=None, baggage=None, runtime_session_id=None,
+  runtime_run_id=None)`:
   invokes one tool. Payload must be a JSON object with string keys and finite
   numeric values. When `idempotency_key` is set, the SDK sends
   `Idempotency-Key` and may retry transient invocation failures with the same
-  key.
+  key. Runtime IDs are sent as headers so the Product Platform can link a
+  governed tool call to a session/run timeline when the gateway supports that
+  contract.
+- `create_runtime_session(agent_id, environment_id, ring=2, metadata=None)`:
+  starts a Product Platform runtime session and returns `RuntimeSession`.
+- `get_runtime_session(session_id, environment_id)`: fetches one session and
+  its server-side metadata.
+- `list_runtime_session_runs(session_id, environment_id)`: returns
+  `RuntimeRun` objects with run steps, policy links, traces, artifacts, and
+  checkpoint IDs where present.
+- `list_runtime_checkpoints(session_id, environment_id)`: returns checkpoint
+  references derived from the run timeline, including recovery state snapshots.
+- `stream_runtime_events(environment_id, event_type=None, last_event_id=None,
+  limit=100, runtime_session_id=None, runtime_run_id=None)`: reads the Product
+  Platform audit SSE endpoint and returns typed `RuntimeEvent` objects.
 - `check_compatibility()`: calls authenticated
   `/api/v1/gateway/capabilities` and returns `GatewayCompatibility`.
 - `list_tools(owner_team=None, limit=50, offset=0)`: lists one page of callable
@@ -189,6 +212,55 @@ runtime-action records for full decision details.
 The public Protocols `TokenProvider`, `AsyncTokenProvider`,
 `SyncGatewayHttpClient`, and `AsyncGatewayHttpClient` model the supported custom
 provider and HTTP-adapter contracts for type checkers.
+
+## Runtime Session Example
+
+Use the runtime-control-plane helpers when an agent needs durable session/run
+evidence around governed tool calls:
+
+```python
+from uuid import uuid4
+
+from ophanix_tool_gateway import EnvironmentTokenProvider, OphanixToolGatewayClient
+
+environment_id = "env_default"
+
+with OphanixToolGatewayClient(
+    base_url="https://gateway.example.com",
+    token_provider=EnvironmentTokenProvider(),
+) as client:
+    session = client.create_runtime_session(
+        agent_id="agent_claims",
+        environment_id=environment_id,
+        metadata={"thread_id": "claim-123", "memory_scope": "session"},
+        correlation_id="claim-123",
+    )
+    run = client.list_runtime_session_runs(
+        session.id,
+        environment_id=environment_id,
+        correlation_id="claim-123",
+    )[0]
+    result = client.call_tool(
+        "claims.lookup",
+        {"claim_id": "claim_123"},
+        correlation_id="claim-123",
+        idempotency_key=f"claims.lookup:{uuid4().hex}",
+        runtime_session_id=session.id,
+        runtime_run_id=run.id,
+    )
+    checkpoints = client.list_runtime_checkpoints(
+        session.id,
+        environment_id=environment_id,
+    )
+    events = client.stream_runtime_events(
+        environment_id=environment_id,
+        runtime_session_id=session.id,
+        runtime_run_id=run.id,
+    )
+```
+
+See `examples/runtime_session_example.py` for a complete dependency-light
+example.
 
 ## Async Usage
 

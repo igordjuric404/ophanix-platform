@@ -176,6 +176,9 @@ class RuntimeSessionResponse(BaseModel):
     state: str
     ring: int
     sponsor_user_id: str | None = None
+    created_by_user_id: str | None = None
+    memory_scope: str = "session"
+    thread_id: str | None = None
     started_at: str
     ended_at: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -186,6 +189,58 @@ class RuntimeSessionResponse(BaseModel):
     tracestate: str | None = None
     baggage: str | None = None
     actions: list[RuntimeActionResponse] = Field(default_factory=list)
+
+
+class RuntimeRunStepResponse(BaseModel):
+    """Persisted runtime run step linked to actions, policy, checkpoints, and traces."""
+
+    id: str
+    run_id: str
+    session_id: str
+    parent_step_id: str | None = None
+    runtime_action_id: str | None = None
+    saga_id: str | None = None
+    saga_step_id: str | None = None
+    checkpoint_id: str | None = None
+    policy_decision_id: str | None = None
+    step_order: int
+    step_type: str
+    name: str
+    status: str
+    trace_id: str | None = None
+    span_id: str | None = None
+    parent_span_id: str | None = None
+    correlation_id: str | None = None
+    artifact_links: list[dict[str, Any]] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    started_at: str
+    ended_at: str | None = None
+    updated_at: str
+
+
+class RuntimeRunResponse(BaseModel):
+    """Runtime run timeline for one session/thread."""
+
+    id: str
+    organization_id: str
+    environment_id: str
+    session_id: str
+    thread_id: str
+    run_type: str
+    status: str
+    source_type: str | None = None
+    source_id: str | None = None
+    started_by_user_id: str | None = None
+    trace_id: str | None = None
+    span_id: str | None = None
+    parent_span_id: str | None = None
+    correlation_id: str | None = None
+    recovery_state: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    started_at: str
+    ended_at: str | None = None
+    updated_at: str
+    steps: list[RuntimeRunStepResponse] = Field(default_factory=list)
 
 
 class SagaCreateRequest(BaseModel):
@@ -335,6 +390,7 @@ class SagaExecutionResponse(BaseModel):
     message: str
     executed_step_ids: list[str] = Field(default_factory=list)
     compensated_step_ids: list[str] = Field(default_factory=list)
+    replayed_step_ids: list[str] = Field(default_factory=list)
     failed_step_id: str | None = None
     saga: SagaResponse
 

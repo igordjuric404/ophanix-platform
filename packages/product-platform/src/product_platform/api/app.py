@@ -485,6 +485,7 @@ from product_platform.runtime.models import (
     RuntimeRingDecisionResponse,
     RuntimeRingRuleCreateRequest,
     RuntimeRingRuleResponse,
+    RuntimeRunResponse,
     RuntimeSessionCreateRequest,
     RuntimeSessionEndRequest,
     RuntimeSessionResponse,
@@ -511,6 +512,8 @@ from product_platform.runtime.repository import (
     runtime_action_response,
     runtime_ring_decision_response,
     runtime_ring_rule_response,
+    runtime_run_response,
+    runtime_run_step_response,
     runtime_session_response,
 )
 from product_platform.runtime.kill_switch import (
@@ -535,6 +538,7 @@ from product_platform.runtime.sandbox import (
 )
 from product_platform.runtime.sagas import (
     SAGA_EXECUTABLE_STATUSES,
+    SAGA_RECOVERABLE_STATUSES,
     SAGA_TERMINAL_STATUSES,
     SagaNotFoundError,
     SagaRepository,
@@ -10308,7 +10312,18 @@ def create_app(
             with _audit_database().transaction() as connection:
                 repository = RuntimeRepository(connection, organization_id, environment_id)
                 session = runtime_session_response(
-                    repository.create_session(body, **_trace_context_fields(context))
+                    repository.create_session(
+                        body,
+                        actor_user_id=current_user.id,
+                        **_trace_context_fields(context),
+                    )
+                )
+                repository.ensure_session_run(
+                    session.id,
+                    run_type="session",
+                    started_by_user_id=current_user.id,
+                    correlation_id=context.correlation_id,
+                    metadata={"source": "runtime.session"},
                 )
                 AuditEventRepository(connection).insert(
                     _runtime_session_audit_event(
@@ -10376,6 +10391,31 @@ def create_app(
             )
         return runtime_session_response(row, actions=actions)
 
+    @app.get(
+        "/api/v1/runtime/sessions/{session_id}/runs",
+        response_model=list[RuntimeRunResponse],
+        tags=["runtime"],
+    )
+    async def list_runtime_session_runs(
+        session_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.COMPLIANCE_READ)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> list[RuntimeRunResponse]:
+        """List runtime runs and steps for one session."""
+
+        organization_id = _require_organization_id(current_user)
+        repository = RuntimeRepository(_audit_database().connect(), organization_id, environment_id)
+        if repository.get_session(session_id) is None:
+            raise HTTPException(status_code=404, detail="Runtime session not found.")
+        responses = []
+        for run_row in repository.list_runs_for_session(session_id):
+            steps = [
+                runtime_run_step_response(step_row)
+                for step_row in repository.list_steps_for_run(run_row["id"])
+            ]
+            responses.append(runtime_run_response(run_row, steps=steps))
+        return responses
+
     @app.post(
         "/api/v1/runtime/sessions/{session_id}/end",
         response_model=RuntimeSessionResponse,
@@ -10440,6 +10480,27 @@ def create_app(
                 )
                 decision = runtime_ring_decision_response(decision_row)
                 action = runtime_action_response(action_row, ring_decision=decision)
+                run = repository.ensure_session_run(
+                    session_id,
+                    run_type="session",
+                    started_by_user_id=current_user.id,
+                    correlation_id=context.correlation_id,
+                    metadata={"source": "runtime.action"},
+                )
+                repository.create_run_step(
+                    run["id"],
+                    session_id=session_id,
+                    step_type="runtime_action",
+                    name=action.action_name,
+                    status=action.decision,
+                    runtime_action_id=action.id,
+                    policy_decision_id=decision.id,
+                    trace_id=action.trace_id,
+                    span_id=action.span_id,
+                    parent_span_id=action.parent_span_id,
+                    correlation_id=action.correlation_id,
+                    metadata={"resource_type": action.resource_type},
+                )
                 AuditEventRepository(connection).insert(
                     _runtime_action_audit_event(
                         organization_id=organization_id,
@@ -10794,6 +10855,7 @@ def create_app(
         organization_id = _require_organization_id(current_user)
         context = _request_context_from_request(request)
         owned_runtime_session_id: str | None = None
+        saga_run_id: str | None = None
         try:
             with _audit_database().transaction() as connection:
                 saga_repository = SagaRepository(connection, organization_id, environment_id)
@@ -10805,7 +10867,8 @@ def create_app(
                 steps = saga_repository.list_steps(saga_id)
                 if not steps:
                     raise SagaExecutionError("Saga must have at least one step before execution.")
-                if saga_row["status"] not in SAGA_EXECUTABLE_STATUSES:
+                recovering = saga_row["status"] in SAGA_RECOVERABLE_STATUSES
+                if saga_row["status"] not in SAGA_EXECUTABLE_STATUSES | SAGA_RECOVERABLE_STATUSES:
                     raise SagaExecutionError(f"Saga cannot be executed from status: {saga_row['status']}.")
 
                 runtime_session_id = body.runtime_session_id or saga_row["runtime_session_id"]
@@ -10821,6 +10884,7 @@ def create_app(
                             sponsor_user_id=current_user.id,
                             metadata={"source": "saga.execute", "saga_id": saga_id},
                         ),
+                        actor_user_id=current_user.id,
                         **_trace_context_fields(context),
                     )
                     session = runtime_session_response(session_row)
@@ -10837,16 +10901,31 @@ def create_app(
                         )
                     )
 
+                linked_runtime_session_id = body.runtime_session_id or saga_repository.get_saga(saga_id)["runtime_session_id"]
+                saga_run = runtime_repository.ensure_session_run(
+                    linked_runtime_session_id,
+                    run_type="saga",
+                    source_type="saga",
+                    source_id=saga_id,
+                    started_by_user_id=current_user.id,
+                    correlation_id=context.correlation_id,
+                    metadata={"source": "saga.execute"},
+                )
+                saga_run_id = saga_run["id"]
                 linked_saga = _saga_detail_response(saga_repository, saga_id)
                 audit_repository.insert(
                     _saga_audit_event(
                         organization_id=organization_id,
                         environment_id=environment_id,
                         actor_id=current_user.id,
-                        event_type="saga.started",
+                        event_type="saga.recovered" if recovering else "saga.started",
                         saga=linked_saga,
                         correlation_id=context.correlation_id,
-                        payload={"failure_actions": body.failure_actions},
+                        payload={
+                            "failure_actions": body.failure_actions,
+                            "recovered_from_status": saga_row["status"] if recovering else None,
+                        },
+                        decision="allow",
                     )
                 )
 
@@ -10895,9 +10974,57 @@ def create_app(
                     "compensation_failed": "saga.step.compensation_failed",
                 }
                 for step in final_saga.steps:
+                    if final_saga.runtime_session_id:
+                        if saga_run_id is None:
+                            saga_run = runtime_repository.ensure_session_run(
+                                final_saga.runtime_session_id,
+                                run_type="saga",
+                                source_type="saga",
+                                source_id=final_saga.id,
+                                started_by_user_id=current_user.id,
+                                correlation_id=context.correlation_id,
+                                metadata={"source": "saga.execute"},
+                            )
+                            saga_run_id = saga_run["id"]
+                        checkpoint = saga_repository.get_checkpoint(step.id, "execute")
+                        runtime_repository.create_run_step(
+                            saga_run_id,
+                            session_id=final_saga.runtime_session_id,
+                            step_type="saga_step",
+                            name=step.name,
+                            status=step.status,
+                            saga_id=final_saga.id,
+                            saga_step_id=step.id,
+                            checkpoint_id=checkpoint["id"] if checkpoint is not None else None,
+                            trace_id=context.trace_id,
+                            span_id=context.span_id,
+                            parent_span_id=context.parent_span_id,
+                            correlation_id=context.correlation_id or final_saga.correlation_id,
+                            metadata={
+                                "action_name": step.action_name,
+                                "required_capability": step.required_capability,
+                            },
+                        )
                     event_type = step_event_by_status.get(step.status)
                     if event_type is None:
                         continue
+                    if step.id in result.replayed_step_ids:
+                        audit_repository.insert(
+                            _saga_audit_event(
+                                organization_id=organization_id,
+                                environment_id=environment_id,
+                                actor_id=current_user.id,
+                                event_type="saga.activity.replayed",
+                                saga=final_saga,
+                                correlation_id=context.correlation_id,
+                                payload={
+                                    "step_id": step.id,
+                                    "step_order": step.step_order,
+                                    "action_name": step.action_name,
+                                },
+                                decision="allow",
+                            )
+                        )
                     denied = step.status in {"failed", "compensation_failed"}
                     audit_repository.insert(
                         _saga_audit_event(
@@ -10929,6 +11056,26 @@ def create_app(
                         )
                     )
 
+                for saga_event in final_saga.events:
+                    if saga_event.event_type not in {"saga.checkpoint.created", "saga.checkpoint.restored"}:
+                        continue
+                    audit_repository.insert(
+                        _saga_audit_event(
+                            organization_id=organization_id,
+                            environment_id=environment_id,
+                            actor_id=current_user.id,
+                            event_type=saga_event.event_type,
+                            saga=final_saga,
+                            correlation_id=context.correlation_id,
+                            payload={
+                                "saga_event_id": saga_event.id,
+                                "step_id": saga_event.step_id,
+                                **saga_event.payload,
+                            },
+                            decision="allow",
+                        )
+                    )
+
                 final_event = f"saga.{result.status}"
                 audit_repository.insert(
                     _saga_audit_event(
@@ -10941,6 +11088,7 @@ def create_app(
                         payload={
                             "executed_step_ids": result.executed_step_ids,
                             "compensated_step_ids": result.compensated_step_ids,
+                            "replayed_step_ids": result.replayed_step_ids,
                             "failed_step_id": result.failed_step_id,
                         },
                         decision="allow" if result.status == "completed" else "deny",
@@ -10954,6 +11102,7 @@ def create_app(
                     message=result.message,
                     executed_step_ids=result.executed_step_ids,
                     compensated_step_ids=result.compensated_step_ids,
+                    replayed_step_ids=result.replayed_step_ids,
                     failed_step_id=result.failed_step_id,
                     saga=final_saga,
                 )

@@ -14,8 +14,14 @@ import ophanix_tool_gateway as sdk
 from ophanix_tool_gateway import (
     AsyncGatewayHttpClient,
     AsyncOphanixToolGatewayClient,
+    EnvironmentTokenProvider,
     GatewayCompatibility,
     OphanixToolGatewayClient,
+    RuntimeCheckpointReference,
+    RuntimeEvent,
+    RuntimeRun,
+    RuntimeRunStep,
+    RuntimeSession,
     StaticTokenProvider,
     SyncGatewayHttpClient,
     ToolDeniedError,
@@ -23,7 +29,6 @@ from ophanix_tool_gateway import (
     ToolGatewayClientOptions,
     ToolGatewayError,
     ToolGatewayValidationError,
-    EnvironmentTokenProvider,
 )
 
 
@@ -51,6 +56,11 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
             "EnvironmentTokenProvider",
             "GatewayCompatibility",
             "OphanixToolGatewayClient",
+            "RuntimeCheckpointReference",
+            "RuntimeEvent",
+            "RuntimeRun",
+            "RuntimeRunStep",
+            "RuntimeSession",
             "StaticTokenProvider",
             "SyncGatewayHttpClient",
             "TelemetryEventHook",
@@ -61,6 +71,11 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
 
         self.assertTrue(expected_exports.issubset(set(sdk.__all__)))
         self.assertIs(sdk.GatewayCompatibility, GatewayCompatibility)
+        self.assertIs(sdk.RuntimeCheckpointReference, RuntimeCheckpointReference)
+        self.assertIs(sdk.RuntimeEvent, RuntimeEvent)
+        self.assertIs(sdk.RuntimeRun, RuntimeRun)
+        self.assertIs(sdk.RuntimeRunStep, RuntimeRunStep)
+        self.assertIs(sdk.RuntimeSession, RuntimeSession)
         self.assertIs(sdk.ToolGatewayClientConfig, ToolGatewayClientConfig)
         self.assertIs(sdk.ToolGatewayClientOptions, ToolGatewayClientOptions)
         self.assertIs(sdk.SyncGatewayHttpClient, SyncGatewayHttpClient)
@@ -224,6 +239,267 @@ class StandaloneSdkBehaviorTests(unittest.TestCase):
         self.assertEqual(calls[0].headers["tracestate"], "vendor=sdk")
         self.assertEqual(calls[0].headers["baggage"], "tenant=demo,tool=claims")
         self.assertEqual(calls[0].headers["X-Correlation-ID"], "corr-trace")
+
+    def test_runtime_session_methods_create_runs_and_thread_tool_context(self) -> None:
+        calls: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            if request.method == "POST" and request.url.path == "/api/v1/runtime/sessions":
+                return httpx.Response(
+                    201,
+                    json={
+                        "id": "rtssn_sdk",
+                        "organization_id": "org_default",
+                        "environment_id": "env_default",
+                        "agent_id": "agent_claims",
+                        "agent_name": "Claims Agent",
+                        "state": "active",
+                        "ring": 2,
+                        "sponsor_user_id": None,
+                        "created_by_user_id": "user_sdk",
+                        "memory_scope": "session",
+                        "thread_id": "thread-sdk",
+                        "started_at": "2026-05-20T00:00:00+00:00",
+                        "ended_at": None,
+                        "metadata": {"purpose": "sdk"},
+                        "trace_id": TRACE_ID,
+                        "span_id": "dddddddddddddddd",
+                        "parent_span_id": PARENT_SPAN_ID,
+                        "traceparent": TRACEPARENT,
+                        "tracestate": "vendor=sdk",
+                        "baggage": "tenant=demo",
+                        "actions": [],
+                    },
+                )
+            if request.method == "GET" and request.url.path == "/api/v1/runtime/sessions/rtssn_sdk/runs":
+                return httpx.Response(
+                    200,
+                    json=[
+                        {
+                            "id": "rtrun_sdk",
+                            "organization_id": "org_default",
+                            "environment_id": "env_default",
+                            "session_id": "rtssn_sdk",
+                            "thread_id": "thread-sdk",
+                            "run_type": "session",
+                            "status": "running",
+                            "source_type": None,
+                            "source_id": None,
+                            "started_by_user_id": "user_sdk",
+                            "trace_id": TRACE_ID,
+                            "span_id": "dddddddddddddddd",
+                            "parent_span_id": PARENT_SPAN_ID,
+                            "correlation_id": "corr-runtime-sdk",
+                            "recovery_state": {"checkpoint_count": 1},
+                            "metadata": {"purpose": "sdk"},
+                            "started_at": "2026-05-20T00:00:00+00:00",
+                            "ended_at": None,
+                            "updated_at": "2026-05-20T00:00:00+00:00",
+                            "steps": [
+                                {
+                                    "id": "rtstep_sdk",
+                                    "run_id": "rtrun_sdk",
+                                    "session_id": "rtssn_sdk",
+                                    "parent_step_id": None,
+                                    "runtime_action_id": "rtact_sdk",
+                                    "saga_id": None,
+                                    "saga_step_id": None,
+                                    "checkpoint_id": "sgchk_sdk",
+                                    "policy_decision_id": "rtdcsn_sdk",
+                                    "step_order": 1,
+                                    "step_type": "runtime_action",
+                                    "name": "claims.lookup",
+                                    "status": "allow",
+                                    "trace_id": TRACE_ID,
+                                    "span_id": "eeeeeeeeeeeeeeee",
+                                    "parent_span_id": "dddddddddddddddd",
+                                    "correlation_id": "corr-runtime-sdk",
+                                    "artifact_links": [],
+                                    "metadata": {"resource_type": "claim"},
+                                    "started_at": "2026-05-20T00:00:00+00:00",
+                                    "ended_at": "2026-05-20T00:00:00+00:00",
+                                    "updated_at": "2026-05-20T00:00:00+00:00",
+                                }
+                            ],
+                        }
+                    ],
+                )
+            if request.method == "POST" and request.url.path == "/api/v1/tools/claims.lookup/invoke":
+                return httpx.Response(
+                    200,
+                    json={
+                        "request_id": "req-runtime-sdk",
+                        "correlation_id": "corr-runtime-sdk",
+                        "tool_name": "claims.lookup",
+                        "result": {"ok": True},
+                        "error": None,
+                    },
+                )
+            if request.method == "GET" and request.url.path == "/api/v1/audit/events/stream":
+                self.assertEqual(request.url.params.get("event_type"), "runtime.session.started")
+                self.assertEqual(request.url.params.get("last_event_id"), "evt_previous")
+                self.assertEqual(request.url.params.get("limit"), "10")
+                event_data = (
+                    '{"id":"evt_runtime_sdk","organization_id":"org_default",'
+                    '"environment_id":"env_default","event_type":"runtime.session.started",'
+                    '"source_component":"runtime-control","actor_type":"user",'
+                    '"actor_id":"user_sdk","agent_id":"agent_claims",'
+                    '"resource_type":"runtime_session","resource_id":"rtssn_sdk",'
+                    '"decision":"allow","severity":"info",'
+                    '"correlation_id":"corr-runtime-sdk","trace_id":"'
+                    + TRACE_ID
+                    + '","payload_json":{"session_id":"rtssn_sdk","run_id":"rtrun_sdk"},'
+                    '"created_at":"2026-05-20T00:00:00+00:00"}'
+                )
+                return httpx.Response(
+                    200,
+                    text=f"id: evt_runtime_sdk\nevent: audit_event\ndata: {event_data}\n\n",
+                    headers={"content-type": "text/event-stream"},
+                )
+            return httpx.Response(404, json={"error": {"code": "not_found"}})
+
+        client = _client(handler)
+
+        session = client.create_runtime_session(
+            agent_id="agent_claims",
+            environment_id="env_default",
+            ring=2,
+            metadata={"purpose": "sdk", "thread_id": "thread-sdk", "memory_scope": "session"},
+            correlation_id="corr-runtime-sdk",
+            traceparent=TRACEPARENT,
+            tracestate="vendor=sdk",
+            baggage="tenant=demo",
+        )
+        runs = client.list_runtime_session_runs(
+            session.id,
+            environment_id="env_default",
+            correlation_id="corr-runtime-sdk",
+        )
+        result = client.call_tool(
+            "claims.lookup",
+            {"claim_id": "claim_123"},
+            correlation_id="corr-runtime-sdk",
+            idempotency_key="idem-runtime-sdk",
+            runtime_session_id=session.id,
+            runtime_run_id=runs[0].id,
+        )
+        checkpoints = client.list_runtime_checkpoints(
+            session.id,
+            environment_id="env_default",
+            correlation_id="corr-runtime-sdk",
+        )
+        events = client.stream_runtime_events(
+            environment_id="env_default",
+            event_type="runtime.session.started",
+            last_event_id="evt_previous",
+            limit=10,
+            runtime_session_id=session.id,
+            runtime_run_id=runs[0].id,
+            correlation_id="corr-runtime-sdk",
+        )
+
+        self.assertEqual(session.thread_id, "thread-sdk")
+        self.assertEqual(runs[0].steps[0].checkpoint_id, "sgchk_sdk")
+        self.assertEqual(result.result, {"ok": True})
+        self.assertEqual(checkpoints[0].checkpoint_id, "sgchk_sdk")
+        self.assertEqual(checkpoints[0].recovery_state["checkpoint_count"], 1)
+        self.assertEqual(events[0].id, "evt_runtime_sdk")
+        self.assertEqual(events[0].payload_json["run_id"], "rtrun_sdk")
+        self.assertEqual(calls[0].headers["X-Environment-ID"], "env_default")
+        self.assertEqual(calls[1].headers["X-Environment-ID"], "env_default")
+        self.assertEqual(calls[2].headers["X-Runtime-Session-ID"], "rtssn_sdk")
+        self.assertEqual(calls[2].headers["X-Runtime-Run-ID"], "rtrun_sdk")
+        self.assertEqual(calls[4].headers["X-Environment-ID"], "env_default")
+
+    def test_async_runtime_session_methods_thread_tool_context(self) -> None:
+        calls: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            if request.method == "POST" and request.url.path == "/api/v1/runtime/sessions":
+                return httpx.Response(
+                    201,
+                    json={
+                        "id": "rtssn_async_sdk",
+                        "organization_id": "org_default",
+                        "environment_id": "env_default",
+                        "agent_id": "agent_claims",
+                        "agent_name": "Claims Agent",
+                        "state": "active",
+                        "ring": 2,
+                        "created_by_user_id": "user_sdk",
+                        "memory_scope": "session",
+                        "thread_id": "thread-async-sdk",
+                        "started_at": "2026-05-20T00:00:00+00:00",
+                        "metadata": {},
+                        "actions": [],
+                    },
+                )
+            if request.method == "GET" and request.url.path == "/api/v1/runtime/sessions/rtssn_async_sdk/runs":
+                return httpx.Response(
+                    200,
+                    json=[
+                        {
+                            "id": "rtrun_async_sdk",
+                            "organization_id": "org_default",
+                            "environment_id": "env_default",
+                            "session_id": "rtssn_async_sdk",
+                            "thread_id": "thread-async-sdk",
+                            "run_type": "session",
+                            "status": "running",
+                            "recovery_state": {},
+                            "metadata": {},
+                            "started_at": "2026-05-20T00:00:00+00:00",
+                            "updated_at": "2026-05-20T00:00:00+00:00",
+                            "steps": [],
+                        }
+                    ],
+                )
+            if request.method == "POST" and request.url.path == "/api/v1/tools/claims.lookup/invoke":
+                return httpx.Response(
+                    200,
+                    json={
+                        "request_id": "req-async-runtime-sdk",
+                        "correlation_id": "corr-async-runtime-sdk",
+                        "tool_name": "claims.lookup",
+                        "result": {"ok": True},
+                        "error": None,
+                    },
+                )
+            return httpx.Response(404, json={"error": {"code": "not_found"}})
+
+        async def exercise() -> None:
+            client = _async_client(handler)
+            try:
+                session = await client.create_runtime_session(
+                    agent_id="agent_claims",
+                    environment_id="env_default",
+                    metadata={"thread_id": "thread-async-sdk"},
+                )
+                runs = await client.list_runtime_session_runs(
+                    session.id,
+                    environment_id="env_default",
+                )
+                result = await client.call_tool(
+                    "claims.lookup",
+                    {"claim_id": "claim_123"},
+                    correlation_id="corr-async-runtime-sdk",
+                    idempotency_key="idem-async-runtime-sdk",
+                    runtime_session_id=session.id,
+                    runtime_run_id=runs[0].id,
+                )
+            finally:
+                await client.close()
+            self.assertEqual(session.thread_id, "thread-async-sdk")
+            self.assertEqual(runs[0].id, "rtrun_async_sdk")
+            self.assertEqual(result.result, {"ok": True})
+
+        asyncio.run(exercise())
+        self.assertEqual(calls[0].headers["X-Environment-ID"], "env_default")
+        self.assertEqual(calls[1].headers["X-Environment-ID"], "env_default")
+        self.assertEqual(calls[2].headers["X-Runtime-Session-ID"], "rtssn_async_sdk")
+        self.assertEqual(calls[2].headers["X-Runtime-Run-ID"], "rtrun_async_sdk")
 
     def test_call_tool_does_not_retry_retryable_status_without_idempotency_key(self) -> None:
         calls = 0

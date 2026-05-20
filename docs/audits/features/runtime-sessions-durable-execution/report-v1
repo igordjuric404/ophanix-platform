@@ -1,5 +1,55 @@
 # Feature Audit: Runtime Sessions and Durable Execution
 
+## Remediation Summary
+
+- Date of remediation: 2026-05-20
+- Total findings in this report: 4
+- Number fixed: 4
+- Number partially fixed: 0
+- Number blocked: 0
+- Number already fixed: 0
+- Files changed:
+  - `packages/product-platform/src/product_platform/db/migrations/0088_runtime_durable_saga_activity_results.up.sql`
+  - `packages/product-platform/src/product_platform/db/migrations/0088_runtime_durable_saga_activity_results.down.sql`
+  - `packages/product-platform/src/product_platform/db/migrations/0089_runtime_durable_saga_checkpoints.up.sql`
+  - `packages/product-platform/src/product_platform/db/migrations/0089_runtime_durable_saga_checkpoints.down.sql`
+  - `packages/product-platform/src/product_platform/db/migrations/0090_runtime_session_run_timeline.up.sql`
+  - `packages/product-platform/src/product_platform/db/migrations/0090_runtime_session_run_timeline.down.sql`
+  - `packages/product-platform/src/product_platform/runtime/sagas.py`
+  - `packages/product-platform/src/product_platform/runtime/saga_executor.py`
+  - `packages/product-platform/src/product_platform/runtime/models.py`
+  - `packages/product-platform/src/product_platform/runtime/repository.py`
+  - `packages/product-platform/src/product_platform/api/app.py`
+  - `packages/agent-hypervisor/src/hypervisor/saga/checkpoint.py`
+  - `packages/ophanix-tool-gateway-sdk/src/ophanix_tool_gateway/sdk.py`
+  - `packages/ophanix-tool-gateway-sdk/src/ophanix_tool_gateway/__init__.py`
+  - `packages/ophanix-tool-gateway-sdk/README.md`
+  - `packages/ophanix-tool-gateway-sdk/API_REFERENCE.md`
+  - `packages/ophanix-tool-gateway-sdk/examples/runtime_session_example.py`
+  - tests listed below
+- Tests added or updated:
+  - `packages/product-platform/tests/test_runtime_durable_execution_phase1.py`
+  - `packages/product-platform/tests/test_runtime_durable_execution_phase2.py`
+  - `packages/product-platform/tests/test_runtime_session_run_timeline_phase3.py`
+  - `packages/product-platform/tests/test_saga_builder_and_monitor_phase3.py`
+  - `packages/product-platform/tests/test_saga_builder_and_monitor_phase2.py`
+  - `packages/product-platform/tests/test_runtime_sessions_and_rings_phase1.py`
+  - `packages/product-platform/tests/test_runtime_sessions_and_rings_phase2.py`
+  - `packages/product-platform/tests/test_runtime_sessions_and_rings_phase3.py`
+  - `packages/product-platform/tests/test_db_phase1.py`
+  - `packages/agent-hypervisor/tests/unit/test_saga_improvements.py`
+  - `packages/ophanix-tool-gateway-sdk/tests/test_sdk_behavior.py`
+- Validation commands run:
+  - `python3 -m compileall -q ...` for touched product runtime/API/tests passed.
+  - `PYTHONPATH=src:tests python3 -m unittest test_runtime_durable_execution_phase1 test_runtime_durable_execution_phase2 test_runtime_session_run_timeline_phase3 test_runtime_sessions_and_rings_phase1 test_runtime_sessions_and_rings_phase2 test_runtime_sessions_and_rings_phase3 test_saga_builder_and_monitor_phase2 test_saga_builder_and_monitor_phase3 test_db_phase1 -v` passed, 36 tests.
+  - `PYTHONPATH=src python3 -m pytest tests/unit/test_saga_improvements.py -k Checkpoints -q` passed, 8 selected tests.
+  - `PYTHONPATH=src python3 -m pytest -q` in `packages/ophanix-tool-gateway-sdk` passed, 49 tests.
+  - Targeted product, SDK, and hypervisor `ruff check` commands passed.
+  - Product and SDK `python3 -m mypy` commands passed.
+  - `python3 -m mypy src/hypervisor/saga/checkpoint.py --follow-imports=skip --ignore-missing-imports` passed for the touched hypervisor checkpoint file.
+  - Isolated wheel builds passed for product-platform, ophanix-tool-gateway-sdk, and agent-hypervisor.
+- Remaining risks: None for the four findings in this selected report.
+
 ## 1. Scope
 
 This audit covers runtime sessions, runtime actions, durable execution claims, session binding, checkpoints, memory/session separation, isolation metadata, runtime observability, and SDK support. It inspects `product_platform/runtime`, runtime migrations, runtime routes in `api/app.py`, `agent-hypervisor` checkpoint code, `agent-runtime`, frontend runtime pages, and the Python SDK. Relevant benchmarks are AWS Bedrock AgentCore Runtime, LangGraph threads/runs/checkpoints, LangSmith runs, Google session/memory separation, and Temporal durable execution semantics. Out of scope: saga-specific compensation detail, covered in SAG.
@@ -23,6 +73,43 @@ The runtime currently persists session/action status, metadata, latency, and cor
 ## 4. Findings
 
 ### F-RDE-001 [P1] [Runtime Sessions] Runtime sessions are thin control records, not complete session/thread/run models
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Expanded runtime sessions into a user-bound thread/run/step timeline. Runtime sessions now persist created-by user, memory scope, and thread ID; runtime runs and run steps persist parent session history; runtime action steps link to ring decisions, traces, correlation IDs, and artifact link snapshots; saga execution links saga steps and checkpoint IDs into runtime runs; and a tenant-scoped run inspection API exposes the timeline.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/db/migrations/0090_runtime_session_run_timeline.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0090_runtime_session_run_timeline.down.sql`
+- `packages/product-platform/src/product_platform/runtime/models.py`
+- `packages/product-platform/src/product_platform/runtime/repository.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/tests/test_runtime_session_run_timeline_phase3.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+
+**Tests added or updated:**
+- `RuntimeSessionRunTimelinePhase3Tests.test_session_run_timeline_binds_user_action_policy_and_trace`
+- `RuntimeSessionRunTimelinePhase3Tests.test_run_timeline_read_is_environment_scoped`
+- `DatabaseMigrationPhase1Tests.test_migration_applies_to_empty_database`
+- `DatabaseMigrationPhase1Tests.test_migration_can_be_rolled_back`
+
+**Validation performed:**
+- `python3 -m compileall -q src/product_platform/runtime/models.py src/product_platform/runtime/repository.py src/product_platform/api/app.py tests/test_runtime_session_run_timeline_phase3.py tests/test_db_phase1.py` passed.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_runtime_session_run_timeline_phase3.py' -v` passed, 2 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_runtime_sessions_and_rings_phase1.py' -v` passed, 5 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_runtime_sessions_and_rings_phase2.py' -v` passed, 3 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_runtime_sessions_and_rings_phase3.py' -v` passed, 3 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_saga_builder_and_monitor_phase3.py' -v` passed, 8 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` passed, 5 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_runtime_durable_execution_phase1.py' -v` passed, 2 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_runtime_durable_execution_phase2.py' -v` passed, 2 tests.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Partially Implemented
 
@@ -75,6 +162,44 @@ Runtime will remain a status dashboard rather than a production execution model.
 **Affects stated Ophanix product promise:** Yes
 
 ### F-RDE-002 [P0] [Durable Execution] Durable execution is demo-safe saga execution rather than replayable durable execution
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Added Ophanix-native durable saga activity persistence and replay semantics. Saga execution now persists replayable activity result rows before marking steps complete, can recover `running` sagas by replaying completed activity output without re-running side effects, exposes replayed step IDs, and emits recovery/replay saga and product audit events.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/db/migrations/0088_runtime_durable_saga_activity_results.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0088_runtime_durable_saga_activity_results.down.sql`
+- `packages/product-platform/src/product_platform/runtime/sagas.py`
+- `packages/product-platform/src/product_platform/runtime/saga_executor.py`
+- `packages/product-platform/src/product_platform/runtime/models.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/tests/test_runtime_durable_execution_phase1.py`
+- `packages/product-platform/tests/test_saga_builder_and_monitor_phase3.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+
+**Tests added or updated:**
+- `RuntimeDurableExecutionPhase1Tests.test_durable_run_recovers_after_worker_restart_without_duplicating_completed_side_effect`
+- `RuntimeDurableExecutionPhase1Tests.test_activity_completion_is_idempotent_for_retried_worker_commit`
+- `SagaBuilderPhase3Tests.test_running_saga_recovers_replayed_activity_and_audits_recovery`
+- `DatabaseMigrationPhase1Tests.test_migration_applies_to_empty_database`
+- `DatabaseMigrationPhase1Tests.test_migration_can_be_rolled_back`
+
+**Validation performed:**
+- `python3 -m compileall -q src/product_platform/runtime/saga_executor.py src/product_platform/runtime/sagas.py tests/test_runtime_durable_execution_phase1.py` passed.
+- `python3 -m compileall -q src/product_platform/api/app.py src/product_platform/runtime/models.py tests/test_saga_builder_and_monitor_phase3.py` passed.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_runtime_durable_execution_phase1.py' -v` passed, 2 tests.
+- `PYTHONPATH=src:tests python3 -m unittest test_saga_builder_and_monitor_phase3.SagaBuilderPhase3Tests.test_running_saga_recovers_replayed_activity_and_audits_recovery -v` passed, 1 test.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_saga_builder_and_monitor_phase3.py' -v` passed, 8 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_saga_builder_and_monitor_phase2.py' -v` passed, 6 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` passed, 5 tests.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Incorrect
 
@@ -129,6 +254,52 @@ Users will trust workflows that can duplicate or lose side effects under normal 
 
 ### F-RDE-003 [P0] [Checkpoints] Checkpoint support is stubbed and not wired to product runtime
 
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Added product-runtime durable saga checkpoints and restored hypervisor checkpoint behavior. Saga execution now creates hash-verified checkpoints after activity completion and before step commit, verifies checkpoint integrity before restore, uses checkpoint payloads during recovery replay, and emits checkpoint created/restored saga and audit events.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/db/migrations/0089_runtime_durable_saga_checkpoints.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0089_runtime_durable_saga_checkpoints.down.sql`
+- `packages/product-platform/src/product_platform/runtime/sagas.py`
+- `packages/product-platform/src/product_platform/runtime/saga_executor.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/tests/test_runtime_durable_execution_phase2.py`
+- `packages/product-platform/tests/test_saga_builder_and_monitor_phase3.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+- `packages/agent-hypervisor/src/hypervisor/saga/checkpoint.py`
+- `packages/agent-hypervisor/tests/unit/test_saga_improvements.py`
+
+**Tests added or updated:**
+- `RuntimeDurableExecutionPhase2Tests.test_checkpoint_create_restore_and_integrity_failure`
+- `RuntimeDurableExecutionPhase2Tests.test_resume_restores_checkpoint_without_reexecuting_completed_side_effect`
+- `SagaBuilderPhase3Tests.test_running_saga_recovers_replayed_activity_and_audits_recovery`
+- `TestCheckpoints.test_save_and_check`
+- `TestCheckpoints.test_invalidate_checkpoint`
+- `TestCheckpoints.test_get_checkpoint`
+- `TestCheckpoints.test_replay_plan`
+- `TestCheckpoints.test_total_and_valid_counts`
+- `DatabaseMigrationPhase1Tests.test_migration_applies_to_empty_database`
+- `DatabaseMigrationPhase1Tests.test_migration_can_be_rolled_back`
+
+**Validation performed:**
+- `python3 -m compileall -q src/product_platform/runtime/sagas.py src/product_platform/runtime/saga_executor.py src/product_platform/api/app.py tests/test_runtime_durable_execution_phase2.py tests/test_db_phase1.py` passed.
+- `python3 -m compileall -q src/hypervisor/saga/checkpoint.py tests/unit/test_saga_improvements.py` passed.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_runtime_durable_execution_phase2.py' -v` passed, 2 tests.
+- `PYTHONPATH=src:tests python3 -m unittest test_saga_builder_and_monitor_phase3.SagaBuilderPhase3Tests.test_running_saga_recovers_replayed_activity_and_audits_recovery -v` passed, 1 test.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_runtime_durable_execution_phase1.py' -v` passed, 2 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_saga_builder_and_monitor_phase3.py' -v` passed, 8 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_saga_builder_and_monitor_phase2.py' -v` passed, 6 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` passed, 5 tests.
+- `PYTHONPATH=src python3 -m pytest tests/unit/test_saga_improvements.py -k Checkpoints -v` passed, 8 selected tests.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
+
 **Status:** Missing
 
 **Current implementation:**
@@ -180,6 +351,37 @@ Runtime recovery will be unreliable and unsafe for long-running workflows.
 **Affects stated Ophanix product promise:** Yes
 
 ### F-RDE-004 [P1] [SDK] Python SDK lacks runtime session and durable tracking APIs
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Added first-class runtime-control-plane helpers to the standalone Python SDK. The SDK can now create/get runtime sessions, list session runs and run steps, inspect checkpoint references derived from run timelines, read Product Platform audit SSE events as typed runtime events, and pass runtime session/run IDs through governed tool calls in both sync and async clients. SDK exports, docs, and examples now include the runtime session contract while preserving the Tool Gateway-only client profile.
+
+**Files changed:**
+- `packages/ophanix-tool-gateway-sdk/src/ophanix_tool_gateway/sdk.py`
+- `packages/ophanix-tool-gateway-sdk/src/ophanix_tool_gateway/__init__.py`
+- `packages/ophanix-tool-gateway-sdk/tests/test_sdk_behavior.py`
+- `packages/ophanix-tool-gateway-sdk/README.md`
+- `packages/ophanix-tool-gateway-sdk/API_REFERENCE.md`
+- `packages/ophanix-tool-gateway-sdk/examples/runtime_session_example.py`
+
+**Tests added or updated:**
+- `StandaloneSdkBehaviorTests.test_public_api_snapshot_includes_mvp_sdk_types`
+- `StandaloneSdkBehaviorTests.test_runtime_session_methods_create_runs_and_thread_tool_context`
+- `StandaloneSdkBehaviorTests.test_async_runtime_session_methods_thread_tool_context`
+- `PackageSmokeTests.test_examples_compile` covers the new runtime session example through existing example compilation.
+
+**Validation performed:**
+- `python3 -m compileall -q src/ophanix_tool_gateway/sdk.py src/ophanix_tool_gateway/__init__.py tests/test_sdk_behavior.py` passed.
+- `PYTHONPATH=src python3 -m pytest tests/test_sdk_behavior.py -k 'runtime_session_methods or async_runtime_session_methods or public_api_snapshot' -v` passed, 3 selected tests.
+- `python3 -m compileall -q src/ophanix_tool_gateway/sdk.py src/ophanix_tool_gateway/__init__.py tests/test_sdk_behavior.py examples/runtime_session_example.py` passed.
+- `PYTHONPATH=src python3 -m pytest -q` passed, 49 tests.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Missing
 
@@ -279,4 +481,3 @@ None.
 ## 7. Feature-Level Target State
 
 Runtime should expose a coherent durable execution model: sessions bind user, agent, environment, memory, runs, steps, tool calls, model calls, checkpoints, artifacts, and traces. Persistence should record event history and activity results. Workers should recover after process failure and avoid duplicated side effects. APIs and SDKs should make session/run operations first class. Observability should show timeline, status, replay, checkpoint, policy, and artifact evidence in one view. Tests should prove crash recovery, replay, idempotency, and trace linkage.
-
