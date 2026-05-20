@@ -15,6 +15,7 @@ class MVPCloudDeploymentPhase3Tests(unittest.TestCase):
             deployment_mode="cloud",
             idp_issuer_url="https://idp.example.com/oauth2/default",
             idp_audience="api://ophanix-product-platform",
+            idp_jwks_url="https://idp.example.com/oauth2/default/keys",
             tls_certificate_ref="managed-certificates/ophanix",
             internal_cidrs=["10.0.0.0/8"],
             cors_origins=["https://app.example.com"],

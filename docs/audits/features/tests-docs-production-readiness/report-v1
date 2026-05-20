@@ -1,5 +1,51 @@
 # Feature Audit: Tests, Documentation, and Production Readiness
 
+## Remediation Summary
+
+- Date of remediation: 2026-05-20
+- Total findings in this report: 5
+- Number fixed: 5
+- Number partially fixed: 0
+- Number blocked: 0
+- Number already fixed: 0
+- Files changed:
+  - `.github/workflows/ci.yml`
+  - `.github/workflows/product-platform-images.yml`
+  - `docs/audits/features/tests-docs-production-readiness/report-v1`
+  - `docs/product-platform-worktree/execution-logs/tests-docs-production-readiness-report-v1-remediation/*`
+  - `packages/product-platform/README.md`
+  - `packages/product-platform/deploy/cloud/security.md`
+  - `packages/product-platform/frontend/src/e2e/smoke.spec.ts`
+  - `packages/product-platform/src/product_platform/deployment/security.py`
+  - `packages/product-platform/tests/test_mvp_cloud_deployment_phase3.py`
+  - `packages/product-platform/tests/test_tests_docs_production_readiness_phase1.py`
+  - `packages/product-platform/tests/test_tests_docs_production_readiness_phase2.py`
+  - `packages/product-platform/tests/test_tests_docs_production_readiness_phase3.py`
+  - `packages/product-platform/tests/test_tests_docs_production_readiness_phase4.py`
+  - `packages/product-platform/tests/test_tests_docs_production_readiness_phase5.py`
+  - `packages/ophanix-tool-gateway-sdk/README.md`
+  - `../ophanix-python-sdk/README.md`
+  - `../ophanix-python-sdk/tests/test_sdk_behavior.py`
+- Tests added or updated:
+  - `test_tests_docs_production_readiness_phase1.py`
+  - `test_tests_docs_production_readiness_phase2.py`
+  - `test_tests_docs_production_readiness_phase3.py`
+  - `test_tests_docs_production_readiness_phase4.py`
+  - `test_tests_docs_production_readiness_phase5.py`
+  - `frontend/src/e2e/smoke.spec.ts::dev login and top-level navigation smoke`
+  - `../ophanix-python-sdk/tests/test_sdk_behavior.py::StandaloneSdkBehaviorTests.test_standalone_sdk_live_gateway_contract`
+  - `test_mvp_cloud_deployment_phase3.py::test_security_status_reports_idp_tls_network_and_cors`
+- Validation commands run:
+  - `PYTHONPATH=src:tests python3 -m unittest test_tests_docs_production_readiness_phase1 test_tests_docs_production_readiness_phase2 test_tests_docs_production_readiness_phase3 test_tests_docs_production_readiness_phase4 test_tests_docs_production_readiness_phase5 -v` passed with 9 tests.
+  - `PYTHONPATH=src:tests python3 -m unittest test_mvp_cloud_deployment_phase1 test_mvp_cloud_deployment_phase2 test_mvp_cloud_deployment_phase3 test_mvp_cloud_deployment_phase4 test_mvp_cloud_deployment_phase5 test_auth_remediation_phase1 test_runtime_durable_execution_phase1 test_runtime_durable_execution_phase2 test_worker_phase2 -v` passed with 36 tests.
+  - `python3 -m mypy src/product_platform/tool_gateway src/ophanix_tool_gateway` passed.
+  - `python3 -m ruff check src tests` passed.
+  - `python3 scripts/validate_release.py --out-dir /tmp/ophanix-product-platform-release-check-final --skip-twine-check` passed.
+  - Product Platform frontend `npm run lint`, `npm run typecheck`, `npm test`, `npm run build`, and `npm run test:e2e -- --project=chromium` passed.
+  - Standalone SDK `PYTHONPATH=src python3 -m pytest tests -q --tb=short`, `python3 -m mypy src/ophanix_tool_gateway`, and `python3 scripts/validate_release.py --out-dir /tmp/ophanix-python-sdk-release-check-phase5 --skip-twine-check` passed.
+  - `git diff --check` passed in both `ophanix-platform` and `ophanix-python-sdk`.
+- Remaining risks: None.
+
 ## 1. Scope
 
 This audit covers CI, test coverage shape, deployment readiness docs, image/build workflows, security/supply-chain gates, SDK contract tests, production auth documentation, runtime governance tests, and whether the repo evidence supports benchmark-level production claims. It inspects both `ophanix-platform` and `ophanix-python-sdk`, including GitHub workflows, product tests, frontend scripts, deployment docs, package metadata, and SDK tests. Relevant benchmarks are Temporal production reliability, LangSmith/LangGraph deployment and eval readiness, JFrog supply-chain gates, Microsoft/AWS/Google enterprise readiness, and OpenAI/Arcade SDK ergonomics. Out of scope: individual feature implementation details, covered in the other feature reports.
@@ -25,6 +71,39 @@ Current workflow: many unit/integration tests validate product behavior, but CI 
 ## 4. Findings
 
 ### F-TST-001 [P1] [Production Readiness] CI does not yet prove the Product Platform production path
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+CI now has a Product Platform backend production-path job with an explicit PostgreSQL service, migration execution, and backend test run. CI also has a Product Platform frontend job that runs npm install, lint, typecheck, unit tests, Playwright e2e smoke, and production build. The product image workflow now enables build provenance and runs the existing API/worker/readiness image smoke script. Deterministic workflow regression tests verify these gates remain wired.
+
+**Files changed:**
+- `.github/workflows/ci.yml`
+- `.github/workflows/product-platform-images.yml`
+- `packages/product-platform/frontend/src/e2e/smoke.spec.ts`
+- `packages/product-platform/tests/test_tests_docs_production_readiness_phase1.py`
+
+**Tests added or updated:**
+- `test_tests_docs_production_readiness_phase1.py::test_ci_product_platform_backend_with_postgres`
+- `test_tests_docs_production_readiness_phase1.py::test_ci_product_frontend_validate_and_playwright`
+- `test_tests_docs_production_readiness_phase1.py::test_product_platform_images_use_provenance_and_smoke_checks`
+- `frontend/src/e2e/smoke.spec.ts::dev login and top-level navigation smoke`
+
+**Validation performed:**
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tests_docs_production_readiness_phase1.py' -v` passed with 3 tests.
+- `python3 -m py_compile tests/test_tests_docs_production_readiness_phase1.py` passed.
+- `python3 -m ruff check tests/test_tests_docs_production_readiness_phase1.py` passed.
+- `ruby -e "require 'yaml'; YAML.load_file('.github/workflows/ci.yml'); YAML.load_file('.github/workflows/product-platform-images.yml'); puts 'workflow yaml ok'"` passed.
+- `npm run test:e2e -- --project=chromium` initially failed on stale detail assertions, was corrected to open the smoke agent and trust card rows, and then passed with 1 Chromium smoke test.
+- `npm run lint` passed after the Playwright smoke spec update.
+- `npm run typecheck` passed after the Playwright smoke spec update.
+- `git diff --check` passed.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Risky
 
@@ -78,6 +157,30 @@ Mainline can pass while the product cannot boot, migrate, or run frontend/worker
 
 ### F-TST-002 [P1] [Reliability] Runtime governance tests prove demo/in-process behavior, not durable execution claims
 
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Runtime reliability now has an exact report-named regression that simulates a crash after a saga side effect is durably recorded, verifies restart/replay skips the completed side effect, verifies replay/audit events are persisted, and verifies exhausted worker retries remain durably inspectable as terminal failed work with logs and error metadata. Existing checkpoint and saga monitor recovery/audit suites were re-run to prove checkpoint resume and replay evidence.
+
+**Files changed:**
+- `packages/product-platform/tests/test_tests_docs_production_readiness_phase3.py`
+
+**Tests added or updated:**
+- `test_tests_docs_production_readiness_phase3.py::test_runtime_crash_replay_and_dlq`
+
+**Validation performed:**
+- `PYTHONPATH=src:tests python3 -m unittest test_tests_docs_production_readiness_phase3 test_runtime_durable_execution_phase1 test_worker_phase2 -v` passed with 10 tests.
+- `PYTHONPATH=src:tests python3 -m unittest test_runtime_durable_execution_phase2 test_saga_builder_and_monitor_phase3 -v` passed with 12 tests.
+- `python3 -m py_compile tests/test_tests_docs_production_readiness_phase3.py` passed.
+- `python3 -m ruff check tests/test_tests_docs_production_readiness_phase3.py` passed.
+- `git diff --check` passed.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
+
 **Status:** Partially Implemented
 
 **Current implementation:**
@@ -129,6 +232,35 @@ Tests can pass while production durability claims remain unproven.
 **Affects stated Ophanix product promise:** Yes
 
 ### F-TST-003 [P1] [Security] Enterprise auth and readiness documentation are ahead of implementation tests
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Enterprise auth readiness now has a report-named lifecycle regression that proves OIDC/JWKS validation, invalid-token rejection, group-to-role mapping, environment-scoped RBAC, expired token rejection, local session expiry, logout cookie clearing, and production rejection when JWKS is missing. Cloud security readiness checks now require JWKS configuration, and the deployment security documentation explicitly describes the implemented OIDC/JWKS behavior and notes that SAML/SCIM are not implemented in this path.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/deployment/security.py`
+- `packages/product-platform/deploy/cloud/security.md`
+- `packages/product-platform/tests/test_mvp_cloud_deployment_phase3.py`
+- `packages/product-platform/tests/test_tests_docs_production_readiness_phase2.py`
+
+**Tests added or updated:**
+- `test_tests_docs_production_readiness_phase2.py::test_enterprise_oidc_rbac_session_lifecycle`
+- `test_tests_docs_production_readiness_phase2.py::test_cloud_security_docs_and_checks_match_oidc_jwks_contract`
+- `test_mvp_cloud_deployment_phase3.py::test_security_status_reports_idp_tls_network_and_cors`
+
+**Validation performed:**
+- `PYTHONPATH=src:tests python3 -m unittest test_tests_docs_production_readiness_phase2 test_mvp_cloud_deployment_phase3 -v` passed with 5 tests after fixing authenticated logout setup.
+- `PYTHONPATH=src:tests python3 -m unittest test_auth_remediation_phase1 test_mvp_cloud_deployment_phase1 test_mvp_cloud_deployment_phase2 test_mvp_cloud_deployment_phase3 test_mvp_cloud_deployment_phase4 test_mvp_cloud_deployment_phase5 -v` passed with 24 tests.
+- `python3 -m py_compile src/product_platform/deployment/security.py tests/test_tests_docs_production_readiness_phase2.py tests/test_mvp_cloud_deployment_phase3.py` passed.
+- `python3 -m ruff check src/product_platform/deployment/security.py tests/test_tests_docs_production_readiness_phase2.py tests/test_mvp_cloud_deployment_phase3.py` passed.
+- `git diff --check` passed.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Missing
 
@@ -182,6 +314,33 @@ Documentation can overpromise enterprise readiness.
 
 ### F-TST-004 [P1] [Security] Plugin and MCP security tests do not prove real provenance or scanning
 
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Added an exact report-named cross-area release-gate regression that proves forged signed plugin manifests cannot pass policy or install, blocking license/vulnerability/malware artifact evidence denies install, clean signed artifacts with review approval install and materialize runtime tool grants, and MCP unscanned/open-finding tool calls are denied at the supply-chain gate before upstream execution.
+
+**Files changed:**
+- `packages/product-platform/tests/test_tests_docs_production_readiness_phase4.py`
+
+**Tests added or updated:**
+- `test_tests_docs_production_readiness_phase4.py::test_plugin_mcp_supply_chain_release_gate`
+
+**Validation performed:**
+- `PYTHONPATH=src:tests python3 -m unittest test_tests_docs_production_readiness_phase4 -v` passed with 1 test.
+- `python3 -m py_compile tests/test_tests_docs_production_readiness_phase4.py` passed.
+- `python3 -m ruff check tests/test_tests_docs_production_readiness_phase4.py` passed.
+- `PYTHONPATH=src:tests python3 -m unittest test_plugin_marketplace_security_phase1 test_plugin_marketplace_security_phase2 test_plugin_marketplace_security_phase3 test_plugin_marketplace_security_phase4 -v` passed with 11 tests.
+- `PYTHONPATH=src:tests python3 -m unittest test_plugin_review_signing_trust_phase1 test_plugin_review_signing_trust_phase2 test_plugin_review_signing_trust_phase3 test_plugin_review_signing_trust_phase4 test_plugin_review_signing_trust_overall -v` passed with 14 tests.
+- `PYTHONPATH=src:tests python3 -m unittest test_mcp_proxy_governance_phase3 test_mcp_security_scans_phase2 test_mcp_security_scans_phase3 -v` passed with 11 tests.
+- `PYTHONPATH=src:tests python3 -m unittest test_mcp_security_scans_overall -v` passed with 1 test.
+- `git diff --check` passed.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
+
 **Status:** Partially Implemented
 
 **Current implementation:**
@@ -233,6 +392,42 @@ Security features can regress while tests remain green.
 **Affects stated Ophanix product promise:** Yes
 
 ### F-TST-005 [P2] [Developer Experience] SDK package identity and contract coverage are split
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Clarified the SDK package identity story so `ophanix-python-sdk` is the canonical public Python distribution and `ophanix-tool-gateway-sdk` is documented as the Product Platform internal compatibility package that shares the stable `ophanix_tool_gateway` import path. Added the exact standalone SDK live/shared contract regression to the standalone SDK test suite, plus Product Platform tests that enforce SDK package metadata/docs consistency and compile-smoke the Product Platform README SDK example.
+
+**Files changed:**
+- `packages/product-platform/README.md`
+- `packages/product-platform/tests/test_tests_docs_production_readiness_phase5.py`
+- `packages/ophanix-tool-gateway-sdk/README.md`
+- `/Users/igodju/Projects/Personal/ophanix/ophanix-python-sdk/README.md`
+- `/Users/igodju/Projects/Personal/ophanix/ophanix-python-sdk/tests/test_sdk_behavior.py`
+
+**Tests added or updated:**
+- `test_sdk_behavior.py::StandaloneSdkBehaviorTests::test_standalone_sdk_live_gateway_contract`
+- `test_tests_docs_production_readiness_phase5.py::test_sdk_package_metadata_docs_consistency`
+- `test_tests_docs_production_readiness_phase5.py::test_product_platform_readme_sdk_example_smoke`
+
+**Validation performed:**
+- `PYTHONPATH=src:tests python3 -m unittest test_sdk_behavior.StandaloneSdkBehaviorTests.test_standalone_sdk_live_gateway_contract -v` passed with 1 test.
+- `PYTHONPATH=src:tests python3 -m unittest test_tests_docs_production_readiness_phase5 -v` passed with 2 tests.
+- `python3 -m py_compile tests/test_sdk_behavior.py tests/test_package_smoke.py` passed in `ophanix-python-sdk`.
+- `python3 -m ruff check tests/test_sdk_behavior.py tests/test_package_smoke.py` passed in `ophanix-python-sdk`.
+- `python3 -m py_compile tests/test_tests_docs_production_readiness_phase5.py` passed in Product Platform.
+- `python3 -m ruff check tests/test_tests_docs_production_readiness_phase5.py` passed in Product Platform.
+- `PYTHONPATH=src python3 -m pytest tests -q --tb=short` passed with 35 tests in `ophanix-python-sdk`.
+- `PYTHONPATH=src:tests python3 -m unittest test_tests_docs_production_readiness_phase5 test_tool_gateway_installed_sdk_contract -v` passed with 6 tests in Product Platform.
+- `python3 -m mypy src/ophanix_tool_gateway` passed in `ophanix-python-sdk`.
+- `python3 scripts/validate_release.py --out-dir /tmp/ophanix-python-sdk-release-check-phase5 --skip-twine-check` passed in `ophanix-python-sdk`.
+- `git diff --check` passed in both `ophanix-platform` and `ophanix-python-sdk`.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Inconsistent
 
@@ -346,4 +541,3 @@ None.
 ## 7. Feature-Level Target State
 
 Production readiness should be evidence-driven. Every major product promise should map to unit, integration, e2e, CI, release gate, and operational drill coverage. CI should run backend with Postgres/migrations, frontend validation/e2e, live SDK contracts, image smoke, dependency review, SBOM, provenance, and security scans. Runtime tests should prove crash recovery, replay, idempotency, DLQ, and policy persistence. Auth tests should prove enterprise IdP behavior. Plugin/MCP tests should prove real provenance and scan gates. Docs should state only verified guarantees and link to tests or readiness checks.
-

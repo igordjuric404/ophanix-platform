@@ -6,11 +6,18 @@ Configure the pilot IdP with:
 
 - `OPHANIX_IDP_ISSUER_URL`
 - `OPHANIX_IDP_AUDIENCE`
+- `OPHANIX_IDP_JWKS_URL` or `OPHANIX_IDP_JWKS_JSON`
+- `OPHANIX_IDP_GROUPS_CLAIM` if your IdP uses a non-default groups claim
+- `OPHANIX_IDP_GROUP_ROLE_MAP_JSON` for group-to-role mapping
 - Callback URL: `https://app.example.com/auth/callback`
 - Logout URL: `https://app.example.com/auth/logout`
 
-Pilot users should be assigned through IdP groups mapped to product roles.
-Disable dev login by leaving `OPHANIX_DEV_LOGIN_ALLOWED_EMAILS` empty.
+Pilot users should be assigned through IdP groups mapped to product roles. The
+current production auth implementation verifies OIDC/JWKS bearer tokens,
+issuer, audience, expiry, signature, group-to-role mapping, and claimed
+environment access. SAML and SCIM are not implemented in this deployment path.
+Disable development login in production by setting `OPHANIX_ENABLE_DEV_LOGIN`
+to `false` and leaving `OPHANIX_DEV_LOGIN_ALLOWED_EMAILS` empty.
 
 ## TLS
 

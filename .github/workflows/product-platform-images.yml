@@ -7,6 +7,11 @@ on:
       - "packages/product-platform/**"
       - ".github/workflows/product-platform-images.yml"
 
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -30,4 +35,7 @@ jobs:
           file: ${{ matrix.image.dockerfile }}
           push: false
           tags: ophanix/product-platform-${{ matrix.image.name }}:${{ github.sha }}
-          provenance: false
+          provenance: true
+      - name: Smoke product platform images
+        if: matrix.image.name == 'api'
+        run: packages/product-platform/deploy/cloud/smoke-images.sh

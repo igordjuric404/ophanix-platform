@@ -31,6 +31,8 @@ jobs:
       go: ${{ steps.filter.outputs.go }}
       workflows: ${{ steps.filter.outputs.workflows }}
       docs-only: ${{ steps.filter.outputs.docs-only }}
+      product-platform: ${{ steps.filter.outputs.product-platform }}
+      product-platform-frontend: ${{ steps.filter.outputs.product-platform-frontend }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
@@ -65,6 +67,8 @@ jobs:
               - 'packages/agent-lightning/**'
             product-platform:
               - 'packages/product-platform/**'
+            product-platform-frontend:
+              - 'packages/product-platform/frontend/**'
             ophanix-tool-gateway-sdk:
               - 'packages/ophanix-tool-gateway-sdk/**'
             dotnet:
@@ -265,6 +269,77 @@ jobs:
           python -m pip install --no-cache-dir -e ".[dev]"
           python -m pip install --no-cache-dir --force-reinstall "httpx==0.27.0"
           pytest tests/ -q --tb=short
+
+  # ── Product Platform production path (Postgres + migrations + backend tests) ──
+  product-platform-backend-postgres:
+    needs: changes
+    if: needs.changes.outputs['product-platform'] == 'true' || needs.changes.outputs.workflows == 'true' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: ophanix_product
+          POSTGRES_USER: ophanix
+          POSTGRES_PASSWORD: ophanix-local
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ophanix -d ophanix_product"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      OPHANIX_DATABASE_URL: postgresql://ophanix:ophanix-local@127.0.0.1:5432/ophanix_product
+      OPHANIX_TEST_POSTGRES_URL: postgresql://ophanix:ophanix-local@127.0.0.1:5432/ophanix_product
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.11"
+      - name: Install Product Platform
+        working-directory: packages/product-platform
+        run: |
+          pip install --no-cache-dir -e ../agent-os -e ../agent-discovery -e ../agent-mesh -e ".[dev]"
+      - name: Run Product Platform migrations and backend tests with Postgres
+        working-directory: packages/product-platform
+        run: |
+          python -m product_platform.cli db migrate
+          pytest tests/ -q --tb=short
+
+  # ── Product Platform frontend validation (lint + typecheck + unit + e2e + build) ──
+  product-platform-frontend:
+    needs: changes
+    if: needs.changes.outputs['product-platform'] == 'true' || needs.changes.outputs['product-platform-frontend'] == 'true' || needs.changes.outputs.workflows == 'true' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: packages/product-platform/frontend/package-lock.json
+      - name: Install Product Platform frontend dependencies
+        working-directory: packages/product-platform/frontend
+        run: npm ci
+      - name: Lint Product Platform frontend
+        working-directory: packages/product-platform/frontend
+        run: npm run lint
+      - name: Typecheck Product Platform frontend
+        working-directory: packages/product-platform/frontend
+        run: npm run typecheck
+      - name: Test Product Platform frontend
+        working-directory: packages/product-platform/frontend
+        run: npm test
+      - name: Install Playwright browser
+        working-directory: packages/product-platform/frontend
+        run: npx playwright install --with-deps chromium
+      - name: Run Product Platform frontend e2e smoke
+        working-directory: packages/product-platform/frontend
+        run: npm run test:e2e -- --project=chromium
+      - name: Build Product Platform frontend
+        working-directory: packages/product-platform/frontend
+        run: npm run build
 
   # ── Python dependency safety (only when Python files change) ──────────
   security:
@@ -576,7 +651,7 @@ jobs:
   # success. Configure this as the single required status check.
   ci-complete:
     if: always()
-    needs: [changes, lint, test, build-pypi, security, test-dotnet, test-integrations, dependency-scan, workflow-security, test-integrations-ts, build-npm, build-rust, build-go]
+    needs: [changes, lint, test, build-pypi, product-platform-backend-postgres, product-platform-frontend, security, test-dotnet, test-integrations, dependency-scan, workflow-security, test-integrations-ts, build-npm, build-rust, build-go]
     runs-on: ubuntu-latest
     steps:
       - name: Check job results

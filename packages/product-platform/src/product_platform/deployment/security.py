@@ -17,13 +17,21 @@ class SecurityCheck:
 def cloud_security_checks(settings: Settings) -> list[SecurityCheck]:
     """Return IdP, TLS, network, and CORS configuration status."""
 
+    idp_configured = bool(
+        settings.idp_issuer_url
+        and settings.idp_audience
+        and (settings.idp_jwks_url or settings.idp_jwks_json)
+    )
     return [
         SecurityCheck(
             key="identity_provider",
-            status="healthy" if settings.idp_issuer_url and settings.idp_audience else "missing",
-            detail="Identity provider issuer and audience are configured."
-            if settings.idp_issuer_url and settings.idp_audience
-            else "OPHANIX_IDP_ISSUER_URL and OPHANIX_IDP_AUDIENCE are required.",
+            status="healthy" if idp_configured else "missing",
+            detail="Identity provider issuer, audience, and JWKS are configured."
+            if idp_configured
+            else (
+                "OPHANIX_IDP_ISSUER_URL, OPHANIX_IDP_AUDIENCE, and "
+                "OPHANIX_IDP_JWKS_URL or OPHANIX_IDP_JWKS_JSON are required."
+            ),
         ),
         SecurityCheck(
             key="tls",

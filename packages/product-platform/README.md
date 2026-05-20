@@ -155,7 +155,7 @@ runtime support, PyPI package publication, and artifact SBOM generation are
 implemented. Multi-worker/load evidence, final provenance handoff, and
 deployment egress enforcement remain post-MVP hardening.
 
-The standalone package README in `../ophanix-tool-gateway-sdk/README.md` contains the fuller API reference, troubleshooting guide, retry options, and concurrency notes.
+The internal compatibility package README in `../ophanix-tool-gateway-sdk/README.md` mirrors the Tool Gateway client API used by the public `ophanix-python-sdk` distribution and contains the fuller API reference, troubleshooting guide, retry options, and concurrency notes.
 
 Security and operations references:
 

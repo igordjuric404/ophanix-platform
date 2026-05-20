@@ -1608,6 +1608,9 @@ test("dev login and top-level navigation smoke", async ({ page }) => {
     await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible();
   }
   await page.getByRole("link", { name: "Agents" }).click();
+  const smokeAgentRow = page.locator('[data-agent-row="agent_smoke"]');
+  await expect(smokeAgentRow.getByRole("cell", { name: "Smoke Agent" })).toBeVisible();
+  await smokeAgentRow.getByRole("button", { name: "Open" }).click();
   await expect(page.getByRole("heading", { name: "Smoke Agent" })).toBeVisible();
   await page.getByRole("link", { name: "Discovery" }).click();
   await expect(page.getByText("Config Scanner")).toBeVisible();
@@ -1620,6 +1623,9 @@ test("dev login and top-level navigation smoke", async ({ page }) => {
   await expect(page.getByText("SOC 2 Smoke Report").first()).toBeVisible();
   await page.getByRole("link", { name: "Trust" }).click();
   await expect(page.getByText("Agent Trust Scores")).toBeVisible();
+  const trustCardRow = page.locator('[data-trust-card-row="tcard_smoke"]');
+  await expect(trustCardRow.getByRole("cell", { name: /Smoke Agent/ })).toBeVisible();
+  await trustCardRow.getByRole("button", { name: "Open" }).click();
   await expect(page.getByText("did:mesh:smoke").first()).toBeVisible();
   await page.getByRole("link", { name: "Mesh" }).click();
   await expect(page.getByText("Live Edges")).toBeVisible();
