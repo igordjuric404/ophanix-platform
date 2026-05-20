@@ -9,6 +9,7 @@ from product_platform.api.settings import Settings
 from product_platform.db.seed import seed_demo_data
 from product_platform.db.testing import create_migrated_test_database
 from product_platform.marketplace.samples import sample_plugin_manifests
+from marketplace_security_helpers import ed25519_key_pair, signed_manifest
 
 
 class MarketplaceInstallationPhase3Tests(unittest.TestCase):
@@ -34,6 +35,13 @@ class MarketplaceInstallationPhase3Tests(unittest.TestCase):
         )
         self.assertEqual(login.status_code, 200, login.text)
         self.token = login.json()["access_token"]
+        self.private_key, self.public_key = ed25519_key_pair()
+        signing_key = self.client.post(
+            "/api/v1/marketplace/signing-keys",
+            headers=self._headers(),
+            json={"name": "Install Test Root", "public_key": self.public_key},
+        )
+        self.assertEqual(signing_key.status_code, 201, signing_key.text)
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -56,6 +64,7 @@ class MarketplaceInstallationPhase3Tests(unittest.TestCase):
             headers=self._headers(),
             json={
                 "require_signature": True,
+                "require_artifact_evidence": True,
                 "allowed_plugin_types": ["agent"],
                 "allowed_capabilities": ["tickets:read", "tickets:route"],
             },
@@ -64,7 +73,7 @@ class MarketplaceInstallationPhase3Tests(unittest.TestCase):
         self.assertEqual(response.json()["result"], "allow")
 
     def test_install_allowed_plugin(self) -> None:
-        plugin = self._import_manifest(sample_plugin_manifests()[0])
+        plugin = self._import_manifest(signed_manifest(sample_plugin_manifests()[0], self.private_key))
         version_id = plugin["versions"][0]["id"]
         self._check_allow(version_id)
 
@@ -85,7 +94,7 @@ class MarketplaceInstallationPhase3Tests(unittest.TestCase):
         self.assertEqual(listed.json()[0]["id"], payload["id"])
 
     def test_duplicate_active_install_is_rejected(self) -> None:
-        plugin = self._import_manifest(sample_plugin_manifests()[0])
+        plugin = self._import_manifest(signed_manifest(sample_plugin_manifests()[0], self.private_key))
         version_id = plugin["versions"][0]["id"]
         self._check_allow(version_id)
         first = self.client.post(
@@ -127,7 +136,7 @@ class MarketplaceInstallationPhase3Tests(unittest.TestCase):
         self.assertIn("denies installation", installed.json()["message"])
 
     def test_uninstall_updates_status(self) -> None:
-        plugin = self._import_manifest(sample_plugin_manifests()[0])
+        plugin = self._import_manifest(signed_manifest(sample_plugin_manifests()[0], self.private_key))
         version_id = plugin["versions"][0]["id"]
         self._check_allow(version_id)
         installed = self.client.post(
@@ -147,7 +156,7 @@ class MarketplaceInstallationPhase3Tests(unittest.TestCase):
         self.assertIsNotNone(payload["uninstalled_at"])
 
     def test_install_emits_audit_event(self) -> None:
-        plugin = self._import_manifest(sample_plugin_manifests()[0])
+        plugin = self._import_manifest(signed_manifest(sample_plugin_manifests()[0], self.private_key))
         version_id = plugin["versions"][0]["id"]
         self._check_allow(version_id)
         installed = self.client.post(

@@ -9,6 +9,7 @@ from product_platform.api.settings import Settings
 from product_platform.db.seed import seed_demo_data
 from product_platform.db.testing import create_migrated_test_database
 from product_platform.marketplace.samples import sample_plugin_manifests
+from marketplace_security_helpers import ed25519_key_pair, signed_manifest
 
 
 class PluginReviewWorkflowPhase1Tests(unittest.TestCase):
@@ -30,6 +31,13 @@ class PluginReviewWorkflowPhase1Tests(unittest.TestCase):
         self.client = TestClient(self.app, raise_server_exceptions=False)
         self.admin_token = self._login("reviewer@example.com", ["Platform Admin"])
         self.viewer_token = self._login("viewer@example.com", ["Viewer"])
+        self.private_key, self.public_key = ed25519_key_pair()
+        signing_key = self.client.post(
+            "/api/v1/marketplace/signing-keys",
+            headers=self._headers(),
+            json={"name": "Review Test Root", "public_key": self.public_key},
+        )
+        self.assertEqual(signing_key.status_code, 201, signing_key.text)
 
     def _login(self, email: str, roles: list[str]) -> str:
         response = self.client.post(
@@ -46,11 +54,12 @@ class PluginReviewWorkflowPhase1Tests(unittest.TestCase):
         }
 
     def _import_review_required_plugin(self) -> dict:
-        manifest = {
-            **sample_plugin_manifests()[0],
-            "name": "review-required-assistant",
-            "review_required": True,
-        }
+        manifest = signed_manifest(
+            sample_plugin_manifests()[0],
+            self.private_key,
+            name="review-required-assistant",
+            review_required=True,
+        )
         response = self.client.post(
             "/api/v1/marketplace/plugins/import",
             headers=self._headers(),
@@ -123,7 +132,11 @@ class PluginReviewWorkflowPhase1Tests(unittest.TestCase):
         allowed = self.client.post(
             f"/api/v1/marketplace/plugins/{version_id}/check-policy",
             headers=self._headers(),
-            json={"require_signature": True, "allowed_plugin_types": ["agent"]},
+            json={
+                "require_signature": True,
+                "require_artifact_evidence": True,
+                "allowed_plugin_types": ["agent"],
+            },
         )
         self.assertEqual(allowed.status_code, 201, allowed.text)
         self.assertEqual(allowed.json()["result"], "allow")
@@ -142,6 +155,18 @@ class PluginReviewWorkflowPhase1Tests(unittest.TestCase):
             json={"decision_reason": "Review passed"},
         )
         self.assertEqual(approved.status_code, 200, approved.text)
+        approved_policy = self.client.post(
+            f"/api/v1/marketplace/plugins/{version_id}/check-policy",
+            headers=self._headers(),
+            json={
+                "require_signature": True,
+                "require_artifact_evidence": True,
+                "require_review_approval": True,
+                "allowed_plugin_types": ["agent"],
+            },
+        )
+        self.assertEqual(approved_policy.status_code, 201, approved_policy.text)
+        self.assertEqual(approved_policy.json()["result"], "allow")
         installed = self.client.post(
             "/api/v1/marketplace/installations",
             headers=self._headers(),

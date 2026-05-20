@@ -16,6 +16,7 @@ class PluginPolicyInput:
     signature_status: str
     required_capabilities: list[str]
     manifest: dict[str, Any]
+    artifact_evidence_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,15 @@ def evaluate_plugin_policy(
                     details={"review_status": review_status},
                 )
             )
+    if request.require_artifact_evidence and plugin.artifact_evidence_status != "passed":
+        findings.append(
+            _finding(
+                "artifact_evidence_required",
+                "Plugin must have passing artifact provenance and scan evidence before installation.",
+                field="artifact_evidence",
+                details={"artifact_evidence_status": plugin.artifact_evidence_status or "missing"},
+            )
+        )
     return PluginPolicyEvaluation(result="deny" if findings else "allow", findings=findings)
 
 

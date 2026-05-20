@@ -10,6 +10,8 @@ from product_platform.agents.lifecycle import agent_non_operational_message, is_
 from product_platform.db.ids import generate_id
 from product_platform.db.time import utc_now_iso
 from product_platform.marketplace.models import (
+    PluginArtifactEvidenceResponse,
+    PluginArtifactEvidenceSubmitRequest,
     PluginInstallationCreateRequest,
     PluginInstallationResponse,
     NormalizedPluginManifest,
@@ -28,14 +30,20 @@ from product_platform.marketplace.models import (
     PluginVersionResponse,
     normalize_plugin_manifest,
 )
+from product_platform.marketplace.artifact_evidence import (
+    evaluate_plugin_artifact_evidence,
+    normalize_plugin_artifact_evidence,
+)
 from product_platform.marketplace.policy import PluginPolicyInput, evaluate_plugin_policy
 from product_platform.marketplace.quality import assess_plugin_quality
-from product_platform.marketplace.signing import verify_plugin_signature_with_key
+from product_platform.marketplace.signing import ed25519_public_key_fingerprint, verify_plugin_signature_with_key
 from product_platform.marketplace.usage_trust import (
     PluginUsageSignals,
     compute_usage_trust_delta,
     trust_tier_for_score,
 )
+from product_platform.tool_gateway.models import AgentToolPermissionGrantRequest
+from product_platform.tool_gateway.repository import ToolRegistryRepository
 
 
 class MarketplaceManifestError(ValueError):
@@ -74,6 +82,10 @@ class PluginSigningKeyNotFoundError(ValueError):
     """Raised when a signing key is not visible in tenant scope."""
 
 
+class PluginArtifactEvidenceBlockedError(ValueError):
+    """Raised when artifact evidence is missing or blocks installation."""
+
+
 class MarketplaceCatalogRepository:
     """Tenant-scoped marketplace catalog repository."""
 
@@ -81,7 +93,7 @@ class MarketplaceCatalogRepository:
         self.connection = connection
         self.organization_id = organization_id
 
-    def import_plugin(self, body: PluginImportRequest) -> Row:
+    def import_plugin(self, body: PluginImportRequest, *, imported_by: str | None = None) -> Row:
         """Import or update one plugin version from a validated manifest."""
 
         try:
@@ -135,6 +147,12 @@ class MarketplaceCatalogRepository:
                 ),
             )
         self._upsert_version(plugin_id, normalized, now=now)
+        if body.status == "disabled":
+            self._revoke_runtime_tool_grants_for_plugin(
+                plugin_id,
+                actor_id=imported_by or "system",
+                reason="Marketplace plugin was disabled.",
+            )
         row = self.get_plugin(plugin_id)
         if row is None:
             raise PluginNotFoundError("Imported plugin could not be loaded.")
@@ -245,23 +263,30 @@ class MarketplaceCatalogRepository:
                 signature_status=self.signature_status_for_version(version_id),
                 required_capabilities=json.loads(version["required_capabilities_json"]),
                 manifest=manifest,
+                artifact_evidence_status=self.artifact_evidence_status_for_version(version_id),
             ),
             body,
         )
+        findings = list(evaluation.findings)
+        if body.require_artifact_evidence:
+            artifact_evaluation = self.evaluate_artifact_evidence_for_version(version_id)
+            findings.extend(artifact_evaluation.findings)
+            evaluation = type(evaluation)(result="deny" if findings else "allow", findings=findings)
         result_id = generate_id("plugpol")
         created_at = utc_now_iso()
         self.connection.execute(
             """
             INSERT INTO plugin_policy_results (
-                id, plugin_version_id, result, findings_json, created_at
+                id, plugin_version_id, result, findings_json, policy_input_json, created_at
             )
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 result_id,
                 version_id,
                 evaluation.result,
                 canonical_json(evaluation.findings),
+                canonical_json(body.model_dump(mode="json")),
                 created_at,
             ),
         )
@@ -306,7 +331,7 @@ class MarketplaceCatalogRepository:
         """Return false when the latest policy result denies install."""
 
         latest = self.latest_policy_result_for_version(version_id)
-        return latest is None or latest["result"] != "deny"
+        return latest is not None and latest["result"] == "allow"
 
     def create_installation(
         self,
@@ -316,19 +341,41 @@ class MarketplaceCatalogRepository:
     ) -> Row:
         """Install a plugin version into an environment or target agent."""
 
-        if self.get_version(body.plugin_version_id) is None:
+        version = self.get_version(body.plugin_version_id)
+        if version is None:
             raise PluginNotFoundError("Plugin version not found.")
         self._require_environment(body.environment_id)
         if body.target_agent_id:
             self._require_agent(body.target_agent_id, body.environment_id)
-        if self._version_requires_review(body.plugin_version_id) and not self.version_review_approved(
-            body.plugin_version_id
-        ):
-            raise PluginInstallationBlockedError("Plugin review approval is required before installation.")
-        if self.latest_policy_result_for_version(body.plugin_version_id) is None:
-            self.check_policy(body.plugin_version_id, PluginPolicyCheckRequest())
-        if not self.version_install_allowed(body.plugin_version_id):
+        latest_policy = self.latest_policy_result_for_version(body.plugin_version_id)
+        if latest_policy is None:
+            raise PluginInstallationBlockedError("Explicit marketplace policy result is required before installation.")
+        if str(latest_policy["created_at"]) < str(version["updated_at"]):
+            raise PluginInstallationBlockedError("Plugin policy result is stale and must be recomputed.")
+        if latest_policy["result"] != "allow":
             raise PluginInstallationBlockedError("Plugin policy result denies installation.")
+        policy_input = json.loads(latest_policy["policy_input_json"])
+        missing_requirements = [
+            field
+            for field in ("require_signature", "require_artifact_evidence")
+            if not bool(policy_input.get(field))
+        ]
+        review = self._latest_review(body.plugin_version_id)
+        if self._version_requires_review(body.plugin_version_id):
+            if not bool(policy_input.get("require_review_approval")):
+                missing_requirements.append("require_review_approval")
+            if review is None or review["status"] != "approved":
+                raise PluginInstallationBlockedError("Plugin review approval is required before installation.")
+        if missing_requirements:
+            joined = ", ".join(missing_requirements)
+            raise PluginInstallationBlockedError(f"Plugin policy result is missing required install gates: {joined}.")
+        artifact_evaluation = self.evaluate_artifact_evidence_for_version(body.plugin_version_id)
+        if artifact_evaluation.findings:
+            codes = ", ".join(finding["code"] for finding in artifact_evaluation.findings)
+            raise PluginInstallationBlockedError(f"Plugin artifact evidence blocks installation: {codes}.")
+        artifact_evidence = self.artifact_evidence_for_version(body.plugin_version_id)
+        if artifact_evidence is None:
+            raise PluginInstallationBlockedError("Plugin artifact evidence is required before installation.")
         if self._active_installation(
             body.plugin_version_id,
             body.environment_id,
@@ -342,15 +389,19 @@ class MarketplaceCatalogRepository:
                 """
                 INSERT INTO plugin_installations (
                     id, plugin_version_id, environment_id, target_agent_id,
+                    policy_result_id, review_id, artifact_evidence_id,
                     status, installed_by, installed_at, uninstalled_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     installation_id,
                     body.plugin_version_id,
                     body.environment_id,
                     body.target_agent_id,
+                    latest_policy["id"],
+                    review["id"] if review is not None and review["status"] == "approved" else None,
+                    artifact_evidence["id"],
                     "installed",
                     installed_by,
                     now,
@@ -359,6 +410,14 @@ class MarketplaceCatalogRepository:
             )
         except IntegrityError as exc:
             raise PluginInstallationStateError("Plugin version is already installed for this target.") from exc
+        self._materialize_runtime_tool_grants(
+            installation_id,
+            version=version,
+            body=body,
+            actor_id=installed_by,
+            created_at=now,
+            policy_result_id=latest_policy["id"],
+        )
         row = self.get_installation(installation_id)
         if row is None:
             raise PluginInstallationNotFoundError("Created installation could not be loaded.")
@@ -419,7 +478,7 @@ class MarketplaceCatalogRepository:
             (installation_id, self.organization_id),
         ).fetchone()
 
-    def uninstall(self, installation_id: str) -> Row:
+    def uninstall(self, installation_id: str, *, actor_id: str = "system") -> Row:
         """Mark an installed plugin as uninstalled."""
 
         existing = self.get_installation(installation_id)
@@ -437,10 +496,58 @@ class MarketplaceCatalogRepository:
             """,
             ("uninstalled", now, installation_id),
         )
+        self._revoke_runtime_tool_grants_for_installation(
+            installation_id,
+            actor_id=actor_id,
+            reason="Marketplace plugin was uninstalled.",
+            revoked_at=now,
+        )
         row = self.get_installation(installation_id)
         if row is None:
             raise PluginInstallationNotFoundError("Plugin installation not found.")
         return row
+
+    def list_runtime_tool_grants_for_installation(self, installation_id: str) -> list[Row]:
+        """List runtime tool grants materialized from one marketplace installation."""
+
+        return self.connection.execute(
+            """
+            SELECT
+                g.*,
+                d.display_name AS tool_display_name,
+                p.status AS agent_tool_permission_status
+            FROM plugin_runtime_tool_grants g
+            JOIN plugin_versions v ON v.id = g.plugin_version_id
+            JOIN plugins plugin ON plugin.id = v.plugin_id
+            JOIN tool_definitions d ON d.id = g.tool_id
+            LEFT JOIN agent_tool_permissions p ON p.id = g.agent_tool_permission_id
+            WHERE g.installation_id = ?
+              AND plugin.organization_id = ?
+            ORDER BY g.created_at DESC, g.id DESC
+            """,
+            (installation_id, self.organization_id),
+        ).fetchall()
+
+    def list_runtime_tool_grants_for_plugin(self, plugin_id: str) -> list[Row]:
+        """List runtime tool grants materialized from all versions of one plugin."""
+
+        return self.connection.execute(
+            """
+            SELECT
+                g.*,
+                d.display_name AS tool_display_name,
+                p.status AS agent_tool_permission_status
+            FROM plugin_runtime_tool_grants g
+            JOIN plugin_versions v ON v.id = g.plugin_version_id
+            JOIN plugins plugin ON plugin.id = v.plugin_id
+            JOIN tool_definitions d ON d.id = g.tool_id
+            LEFT JOIN agent_tool_permissions p ON p.id = g.agent_tool_permission_id
+            WHERE plugin.id = ?
+              AND plugin.organization_id = ?
+            ORDER BY g.created_at DESC, g.id DESC
+            """,
+            (plugin_id, self.organization_id),
+        ).fetchall()
 
     def submit_review(self, version_id: str, body: PluginReviewSubmitRequest) -> Row:
         """Submit a plugin version for review."""
@@ -568,18 +675,25 @@ class MarketplaceCatalogRepository:
         key_id = generate_id("plugkey")
         created_at = utc_now_iso()
         revoked_at = created_at if body.status == "revoked" else None
+        fingerprint = ed25519_public_key_fingerprint(body.public_key)
         self.connection.execute(
             """
             INSERT INTO plugin_signing_keys (
-                id, organization_id, name, public_key, status, created_by, created_at, revoked_at
+                id, organization_id, name, public_key, key_type,
+                trusted_root_id, public_key_fingerprint, metadata_json,
+                status, created_by, created_at, revoked_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 key_id,
                 self.organization_id,
                 body.name,
                 body.public_key,
+                body.key_type,
+                body.trusted_root_id,
+                fingerprint,
+                canonical_json(body.metadata),
                 body.status,
                 created_by,
                 created_at,
@@ -650,15 +764,75 @@ class MarketplaceCatalogRepository:
             return "unsigned"
         keys = self.list_signing_keys()
         if not keys:
-            return version["signature_status"]
+            return "untrusted"
         for key in keys:
             if verify_plugin_signature_with_key(
                 manifest,
                 public_key=key["public_key"],
                 key_status=key["status"],
+                key_type=key["key_type"],
             ):
                 return "signed"
         return "invalid"
+
+    def submit_artifact_evidence(self, version_id: str, body: PluginArtifactEvidenceSubmitRequest) -> Row:
+        """Persist artifact provenance and scan evidence for a plugin version."""
+
+        version = self.get_version(version_id)
+        if version is None:
+            raise PluginNotFoundError("Plugin version not found.")
+        evidence = normalize_plugin_artifact_evidence(body.artifact_evidence)
+        return self._upsert_artifact_evidence(
+            version_id,
+            package_ref=version["package_ref"],
+            evidence=evidence,
+        )
+
+    def artifact_evidence_for_version(self, version_id: str) -> Row | None:
+        """Return persisted artifact evidence for a plugin version."""
+
+        return self.connection.execute(
+            """
+            SELECT ae.*
+            FROM plugin_artifact_evidence ae
+            JOIN plugin_versions v ON v.id = ae.plugin_version_id
+            JOIN plugins p ON p.id = v.plugin_id
+            WHERE ae.plugin_version_id = ?
+              AND p.organization_id = ?
+            """,
+            (version_id, self.organization_id),
+        ).fetchone()
+
+    def artifact_evidence_status_for_version(self, version_id: str) -> str | None:
+        evidence = self.artifact_evidence_for_version(version_id)
+        return evidence["status"] if evidence is not None else None
+
+    def evaluate_artifact_evidence_for_version(self, version_id: str):
+        evidence = self.artifact_evidence_for_version(version_id)
+        if evidence is None:
+            return evaluate_plugin_artifact_evidence(None)
+        evaluation = evaluate_plugin_artifact_evidence(_artifact_evidence_dict(evidence))
+        version = self.get_version(version_id)
+        if version is None:
+            raise PluginNotFoundError("Plugin version not found.")
+        manifest = json.loads(version["manifest_json"])
+        manifest_digest = str(manifest.get("package_digest") or "").removeprefix("sha256:").lower()
+        if manifest_digest != evidence["artifact_digest"]:
+            findings = [
+                *evaluation.findings,
+                {
+                    "code": "artifact_digest_not_signature_bound",
+                    "severity": "blocking",
+                    "field": "package_digest",
+                    "message": "Plugin artifact digest must be bound into the signed manifest.",
+                    "details": {
+                        "manifest_package_digest": manifest_digest or None,
+                        "artifact_digest": evidence["artifact_digest"],
+                    },
+                },
+            ]
+            return type(evaluation)(status="blocked", findings=findings)
+        return evaluation
 
     def assess_quality(self, version_id: str) -> Row:
         """Assess and persist quality for a plugin version."""
@@ -817,6 +991,179 @@ class MarketplaceCatalogRepository:
             (event_id, self.organization_id),
         ).fetchone()
 
+    def _materialize_runtime_tool_grants(
+        self,
+        installation_id: str,
+        *,
+        version: Row,
+        body: PluginInstallationCreateRequest,
+        actor_id: str,
+        created_at: str,
+        policy_result_id: str,
+    ) -> None:
+        """Create Tool Gateway permissions from signed marketplace manifest grants."""
+
+        manifest = json.loads(version["manifest_json"])
+        specs = _runtime_tool_grant_specs(
+            manifest,
+            signed_capabilities=json.loads(version["required_capabilities_json"]),
+        )
+        if not specs:
+            return
+        if body.target_agent_id is None:
+            raise PluginInstallationBlockedError(
+                "Target agent is required before installing a plugin with runtime tool grants."
+            )
+        registry = ToolRegistryRepository(self.connection, self.organization_id, body.environment_id)
+        for spec in specs:
+            tool = registry.get_tool_by_name(spec["tool_name"], active_only=True)
+            if tool is None:
+                raise PluginInstallationBlockedError(
+                    f"Runtime tool grant references unknown or inactive tool: {spec['tool_name']}."
+                )
+            required_scope = str(tool["required_scope"])
+            requested_scope = spec.get("scope")
+            if requested_scope is not None and requested_scope != required_scope:
+                raise PluginInstallationBlockedError(
+                    "Runtime tool grant scope must match the registered Tool Gateway scope "
+                    f"for {spec['tool_name']}."
+                )
+            permission = registry.find_active_agent_tool_permission(
+                agent_id=body.target_agent_id,
+                tool_id=tool["id"],
+                scope=required_scope,
+            )
+            owns_permission = 0
+            if permission is None:
+                permission = registry.grant_agent_tool_permission(
+                    body.target_agent_id,
+                    AgentToolPermissionGrantRequest(
+                        tool_id=tool["id"],
+                        scope=required_scope,
+                        granted_reason=(
+                            "Marketplace install "
+                            f"{installation_id} approved plugin runtime tool {spec['tool_name']}."
+                        ),
+                    ),
+                    granted_by=actor_id,
+                )
+                owns_permission = 1
+            grant_id = generate_id("plugrtg")
+            self.connection.execute(
+                """
+                INSERT INTO plugin_runtime_tool_grants (
+                    id, installation_id, plugin_version_id, organization_id,
+                    environment_id, agent_id, tool_id, agent_tool_permission_id,
+                    tool_name, scope, capability, permission, risk_class, status,
+                    owns_agent_tool_permission, created_by, created_at, metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    grant_id,
+                    installation_id,
+                    version["id"],
+                    self.organization_id,
+                    body.environment_id,
+                    body.target_agent_id,
+                    tool["id"],
+                    permission["id"],
+                    tool["name"],
+                    required_scope,
+                    spec.get("capability"),
+                    spec.get("permission"),
+                    spec.get("risk_class"),
+                    "active",
+                    owns_permission,
+                    actor_id,
+                    created_at,
+                    canonical_json(
+                        {
+                            "manifest_tool": spec,
+                            "policy_result_id": policy_result_id,
+                            "source": "marketplace_plugin_install",
+                        }
+                    ),
+                ),
+            )
+
+    def _revoke_runtime_tool_grants_for_plugin(
+        self,
+        plugin_id: str,
+        *,
+        actor_id: str,
+        reason: str,
+    ) -> None:
+        installations = self.connection.execute(
+            """
+            SELECT i.id
+            FROM plugin_installations i
+            JOIN plugin_versions v ON v.id = i.plugin_version_id
+            WHERE v.plugin_id = ?
+              AND i.status = 'installed'
+            """,
+            (plugin_id,),
+        ).fetchall()
+        revoked_at = utc_now_iso()
+        for installation in installations:
+            self.connection.execute(
+                """
+                UPDATE plugin_installations
+                SET status = ?,
+                    uninstalled_at = ?
+                WHERE id = ?
+                """,
+                ("disabled", revoked_at, installation["id"]),
+            )
+            self._revoke_runtime_tool_grants_for_installation(
+                installation["id"],
+                actor_id=actor_id,
+                reason=reason,
+                revoked_at=revoked_at,
+            )
+
+    def _revoke_runtime_tool_grants_for_installation(
+        self,
+        installation_id: str,
+        *,
+        actor_id: str,
+        reason: str,
+        revoked_at: str,
+    ) -> None:
+        grants = self.connection.execute(
+            """
+            SELECT *
+            FROM plugin_runtime_tool_grants
+            WHERE installation_id = ?
+              AND status = 'active'
+            ORDER BY created_at DESC, id DESC
+            """,
+            (installation_id,),
+        ).fetchall()
+        for grant in grants:
+            if int(grant["owns_agent_tool_permission"]) == 1 and grant["agent_tool_permission_id"]:
+                registry = ToolRegistryRepository(
+                    self.connection,
+                    self.organization_id,
+                    grant["environment_id"],
+                )
+                registry.revoke_agent_tool_permission(
+                    grant["agent_tool_permission_id"],
+                    actor_id=actor_id,
+                    reason=reason,
+                )
+            self.connection.execute(
+                """
+                UPDATE plugin_runtime_tool_grants
+                SET status = ?,
+                    revoked_by = ?,
+                    revoked_reason = ?,
+                    revoked_at = ?
+                WHERE id = ?
+                """,
+                ("revoked", actor_id, reason, revoked_at, grant["id"]),
+            )
+
     def _upsert_version(
         self,
         plugin_id: str,
@@ -871,7 +1218,14 @@ class MarketplaceCatalogRepository:
                 )
             except IntegrityError as exc:
                 raise DuplicatePluginVersionError("Plugin version already exists.") from exc
+            if normalized.artifact_evidence is not None:
+                self._upsert_artifact_evidence(
+                    version_id,
+                    package_ref=normalized.package_ref,
+                    evidence=normalized.artifact_evidence,
+                )
             return
+        version_id = existing["id"]
         self.connection.execute(
             """
             UPDATE plugin_versions
@@ -883,8 +1237,84 @@ class MarketplaceCatalogRepository:
                 updated_at = ?
             WHERE id = ?
             """,
-            (*values, existing["id"]),
+            (*values, version_id),
         )
+        if normalized.artifact_evidence is not None:
+            self._upsert_artifact_evidence(
+                version_id,
+                package_ref=normalized.package_ref,
+                evidence=normalized.artifact_evidence,
+            )
+
+    def _upsert_artifact_evidence(
+        self,
+        version_id: str,
+        *,
+        package_ref: str,
+        evidence: dict[str, Any],
+    ) -> Row:
+        existing = self.artifact_evidence_for_version(version_id)
+        now = utc_now_iso()
+        values = (
+            package_ref,
+            evidence["artifact_digest"],
+            evidence["digest_algorithm"],
+            canonical_json(evidence["provenance"]),
+            canonical_json(evidence["sbom"]),
+            canonical_json(evidence["license"]),
+            canonical_json(evidence["vulnerability_scan"]),
+            canonical_json(evidence["malware_scan"]),
+            evidence["status"],
+            canonical_json(evidence["findings"]),
+        )
+        if existing is None:
+            evidence_id = generate_id("plugaev")
+            self.connection.execute(
+                """
+                INSERT INTO plugin_artifact_evidence (
+                    id, plugin_version_id, package_ref, artifact_digest,
+                    digest_algorithm, provenance_json, sbom_json, license_json,
+                    vulnerability_scan_json, malware_scan_json, status,
+                    findings_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    evidence_id,
+                    version_id,
+                    *values,
+                    now,
+                    now,
+                ),
+            )
+        else:
+            evidence_id = existing["id"]
+            self.connection.execute(
+                """
+                UPDATE plugin_artifact_evidence
+                SET package_ref = ?,
+                    artifact_digest = ?,
+                    digest_algorithm = ?,
+                    provenance_json = ?,
+                    sbom_json = ?,
+                    license_json = ?,
+                    vulnerability_scan_json = ?,
+                    malware_scan_json = ?,
+                    status = ?,
+                    findings_json = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    *values,
+                    now,
+                    evidence_id,
+                ),
+            )
+        row = self.artifact_evidence_for_version(version_id)
+        if row is None:
+            raise PluginNotFoundError("Plugin artifact evidence could not be loaded.")
+        return row
 
     def _get_plugin_by_identity(self, name: str, publisher: str) -> Row | None:
         return self.connection.execute(
@@ -998,11 +1428,17 @@ def plugin_response(repository: MarketplaceCatalogRepository, row: Row) -> Plugi
         status=row["status"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
-        versions=[plugin_version_response(version) for version in repository.list_versions(row["id"])],
+        versions=[
+            plugin_version_response(
+                version,
+                artifact_evidence=repository.artifact_evidence_for_version(version["id"]),
+            )
+            for version in repository.list_versions(row["id"])
+        ],
     )
 
 
-def plugin_version_response(row: Row) -> PluginVersionResponse:
+def plugin_version_response(row: Row, *, artifact_evidence: Row | None = None) -> PluginVersionResponse:
     """Build a plugin version API response."""
 
     return PluginVersionResponse(
@@ -1016,6 +1452,7 @@ def plugin_version_response(row: Row) -> PluginVersionResponse:
         trust_tier=row["trust_tier"],
         required_capabilities=json.loads(row["required_capabilities_json"]),
         permissions=json.loads(row["permissions_json"]),
+        artifact_evidence=plugin_artifact_evidence_response(artifact_evidence) if artifact_evidence else None,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -1029,6 +1466,7 @@ def plugin_policy_result_response(row: Row) -> PluginPolicyResultResponse:
         plugin_version_id=row["plugin_version_id"],
         result=row["result"],
         findings=json.loads(row["findings_json"]),
+        policy_input=json.loads(row["policy_input_json"]),
         created_at=row["created_at"],
     )
 
@@ -1044,6 +1482,9 @@ def plugin_installation_response(row: Row) -> PluginInstallationResponse:
         environment_id=row["environment_id"],
         target_agent_id=row["target_agent_id"],
         target_agent_name=row["target_agent_name"],
+        policy_result_id=row["policy_result_id"],
+        review_id=row["review_id"],
+        artifact_evidence_id=row["artifact_evidence_id"],
         status=row["status"],
         installed_by=row["installed_by"],
         installed_at=row["installed_at"],
@@ -1076,10 +1517,35 @@ def plugin_signing_key_response(row: Row) -> PluginSigningKeyResponse:
         organization_id=row["organization_id"],
         name=row["name"],
         public_key=row["public_key"],
+        key_type=row["key_type"],
+        trusted_root_id=row["trusted_root_id"],
+        public_key_fingerprint=row["public_key_fingerprint"],
+        metadata=json.loads(row["metadata_json"]),
         status=row["status"],
         created_by=row["created_by"],
         created_at=row["created_at"],
         revoked_at=row["revoked_at"],
+    )
+
+
+def plugin_artifact_evidence_response(row: Row) -> PluginArtifactEvidenceResponse:
+    """Build a plugin artifact evidence response."""
+
+    return PluginArtifactEvidenceResponse(
+        id=row["id"],
+        plugin_version_id=row["plugin_version_id"],
+        package_ref=row["package_ref"],
+        artifact_digest=row["artifact_digest"],
+        digest_algorithm=row["digest_algorithm"],
+        provenance=json.loads(row["provenance_json"]),
+        sbom=json.loads(row["sbom_json"]),
+        license=json.loads(row["license_json"]),
+        vulnerability_scan=json.loads(row["vulnerability_scan_json"]),
+        malware_scan=json.loads(row["malware_scan_json"]),
+        status=row["status"],
+        findings=json.loads(row["findings_json"]),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
     )
 
 
@@ -1094,6 +1560,81 @@ def plugin_quality_assessment_response(row: Row) -> PluginQualityAssessmentRespo
         findings=json.loads(row["findings_json"]),
         created_at=row["created_at"],
     )
+
+
+def _artifact_evidence_dict(row: Row) -> dict[str, Any]:
+    return {
+        "artifact_digest": row["artifact_digest"],
+        "digest_algorithm": row["digest_algorithm"],
+        "provenance": json.loads(row["provenance_json"]),
+        "sbom": json.loads(row["sbom_json"]),
+        "license": json.loads(row["license_json"]),
+        "vulnerability_scan": json.loads(row["vulnerability_scan_json"]),
+        "malware_scan": json.loads(row["malware_scan_json"]),
+    }
+
+
+def _runtime_tool_grant_specs(
+    manifest: dict[str, Any],
+    *,
+    signed_capabilities: list[str],
+) -> list[dict[str, str | None]]:
+    """Extract runtime tool grants that are bound to signed manifest capabilities."""
+
+    signed = {capability.strip().lower() for capability in signed_capabilities if capability.strip()}
+    raw_items: list[Any] = []
+    for key in ("tool_grants", "runtime_tools", "tools"):
+        value = manifest.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, list):
+            raise PluginInstallationBlockedError(f"{key} must be a list when runtime tool grants are declared.")
+        raw_items.extend(value)
+    specs: list[dict[str, str | None]] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        if isinstance(item, str):
+            tool_name = item.strip().lower()
+            spec = {
+                "tool_name": tool_name,
+                "scope": None,
+                "capability": tool_name,
+                "permission": None,
+                "risk_class": None,
+            }
+        elif isinstance(item, dict):
+            tool_name = _grant_spec_text(item, "name") or _grant_spec_text(item, "tool_name")
+            if tool_name is None:
+                raise PluginInstallationBlockedError("Runtime tool grant entries require a tool name.")
+            tool_name = tool_name.lower()
+            spec = {
+                "tool_name": tool_name,
+                "scope": _grant_spec_text(item, "scope"),
+                "capability": _grant_spec_text(item, "capability") or tool_name,
+                "permission": _grant_spec_text(item, "permission"),
+                "risk_class": _grant_spec_text(item, "risk_class"),
+            }
+        else:
+            raise PluginInstallationBlockedError("Runtime tool grant entries must be strings or objects.")
+        if not tool_name:
+            raise PluginInstallationBlockedError("Runtime tool grant entries require a tool name.")
+        if tool_name not in signed and str(spec.get("capability") or "").strip().lower() not in signed:
+            raise PluginInstallationBlockedError(
+                f"Runtime tool grant {tool_name} must be declared in signed plugin capabilities."
+            )
+        if tool_name in seen:
+            continue
+        seen.add(tool_name)
+        specs.append(spec)
+    return specs
+
+
+def _grant_spec_text(item: dict[str, Any], key: str) -> str | None:
+    value = item.get(key)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def plugin_trust_event_response(row: Row) -> PluginTrustEventResponse:

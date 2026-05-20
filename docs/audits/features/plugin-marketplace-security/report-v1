@@ -1,5 +1,71 @@
 # Feature Audit: Plugin Marketplace and Plugin Security
 
+## Remediation Summary
+
+Date of remediation: 2026-05-20
+
+Total findings in this report: 5
+
+Number fixed: 5
+
+Number partially fixed: 0
+
+Number blocked: 0
+
+Number already fixed: 0
+
+Files changed:
+- `packages/product-platform/src/product_platform/marketplace/signing.py`
+- `packages/product-platform/src/product_platform/marketplace/artifact_evidence.py`
+- `packages/product-platform/src/product_platform/marketplace/models.py`
+- `packages/product-platform/src/product_platform/marketplace/policy.py`
+- `packages/product-platform/src/product_platform/marketplace/repository.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/db/migrations/0084_marketplace_signing_trust_roots.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0084_marketplace_signing_trust_roots.down.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0085_marketplace_artifact_evidence.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0085_marketplace_artifact_evidence.down.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0086_marketplace_install_policy_evidence.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0086_marketplace_install_policy_evidence.down.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0087_marketplace_runtime_tool_grants.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0087_marketplace_runtime_tool_grants.down.sql`
+- `packages/agent-marketplace/src/agent_marketplace/manifest.py`
+- `packages/product-platform/frontend/src/api/marketplace.ts`
+- `packages/product-platform/frontend/src/features/marketplace/MarketplacePage.tsx`
+- `packages/product-platform/frontend/src/features/marketplace/MarketplacePage.test.tsx`
+- Marketplace security, catalog, review/signing/trust, and database regression tests under `packages/product-platform/tests`.
+
+Tests added or updated:
+- `packages/product-platform/tests/test_plugin_marketplace_security_phase1.py`
+- `packages/product-platform/tests/test_plugin_marketplace_security_phase2.py`
+- `packages/product-platform/tests/test_plugin_marketplace_security_phase3.py`
+- `packages/product-platform/tests/test_plugin_marketplace_security_phase4.py`
+- `packages/product-platform/tests/marketplace_security_helpers.py`
+- Existing marketplace catalog, review/signing/trust, and database migration regression tests.
+- `packages/product-platform/frontend/src/features/marketplace/MarketplacePage.test.tsx::test_marketplace_ui_accepts_allow_policy_result`
+
+Validation commands run:
+- `python3 -m compileall -q src/product_platform/marketplace src/product_platform/api/app.py tests/marketplace_security_helpers.py tests/test_plugin_marketplace_security_phase1.py tests/test_plugin_marketplace_security_phase2.py tests/test_plugin_marketplace_security_phase3.py tests/test_plugin_marketplace_security_phase4.py` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_plugin_marketplace_security_phase*.py' -v` - passed 11 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_marketplace_catalog_phase*.py' -v` - passed 11 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_marketplace_catalog_overall.py' -v` - passed 1 test
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_plugin_review_signing_trust*.py' -v` - passed 14 tests after recomputing policy in the overall flow
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_plugin_marketplace_security_phase4.py' -v` - passed 2 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_permissions_phase*.py' -v` - passed 16 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_invocation_phase1.py' -v` - passed 3 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` - passed 5 tests
+- `npm test -- --run src/features/marketplace/MarketplacePage.test.tsx` - initially failed 2 tests before the UI enum fix, then passed 6 tests after remediation
+- `npm test` - passed 123 tests across 32 frontend test files
+- `npm run typecheck` - passed
+- `npm run lint` - passed
+- `npm run build` - passed with a non-failing Vite chunk-size warning
+- `python3 -m ruff check src/product_platform/marketplace src/product_platform/api/app.py tests/marketplace_security_helpers.py tests/test_plugin_marketplace_security_phase1.py tests/test_plugin_marketplace_security_phase2.py tests/test_plugin_marketplace_security_phase3.py tests/test_plugin_marketplace_security_phase4.py tests/test_db_phase1.py tests/test_marketplace_catalog_phase3.py tests/test_marketplace_catalog_overall.py tests/test_plugin_review_signing_trust_phase1.py tests/test_plugin_review_signing_trust_phase2.py tests/test_plugin_review_signing_trust_overall.py` - passed
+- `python3 -m mypy` - passed
+- `python3 -m build --wheel --outdir /tmp/ophanix-product-platform-build` - passed
+
+Remaining risks:
+- None.
+
 ## 1. Scope
 
 This audit covers plugin catalog, versions, manifest normalization, signatures, install policy, review, lifecycle, supply-chain scanning, runtime policy linkage, UI behavior, and AgentMesh/SDK marketplace surfaces. It inspects `product_platform/marketplace`, marketplace migrations, marketplace UI, `agent-marketplace`, AgentMesh fallback marketplace, and plugin-related runtime kill switch code. Relevant benchmarks are JFrog MCP Registry/AI Catalog, OpenAI tool approval patterns, Arcade/Composio tool governance, and enterprise software supply-chain controls. Out of scope: MCP proxy runtime behavior, covered in MCP.
@@ -24,6 +90,43 @@ Current workflow: plugins can be imported, reviewed, checked by policy, signed i
 ## 4. Findings
 
 ### F-PLG-001 [P0] [Security] Product install policy is advisory and defaults open
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Marketplace installation now fails closed unless a fresh explicit policy result exists. Install requires an allow result computed with signature and artifact-evidence gates, requires review approval when the manifest requires review, rejects stale policy results after version evidence changes, records blocked install audit events, and stores policy, review, and artifact-evidence IDs on the install row.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/marketplace/models.py`
+- `packages/product-platform/src/product_platform/marketplace/repository.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/db/migrations/0086_marketplace_install_policy_evidence.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0086_marketplace_install_policy_evidence.down.sql`
+- `packages/product-platform/tests/test_plugin_marketplace_security_phase3.py`
+- `packages/product-platform/tests/test_plugin_review_signing_trust_overall.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+
+**Tests added or updated:**
+- `packages/product-platform/tests/test_plugin_marketplace_security_phase3.py::PluginMarketplaceSecurityPhase3Tests::test_marketplace_install_fails_closed_without_policy`
+- `packages/product-platform/tests/test_plugin_marketplace_security_phase3.py::PluginMarketplaceSecurityPhase3Tests::test_marketplace_install_stores_policy_and_artifact_evidence`
+- `packages/product-platform/tests/test_plugin_marketplace_security_phase3.py::PluginMarketplaceSecurityPhase3Tests::test_stale_policy_result_cannot_be_reused_for_install`
+- `packages/product-platform/tests/test_plugin_review_signing_trust_overall.py::PluginReviewSigningTrustOverallTests::test_overall_review_signature_quality_trust_flow`
+- `packages/product-platform/tests/test_db_phase1.py::DatabaseMigrationPhase1Tests::test_migration_applies_to_empty_database`
+
+**Validation performed:**
+- `python3 -m compileall -q src/product_platform/marketplace src/product_platform/api/app.py tests/test_plugin_marketplace_security_phase3.py` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_plugin_marketplace_security_phase3.py' -v` - passed 3 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_plugin_marketplace_security_phase*.py' -v` - passed 9 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_marketplace_catalog_phase*.py' -v` - passed 11 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_marketplace_catalog_overall.py' -v` - passed 1 test
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_plugin_review_signing_trust*.py' -v` - passed 14 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` - passed 5 tests
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Risky
 
@@ -77,6 +180,55 @@ Untrusted plugins can be installed despite governance settings.
 
 ### F-PLG-002 [P0] [Security] Product plugin signatures are demo-grade and forgeable
 
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Product marketplace signature verification now uses Ed25519 public-key verification against active trusted signing keys. Manifest-declared `signature_status: signed` is no longer trusted when no signing root exists; signed manifests without an active trusted key are treated as untrusted/invalid and denied by signature-required policy checks. Signing keys now store key type, trusted root ID, public-key fingerprint, and metadata. SDK manifest signing bytes were aligned to canonical JSON so Product can verify SDK-generated Ed25519 signatures.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/marketplace/signing.py`
+- `packages/product-platform/src/product_platform/marketplace/models.py`
+- `packages/product-platform/src/product_platform/marketplace/repository.py`
+- `packages/product-platform/src/product_platform/db/migrations/0084_marketplace_signing_trust_roots.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0084_marketplace_signing_trust_roots.down.sql`
+- `packages/agent-marketplace/src/agent_marketplace/manifest.py`
+- `packages/product-platform/tests/marketplace_security_helpers.py`
+- `packages/product-platform/tests/test_plugin_marketplace_security_phase1.py`
+- `packages/product-platform/tests/test_plugin_review_signing_trust_phase2.py`
+- `packages/product-platform/tests/test_marketplace_catalog_phase3.py`
+- `packages/product-platform/tests/test_marketplace_catalog_overall.py`
+- `packages/product-platform/tests/test_plugin_review_signing_trust_phase1.py`
+- `packages/product-platform/tests/test_plugin_review_signing_trust_overall.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+
+**Tests added or updated:**
+- `packages/product-platform/tests/test_plugin_marketplace_security_phase1.py::PluginMarketplaceSecurityPhase1Tests::test_plugin_signature_verification_rejects_forgery`
+- `packages/product-platform/tests/test_plugin_marketplace_security_phase1.py::PluginMarketplaceSecurityPhase1Tests::test_sdk_ed25519_signature_is_accepted_with_active_trusted_key`
+- `packages/product-platform/tests/test_plugin_review_signing_trust_phase2.py::PluginSigningKeysPhase2Tests::test_add_signing_key`
+- `packages/product-platform/tests/test_plugin_review_signing_trust_phase2.py::PluginSigningKeysPhase2Tests::test_plugin_signature_verifies_with_active_key`
+- `packages/product-platform/tests/test_plugin_review_signing_trust_phase2.py::PluginSigningKeysPhase2Tests::test_revoked_key_does_not_verify`
+- `packages/product-platform/tests/test_plugin_review_signing_trust_phase2.py::PluginSigningKeysPhase2Tests::test_revoked_key_invalidates_policy_signature_check`
+- Existing marketplace install/review tests updated to use real Ed25519 trusted roots.
+
+**Validation performed:**
+- `python3 -m compileall -q src/product_platform/marketplace tests/test_plugin_marketplace_security_phase1.py tests/test_plugin_review_signing_trust_phase2.py tests/test_marketplace_catalog_phase3.py tests/test_marketplace_catalog_overall.py tests/test_plugin_review_signing_trust_phase1.py tests/test_plugin_review_signing_trust_overall.py tests/marketplace_security_helpers.py` - passed
+- `python3 -m compileall -q src/agent_marketplace` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_plugin_marketplace_security_phase1.py' -v` - passed 2 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_plugin_review_signing_trust_phase2.py' -v` - passed 4 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_marketplace_catalog_phase3.py' -v` - passed 5 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_marketplace_catalog_overall.py' -v` - passed 1 test
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_plugin_review_signing_trust_phase1.py' -v` - passed 4 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_plugin_review_signing_trust_overall.py' -v` - passed 1 test
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_marketplace_catalog_phase*.py' -v` - passed 11 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_plugin_review_signing_trust*.py' -v` - passed 14 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` - passed 5 tests
+
+**Remaining work:**
+None for F-PLG-002. Package provenance and digest gates continue under F-PLG-003.
+
+**Remediated by:**
+AI coding agent
+
 **Status:** Incorrect
 
 **Current implementation:**
@@ -128,6 +280,46 @@ Malicious plugins can appear signed and trusted.
 **Affects stated Ophanix product promise:** Yes
 
 ### F-PLG-003 [P0] [Security] Plugin installation has no package provenance, SBOM, license, vulnerability, or malware gate
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Plugin versions now support persisted package artifact evidence with immutable SHA-256 digest, provenance, SBOM, license status, vulnerability scan status, malware scan status, blocking findings, and pass/block status. Marketplace install now fails closed when artifact evidence is missing, failing, or not bound to `package_digest` in the signed manifest. Marketplace policy checks can require artifact evidence, plugin detail responses expose evidence, and an artifact-evidence submission API emits an audit event.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/marketplace/artifact_evidence.py`
+- `packages/product-platform/src/product_platform/marketplace/models.py`
+- `packages/product-platform/src/product_platform/marketplace/policy.py`
+- `packages/product-platform/src/product_platform/marketplace/repository.py`
+- `packages/product-platform/src/product_platform/marketplace/signing.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/db/migrations/0085_marketplace_artifact_evidence.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0085_marketplace_artifact_evidence.down.sql`
+- `packages/agent-marketplace/src/agent_marketplace/manifest.py`
+- `packages/product-platform/tests/marketplace_security_helpers.py`
+- `packages/product-platform/tests/test_plugin_marketplace_security_phase2.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+
+**Tests added or updated:**
+- `packages/product-platform/tests/test_plugin_marketplace_security_phase2.py::PluginMarketplaceSecurityPhase2Tests::test_plugin_install_requires_artifact_scans`
+- `packages/product-platform/tests/test_plugin_marketplace_security_phase2.py::PluginMarketplaceSecurityPhase2Tests::test_plugin_install_rejects_blocking_artifact_scan_findings`
+- `packages/product-platform/tests/test_plugin_marketplace_security_phase2.py::PluginMarketplaceSecurityPhase2Tests::test_complete_artifact_evidence_allows_install_and_surfaces_evidence`
+- `packages/product-platform/tests/test_plugin_marketplace_security_phase2.py::PluginMarketplaceSecurityPhase2Tests::test_artifact_evidence_submission_records_audit_and_enables_install`
+- `packages/product-platform/tests/test_db_phase1.py::DatabaseMigrationPhase1Tests::test_migration_applies_to_empty_database`
+
+**Validation performed:**
+- `python3 -m compileall -q src/product_platform/marketplace src/product_platform/api/app.py tests/marketplace_security_helpers.py tests/test_plugin_marketplace_security_phase2.py` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_plugin_marketplace_security_phase2.py' -v` - passed 4 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_plugin_marketplace_security_phase*.py' -v` - passed 6 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_marketplace_catalog_phase*.py' -v` - passed 11 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_plugin_review_signing_trust*.py' -v` - passed 14 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` - passed 5 tests
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Missing
 
@@ -181,6 +373,42 @@ The marketplace can distribute unknown or malicious code under a governed brand.
 
 ### F-PLG-004 [P1] [Tool Governance] Marketplace policy is not tool-level and is not wired into runtime enforcement
 
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Marketplace installs now materialize signed manifest runtime tool grants into the existing Tool Gateway `agent_tool_permissions` enforcement path for target-agent installs. Runtime grants are persisted with plugin, install, environment, agent, tool, scope, capability, permission, risk class, and linked Tool Gateway permission evidence. Install only grants tools declared in signed plugin capabilities, runtime decisions allow only granted tools, and uninstall or plugin disable revokes marketplace-owned permissions and grant rows. Runtime grant creation and revocation emit audit events.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/marketplace/repository.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/db/migrations/0087_marketplace_runtime_tool_grants.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0087_marketplace_runtime_tool_grants.down.sql`
+- `packages/product-platform/tests/test_plugin_marketplace_security_phase4.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+
+**Tests added or updated:**
+- `packages/product-platform/tests/test_plugin_marketplace_security_phase4.py::PluginMarketplaceSecurityPhase4Tests::test_plugin_install_generates_runtime_tool_policy_and_uninstall_revokes_it`
+- `packages/product-platform/tests/test_plugin_marketplace_security_phase4.py::PluginMarketplaceSecurityPhase4Tests::test_plugin_disable_revokes_runtime_tool_policy`
+- `packages/product-platform/tests/test_db_phase1.py::DatabaseMigrationPhase1Tests::test_migration_applies_to_empty_database`
+- `packages/product-platform/tests/test_db_phase1.py::DatabaseMigrationPhase1Tests::test_migration_can_be_rolled_back`
+
+**Validation performed:**
+- `python3 -m compileall -q src/product_platform/marketplace src/product_platform/api/app.py tests/test_plugin_marketplace_security_phase4.py` - passed
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_plugin_marketplace_security_phase4.py' -v` - passed 2 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_plugin_marketplace_security_phase*.py' -v` - passed 11 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_marketplace_catalog_phase*.py' -v` - passed 11 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_marketplace_catalog_overall.py' -v` - passed 1 test
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_plugin_review_signing_trust*.py' -v` - passed 14 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_permissions_phase*.py' -v` - passed 16 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_tool_gateway_invocation_phase1.py' -v` - passed 3 tests
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` - passed 5 tests
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
+
 **Status:** Missing
 
 **Current implementation:**
@@ -232,6 +460,34 @@ Marketplace approval will not control actual tool execution.
 **Affects stated Ophanix product promise:** Yes
 
 ### F-PLG-005 [P2] [Admin UX] Marketplace UI policy result enum drifts from backend
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+The marketplace frontend now normalizes backend policy decisions to the `allow`/`deny` contract, accepts backend `allow` results for install-gate rendering and install enablement, and includes `policy_input` in the API type so Phase 3 policy evidence is available to the UI. The install policy form now includes the artifact-evidence requirement used by backend fail-closed installation policy, and the install gate panel renders an Artifact gate alongside signature, policy, and trust state.
+
+**Files changed:**
+- `packages/product-platform/frontend/src/api/marketplace.ts`
+- `packages/product-platform/frontend/src/features/marketplace/MarketplacePage.tsx`
+- `packages/product-platform/frontend/src/features/marketplace/MarketplacePage.test.tsx`
+
+**Tests added or updated:**
+- `packages/product-platform/frontend/src/features/marketplace/MarketplacePage.test.tsx::MarketplacePage::submits marketplace workflow actions with normalized payloads`
+- `packages/product-platform/frontend/src/features/marketplace/MarketplacePage.test.tsx::MarketplacePage::targets the selected plugin version for version-scoped actions`
+- `packages/product-platform/frontend/src/features/marketplace/MarketplacePage.test.tsx::MarketplacePage::normalizes policy payload lists and booleans`
+- `packages/product-platform/frontend/src/features/marketplace/MarketplacePage.test.tsx::MarketplacePage::test_marketplace_ui_accepts_allow_policy_result`
+
+**Validation performed:**
+- `npm test -- --run src/features/marketplace/MarketplacePage.test.tsx` - initially failed 2 tests before the UI enum fix because backend `allow` did not enable install, then passed 6 tests after remediation
+- `npm run typecheck` - passed
+- `npm run lint` - passed
+- `npm run build` - passed with a non-failing Vite chunk-size warning
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Incorrect
 
@@ -337,4 +593,3 @@ None.
 ## 7. Feature-Level Target State
 
 The marketplace should behave like a governed supply-chain registry. Plugin versions should be immutable signed artifacts with digest, provenance, SBOM, vulnerability, malware, and license scan state. Install policy should be environment-scoped and fail closed. Approved installs should generate runtime tool/capability policy grants and revoke them on disable/uninstall/revocation. UI should expose evidence, risk, policy, install status, and lifecycle controls. Tests should prove signature verification, scan gates, install policy, runtime grant enforcement, lifecycle cascade, and frontend/backend contract consistency.
-

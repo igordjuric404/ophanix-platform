@@ -1,0 +1,5 @@
+DROP INDEX IF EXISTS idx_plugin_runtime_tool_grants_version;
+DROP INDEX IF EXISTS idx_plugin_runtime_tool_grants_permission;
+DROP INDEX IF EXISTS idx_plugin_runtime_tool_grants_agent_tool;
+DROP INDEX IF EXISTS idx_plugin_runtime_tool_grants_installation;
+DROP TABLE IF EXISTS plugin_runtime_tool_grants;

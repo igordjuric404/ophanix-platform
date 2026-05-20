@@ -9,10 +9,8 @@ from product_platform.api.settings import Settings
 from product_platform.db.seed import seed_demo_data
 from product_platform.db.testing import create_migrated_test_database
 from product_platform.marketplace.samples import sample_plugin_manifests
-from product_platform.marketplace.signing import (
-    sign_plugin_manifest_for_demo,
-    verify_plugin_signature_with_key,
-)
+from product_platform.marketplace.signing import verify_plugin_signature_with_key
+from marketplace_security_helpers import ed25519_key_pair, signed_manifest
 
 
 class PluginSigningKeysPhase2Tests(unittest.TestCase):
@@ -38,6 +36,7 @@ class PluginSigningKeysPhase2Tests(unittest.TestCase):
         )
         self.assertEqual(login.status_code, 200, login.text)
         self.token = login.json()["access_token"]
+        self.private_key, self.public_key = ed25519_key_pair()
 
     def _headers(self, correlation_id: str | None = None) -> dict[str, str]:
         headers = {
@@ -52,13 +51,15 @@ class PluginSigningKeysPhase2Tests(unittest.TestCase):
         response = self.client.post(
             "/api/v1/marketplace/signing-keys",
             headers=self._headers("corr_key_add"),
-            json={"name": "Demo Marketplace Key", "public_key": "demo-public"},
+            json={"name": "Demo Marketplace Key", "public_key": self.public_key},
         )
 
         self.assertEqual(response.status_code, 201, response.text)
         signing_key = response.json()
         self.assertEqual(signing_key["name"], "Demo Marketplace Key")
         self.assertEqual(signing_key["status"], "active")
+        self.assertEqual(signing_key["key_type"], "ed25519")
+        self.assertEqual(len(signing_key["public_key_fingerprint"]), 64)
 
         listed = self.client.get("/api/v1/marketplace/signing-keys", headers=self._headers())
         self.assertEqual(listed.status_code, 200, listed.text)
@@ -78,32 +79,41 @@ class PluginSigningKeysPhase2Tests(unittest.TestCase):
         self.assertIsNotNone(audit)
 
     def test_plugin_signature_verifies_with_active_key(self) -> None:
-        manifest = {**sample_plugin_manifests()[0], "name": "signed-active-key"}
-        manifest["signature"] = sign_plugin_manifest_for_demo(manifest, "demo-public")
+        manifest = signed_manifest(
+            sample_plugin_manifests()[0],
+            self.private_key,
+            name="signed-active-key",
+        )
 
         self.assertTrue(
             verify_plugin_signature_with_key(
                 manifest,
-                public_key="demo-public",
+                public_key=self.public_key,
                 key_status="active",
             )
         )
 
     def test_revoked_key_does_not_verify(self) -> None:
-        manifest = {**sample_plugin_manifests()[0], "name": "signed-revoked-key"}
-        manifest["signature"] = sign_plugin_manifest_for_demo(manifest, "demo-public")
+        manifest = signed_manifest(
+            sample_plugin_manifests()[0],
+            self.private_key,
+            name="signed-revoked-key",
+        )
 
         self.assertFalse(
             verify_plugin_signature_with_key(
                 manifest,
-                public_key="demo-public",
+                public_key=self.public_key,
                 key_status="revoked",
             )
         )
 
     def test_revoked_key_invalidates_policy_signature_check(self) -> None:
-        manifest = {**sample_plugin_manifests()[0], "name": "signed-policy-key"}
-        manifest["signature"] = sign_plugin_manifest_for_demo(manifest, "demo-public")
+        manifest = signed_manifest(
+            sample_plugin_manifests()[0],
+            self.private_key,
+            name="signed-policy-key",
+        )
         imported = self.client.post(
             "/api/v1/marketplace/plugins/import",
             headers=self._headers(),
@@ -114,7 +124,7 @@ class PluginSigningKeysPhase2Tests(unittest.TestCase):
         signing_key = self.client.post(
             "/api/v1/marketplace/signing-keys",
             headers=self._headers(),
-            json={"name": "Policy Key", "public_key": "demo-public"},
+            json={"name": "Policy Key", "public_key": self.public_key},
         ).json()
 
         allowed = self.client.post(

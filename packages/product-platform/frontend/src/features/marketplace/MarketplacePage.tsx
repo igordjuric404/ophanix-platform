@@ -66,6 +66,34 @@ const pluginTypes = ["", "policy_template", "integration", "agent", "validator"]
 const pluginStatuses = ["", "available", "deprecated", "disabled"];
 const reviewStatuses = ["", "pending", "approved", "rejected"];
 
+export function marketplacePolicyDecision(result: string | null | undefined) {
+  const normalized = String(result ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  return normalized === "allowed" ? "allow" : normalized;
+}
+
+function marketplacePolicyInputFlag(
+  policyResult: PluginPolicyResult | null,
+  flag: "require_artifact_evidence" | "require_review_approval" | "require_signature"
+) {
+  return policyResult?.policy_input?.[flag] === true;
+}
+
+export function marketplacePolicyAllowsInstall(
+  policyResult: PluginPolicyResult | null,
+  version: PluginVersion | null
+) {
+  return (
+    Boolean(version) &&
+    policyResult?.plugin_version_id === version?.id &&
+    marketplacePolicyDecision(policyResult?.result) === "allow" &&
+    marketplacePolicyInputFlag(policyResult, "require_signature") &&
+    marketplacePolicyInputFlag(policyResult, "require_artifact_evidence")
+  );
+}
+
 export function MarketplacePage() {
   const [pluginFilters, setPluginFilters] = useState<MarketplaceParams>({});
   const [reviewFilters, setReviewFilters] = useState<MarketplaceParams>({});
@@ -535,10 +563,7 @@ function InstallPanel({
   policyResult: PluginPolicyResult | null;
   version: PluginVersion | null;
 }) {
-  const policyAllowsInstall =
-    Boolean(version) &&
-    policyResult?.plugin_version_id === version?.id &&
-    policyResult?.result === "allowed";
+  const policyAllowsInstall = marketplacePolicyAllowsInstall(policyResult, version);
   return (
     <Card>
       <CardHeader>
@@ -558,6 +583,7 @@ function InstallPanel({
             >
               <CheckboxField label="Require Signature" name="require_signature" />
               <CheckboxField label="Require Review" name="require_review_approval" />
+              <CheckboxField label="Require Artifact Evidence" name="require_artifact_evidence" />
               <Field label="Allowed Types" name="allowed_plugin_types" placeholder="integration,agent" />
               <Field label="Allowed Capabilities" name="allowed_capabilities" placeholder="claims.lookup" />
               <div className="md:col-span-2">
@@ -888,13 +914,19 @@ function InstallGates({
   policyResult: PluginPolicyResult | null;
   version: PluginVersion;
 }) {
+  const policyDecision = marketplacePolicyDecision(policyResult?.result);
+  const artifactEvidenceRequired = marketplacePolicyInputFlag(policyResult, "require_artifact_evidence");
   const gates = [
     { label: "Signature", state: version.signature_status === "signed" ? "pass" : "review" },
-    { label: "Policy", state: policyResult?.result === "allowed" ? "pass" : policyResult?.result ?? "unchecked" },
+    {
+      label: "Artifact",
+      state: artifactEvidenceRequired ? (policyDecision === "allow" ? "pass" : "review") : "unchecked"
+    },
+    { label: "Policy", state: policyDecision === "allow" ? "pass" : policyDecision ?? "unchecked" },
     { label: "Trust", state: version.trust_tier }
   ];
   return (
-    <div className="grid gap-2 md:grid-cols-3" data-marketplace-install-gates>
+    <div className="grid gap-2 md:grid-cols-4" data-marketplace-install-gates>
       {gates.map((gate) => (
         <div className="rounded-md border bg-muted/20 p-3" key={gate.label}>
           <div className="text-xs uppercase text-muted-foreground">{gate.label}</div>
@@ -1069,6 +1101,7 @@ export function marketplacePolicyPayloadFromValues(values: Record<string, unknow
   return {
     require_signature: Boolean(values.require_signature),
     require_review_approval: Boolean(values.require_review_approval),
+    require_artifact_evidence: Boolean(values.require_artifact_evidence),
     allowed_plugin_types: commaList(values.allowed_plugin_types),
     allowed_capabilities: commaList(values.allowed_capabilities),
     allowed_organizations: commaList(values.allowed_organizations)

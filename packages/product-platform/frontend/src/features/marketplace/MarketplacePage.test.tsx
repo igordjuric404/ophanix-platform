@@ -6,6 +6,7 @@ import { renderWithQueryClient } from "../../test/test-utils";
 import {
   MarketplacePage,
   marketplaceImportPayloadFromValues,
+  marketplacePolicyAllowsInstall,
   marketplacePolicyPayloadFromValues,
   marketplaceTrustPayloadFromValues
 } from "./MarketplacePage";
@@ -101,8 +102,13 @@ const signingKey = {
 const policyResult = {
   id: "polres_1",
   plugin_version_id: "plugver_1",
-  result: "allowed",
+  result: "allow",
   findings: [],
+  policy_input: {
+    require_signature: true,
+    require_artifact_evidence: true,
+    require_review_approval: false
+  },
   created_at: "2026-05-01T02:00:00Z"
 };
 
@@ -155,6 +161,7 @@ describe("MarketplacePage", () => {
     await screen.findAllByText("Claims Assistant");
 
     fireEvent.click(screen.getByRole("checkbox", { name: "Require Signature" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Require Artifact Evidence" }));
     fireEvent.change(screen.getByLabelText("Allowed Types"), {
       target: { value: "integration, agent" }
     });
@@ -215,6 +222,7 @@ describe("MarketplacePage", () => {
     fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Select" }));
 
     fireEvent.click(screen.getByRole("checkbox", { name: "Require Signature" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Require Artifact Evidence" }));
     fireEvent.click(screen.getByRole("button", { name: /Check Policy/ }));
     expect(await screen.findByText("Policy compatibility checked")).toBeInTheDocument();
 
@@ -234,12 +242,14 @@ describe("MarketplacePage", () => {
     expect(
       marketplacePolicyPayloadFromValues({
         require_signature: "on",
+        require_artifact_evidence: "on",
         allowed_plugin_types: "integration, agent",
         allowed_capabilities: " claims.lookup "
       })
     ).toEqual({
       require_signature: true,
       require_review_approval: false,
+      require_artifact_evidence: true,
       allowed_plugin_types: ["integration", "agent"],
       allowed_capabilities: ["claims.lookup"],
       allowed_organizations: null
@@ -250,6 +260,26 @@ describe("MarketplacePage", () => {
         manifest_json: "[]"
       })
     ).toThrow("Manifest JSON must be a JSON object.");
+  });
+
+  it("test_marketplace_ui_accepts_allow_policy_result", async () => {
+    mockMarketplaceFetch();
+
+    renderWithQueryClient(<MarketplacePage />);
+
+    await screen.findAllByText("Claims Assistant");
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Require Signature" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Require Artifact Evidence" }));
+    fireEvent.click(screen.getByRole("button", { name: /Check Policy/ }));
+
+    expect(await screen.findByText("Policy compatibility checked")).toBeInTheDocument();
+    expect(marketplacePolicyAllowsInstall(policyResult, plugin.versions[0])).toBe(true);
+    expect(screen.getByRole("button", { name: "Install" })).toBeEnabled();
+
+    const gates = document.querySelector("[data-marketplace-install-gates]");
+    expect(gates).not.toBeNull();
+    expect(within(gates as HTMLElement).getAllByText("pass").length).toBeGreaterThanOrEqual(3);
   });
 
   it("rejects invalid numeric marketplace trust payload fields instead of using zero", () => {

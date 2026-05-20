@@ -9,6 +9,7 @@ from product_platform.api.settings import Settings
 from product_platform.db.seed import seed_demo_data
 from product_platform.db.testing import create_migrated_test_database
 from product_platform.marketplace.samples import sample_plugin_manifests
+from marketplace_security_helpers import ed25519_key_pair, signed_manifest
 
 
 class MarketplaceCatalogOverallTests(unittest.TestCase):
@@ -34,6 +35,13 @@ class MarketplaceCatalogOverallTests(unittest.TestCase):
         )
         self.assertEqual(login.status_code, 200, login.text)
         self.token = login.json()["access_token"]
+        self.private_key, self.public_key = ed25519_key_pair()
+        signing_key = self.client.post(
+            "/api/v1/marketplace/signing-keys",
+            headers=self._headers(),
+            json={"name": "Overall Marketplace Root", "public_key": self.public_key},
+        )
+        self.assertEqual(signing_key.status_code, 201, signing_key.text)
 
     def _headers(self, correlation_id: str | None = None) -> dict[str, str]:
         headers = {
@@ -46,7 +54,11 @@ class MarketplaceCatalogOverallTests(unittest.TestCase):
 
     def test_overall_marketplace_install_flow(self) -> None:
         imported_plugins = []
-        for manifest in sample_plugin_manifests():
+        manifests = [
+            signed_manifest(sample_plugin_manifests()[0], self.private_key),
+            sample_plugin_manifests()[1],
+        ]
+        for manifest in manifests:
             response = self.client.post(
                 "/api/v1/marketplace/plugins/import",
                 headers=self._headers(),
@@ -64,7 +76,11 @@ class MarketplaceCatalogOverallTests(unittest.TestCase):
         allowed = self.client.post(
             f"/api/v1/marketplace/plugins/{signed_version_id}/check-policy",
             headers=self._headers(),
-            json={"require_signature": True, "allowed_plugin_types": ["agent"]},
+            json={
+                "require_signature": True,
+                "require_artifact_evidence": True,
+                "allowed_plugin_types": ["agent"],
+            },
         )
         self.assertEqual(allowed.status_code, 201, allowed.text)
         self.assertEqual(allowed.json()["result"], "allow")

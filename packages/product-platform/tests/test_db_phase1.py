@@ -111,6 +111,10 @@ FEATURE_MIGRATIONS = [
     "0081",
     "0082",
     "0083",
+    "0084",
+    "0085",
+    "0086",
+    "0087",
 ]
 
 ALL_EXPECTED_MIGRATIONS = [*EXPECTED_MIGRATIONS, *FEATURE_MIGRATIONS]
@@ -239,6 +243,30 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertIn("plugin_installations", tables)
             self.assertIn("plugin_reviews", tables)
             self.assertIn("plugin_signing_keys", tables)
+            plugin_signing_key_columns = column_names(connection, "plugin_signing_keys")
+            self.assertIn("key_type", plugin_signing_key_columns)
+            self.assertIn("trusted_root_id", plugin_signing_key_columns)
+            self.assertIn("public_key_fingerprint", plugin_signing_key_columns)
+            self.assertIn("metadata_json", plugin_signing_key_columns)
+            self.assertIn("plugin_artifact_evidence", tables)
+            plugin_artifact_evidence_columns = column_names(connection, "plugin_artifact_evidence")
+            self.assertIn("artifact_digest", plugin_artifact_evidence_columns)
+            self.assertIn("provenance_json", plugin_artifact_evidence_columns)
+            self.assertIn("sbom_json", plugin_artifact_evidence_columns)
+            self.assertIn("license_json", plugin_artifact_evidence_columns)
+            self.assertIn("vulnerability_scan_json", plugin_artifact_evidence_columns)
+            self.assertIn("malware_scan_json", plugin_artifact_evidence_columns)
+            plugin_policy_result_columns = column_names(connection, "plugin_policy_results")
+            self.assertIn("policy_input_json", plugin_policy_result_columns)
+            plugin_installation_columns = column_names(connection, "plugin_installations")
+            self.assertIn("policy_result_id", plugin_installation_columns)
+            self.assertIn("review_id", plugin_installation_columns)
+            self.assertIn("artifact_evidence_id", plugin_installation_columns)
+            self.assertIn("plugin_runtime_tool_grants", tables)
+            runtime_grant_columns = column_names(connection, "plugin_runtime_tool_grants")
+            self.assertIn("agent_tool_permission_id", runtime_grant_columns)
+            self.assertIn("owns_agent_tool_permission", runtime_grant_columns)
+            self.assertIn("metadata_json", runtime_grant_columns)
             self.assertIn("plugin_quality_assessments", tables)
             self.assertIn("plugin_trust_events", tables)
             self.assertIn("slo_objectives", tables)
@@ -444,6 +472,9 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
                     self.assertNotIn("released_at", mcp_approval_columns)
                     self.assertNotIn("release_idempotency_key", mcp_approval_columns)
                     self.assertNotIn("release_error", mcp_approval_columns)
+                if migration == "0087":
+                    self.assertNotIn("plugin_runtime_tool_grants", tables)
+                    self.assertIn("plugin_installations", tables)
                 if migration == "0070":
                     audit_export_columns = column_names(connection, "audit_exports")
                     self.assertNotIn("event_count", audit_export_columns)

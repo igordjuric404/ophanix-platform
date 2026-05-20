@@ -10,6 +10,7 @@ Supports plugin types: policy_template, integration, agent, validator.
 from __future__ import annotations
 
 import enum
+import json
 import logging
 from pathlib import Path
 from typing import Optional
@@ -61,6 +62,8 @@ class PluginManifest(BaseModel):
     min_agentmesh_version: Optional[str] = Field(
         None, description="Minimum AgentMesh version required"
     )
+    package_ref: Optional[str] = Field(None, description="Immutable package reference")
+    package_digest: Optional[str] = Field(None, description="Immutable package sha256 digest")
     signature: Optional[str] = Field(None, description="Base64-encoded Ed25519 signature")
     organization: Optional[str] = Field(
         None,
@@ -100,9 +103,8 @@ class PluginManifest(BaseModel):
 
     def signable_bytes(self) -> bytes:
         """Return the canonical bytes used for signing (excludes signature field)."""
-        data = self.model_dump(exclude={"signature"})
-        # Deterministic YAML serialization
-        return yaml.dump(data, sort_keys=True).encode()
+        data = self.model_dump(mode="json", exclude={"signature"})
+        return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
 
 def load_manifest(path: Path) -> PluginManifest:

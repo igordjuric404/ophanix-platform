@@ -38,6 +38,7 @@ export interface PluginPolicyResult {
   plugin_version_id: string;
   result: string;
   findings: Array<Record<string, unknown>>;
+  policy_input?: Record<string, unknown> | null;
   created_at: string;
 }
 

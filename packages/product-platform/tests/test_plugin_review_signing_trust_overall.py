@@ -9,7 +9,7 @@ from product_platform.api.settings import Settings
 from product_platform.db.seed import seed_demo_data
 from product_platform.db.testing import create_migrated_test_database
 from product_platform.marketplace.samples import sample_plugin_manifests
-from product_platform.marketplace.signing import sign_plugin_manifest_for_demo
+from marketplace_security_helpers import ed25519_key_pair, signed_manifest
 
 
 class PluginReviewSigningTrustOverallTests(unittest.TestCase):
@@ -35,6 +35,7 @@ class PluginReviewSigningTrustOverallTests(unittest.TestCase):
         )
         self.assertEqual(login.status_code, 200, login.text)
         self.token = login.json()["access_token"]
+        self.private_key, self.public_key = ed25519_key_pair()
 
     def _headers(self, correlation_id: str | None = None) -> dict[str, str]:
         headers = {
@@ -49,28 +50,28 @@ class PluginReviewSigningTrustOverallTests(unittest.TestCase):
         signing_key = self.client.post(
             "/api/v1/marketplace/signing-keys",
             headers=self._headers("corr_overall_key"),
-            json={"name": "Overall Marketplace Key", "public_key": "demo-public"},
+            json={"name": "Overall Marketplace Key", "public_key": self.public_key},
         )
         self.assertEqual(signing_key.status_code, 201, signing_key.text)
 
-        manifest = {
-            **sample_plugin_manifests()[0],
-            "name": "overall-trust-assistant",
-            "review_required": True,
-            "documentation": {
+        manifest = signed_manifest(
+            sample_plugin_manifests()[0],
+            self.private_key,
+            name="overall-trust-assistant",
+            review_required=True,
+            documentation={
                 "readme": "README",
                 "examples": ["route-ticket"],
                 "api_docs": "API reference",
                 "changelog": "Initial release",
             },
-            "tests": {"count": 25, "integration": True, "edge_cases": True},
-            "operations": {
+            tests={"count": 25, "integration": True, "edge_cases": True},
+            operations={
                 "health_check": "/health",
                 "rollback": "restore previous package",
                 "owner": "ecosystem-ops",
             },
-        }
-        manifest["signature"] = sign_plugin_manifest_for_demo(manifest, "demo-public")
+        )
 
         imported = self.client.post(
             "/api/v1/marketplace/plugins/import",
@@ -92,7 +93,11 @@ class PluginReviewSigningTrustOverallTests(unittest.TestCase):
         denied_before_review = self.client.post(
             f"/api/v1/marketplace/plugins/{version_id}/check-policy",
             headers=self._headers(),
-            json={"require_signature": True, "require_review_approval": True},
+            json={
+                "require_signature": True,
+                "require_artifact_evidence": True,
+                "require_review_approval": True,
+            },
         )
         self.assertEqual(denied_before_review.status_code, 201, denied_before_review.text)
         self.assertEqual(denied_before_review.json()["result"], "deny")
@@ -118,6 +123,7 @@ class PluginReviewSigningTrustOverallTests(unittest.TestCase):
             headers=self._headers(),
             json={
                 "require_signature": True,
+                "require_artifact_evidence": True,
                 "require_review_approval": True,
                 "allowed_plugin_types": ["agent"],
             },
@@ -138,6 +144,19 @@ class PluginReviewSigningTrustOverallTests(unittest.TestCase):
         )
         self.assertEqual(trust.status_code, 201, trust.text)
         self.assertEqual(trust.json()["trust_tier"], "trusted")
+
+        refreshed_policy = self.client.post(
+            f"/api/v1/marketplace/plugins/{version_id}/check-policy",
+            headers=self._headers(),
+            json={
+                "require_signature": True,
+                "require_artifact_evidence": True,
+                "require_review_approval": True,
+                "allowed_plugin_types": ["agent"],
+            },
+        )
+        self.assertEqual(refreshed_policy.status_code, 201, refreshed_policy.text)
+        self.assertEqual(refreshed_policy.json()["result"], "allow")
 
         installed = self.client.post(
             "/api/v1/marketplace/installations",

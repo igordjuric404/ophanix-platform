@@ -333,6 +333,8 @@ from product_platform.mcp.repository import (
 )
 from product_platform.mcp.scans import MCPScannerAdapter
 from product_platform.marketplace.models import (
+    PluginArtifactEvidenceResponse,
+    PluginArtifactEvidenceSubmitRequest,
     PluginInstallationCreateRequest,
     PluginInstallationResponse,
     PluginImportRequest,
@@ -359,6 +361,7 @@ from product_platform.marketplace.repository import (
     PluginReviewStateError,
     PluginSigningKeyNotFoundError,
     plugin_installation_response,
+    plugin_artifact_evidence_response,
     plugin_policy_result_response,
     plugin_quality_assessment_response,
     plugin_response,
@@ -4202,6 +4205,119 @@ def create_app(
             payload_json=installation.model_dump(),
         )
 
+    def _plugin_installation_blocked_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        body: PluginInstallationCreateRequest,
+        reason: str,
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type="marketplace.plugin.install_blocked",
+            source_component="marketplace",
+            actor_type="user",
+            actor_id=actor_id,
+            agent_id=body.target_agent_id,
+            resource_type="plugin_version",
+            resource_id=body.plugin_version_id,
+            decision="deny",
+            severity="warning",
+            correlation_id=correlation_id,
+            payload_json={
+                "plugin_version_id": body.plugin_version_id,
+                "environment_id": body.environment_id,
+                "target_agent_id": body.target_agent_id,
+                "reason": reason,
+            },
+        )
+
+    def _plugin_runtime_tool_grants_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        event_type: str,
+        installation: PluginInstallationResponse,
+        grants: list[Any],
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        decision = "deny" if event_type.endswith(".revoked") else "allow"
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type=event_type,
+            source_component="marketplace-runtime-grants",
+            actor_type="user",
+            actor_id=actor_id,
+            agent_id=installation.target_agent_id,
+            resource_type="plugin_installation",
+            resource_id=installation.id,
+            decision=decision,
+            severity="info",
+            correlation_id=correlation_id,
+            payload_json={
+                "plugin_installation_id": installation.id,
+                "plugin_version_id": installation.plugin_version_id,
+                "environment_id": environment_id,
+                "target_agent_id": installation.target_agent_id,
+                "grants": [
+                    {
+                        "id": grant["id"],
+                        "tool_id": grant["tool_id"],
+                        "tool_name": grant["tool_name"],
+                        "scope": grant["scope"],
+                        "status": grant["status"],
+                        "agent_tool_permission_id": grant["agent_tool_permission_id"],
+                    }
+                    for grant in grants
+                ],
+            },
+        )
+
+    def _plugin_runtime_tool_grants_plugin_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        plugin_id: str,
+        event_type: str,
+        grants: list[Any],
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type=event_type,
+            source_component="marketplace-runtime-grants",
+            actor_type="user",
+            actor_id=actor_id,
+            resource_type="plugin",
+            resource_id=plugin_id,
+            decision="deny",
+            severity="info",
+            correlation_id=correlation_id,
+            payload_json={
+                "plugin_id": plugin_id,
+                "environment_id": environment_id,
+                "grants": [
+                    {
+                        "id": grant["id"],
+                        "installation_id": grant["installation_id"],
+                        "tool_id": grant["tool_id"],
+                        "tool_name": grant["tool_name"],
+                        "scope": grant["scope"],
+                        "status": grant["status"],
+                        "agent_tool_permission_id": grant["agent_tool_permission_id"],
+                    }
+                    for grant in grants
+                ],
+            },
+        )
+
     def _plugin_signing_key_audit_event(
         *,
         organization_id: str,
@@ -4223,6 +4339,29 @@ def create_app(
             severity="warning" if signing_key.status == "revoked" else "info",
             correlation_id=correlation_id,
             payload_json=signing_key.model_dump(),
+        )
+
+    def _plugin_artifact_evidence_audit_event(
+        *,
+        organization_id: str,
+        environment_id: str,
+        actor_id: str,
+        evidence: PluginArtifactEvidenceResponse,
+        correlation_id: str | None,
+    ) -> AuditEventEnvelope:
+        return AuditEventEnvelope(
+            organization_id=organization_id,
+            environment_id=environment_id,
+            event_type="marketplace.plugin.artifact_evidence.recorded",
+            source_component="marketplace-artifacts",
+            actor_type="user",
+            actor_id=actor_id,
+            resource_type="plugin_artifact_evidence",
+            resource_id=evidence.id,
+            decision="allow" if evidence.status == "passed" else "deny",
+            severity="info" if evidence.status == "passed" else "warning",
+            correlation_id=correlation_id,
+            payload_json=evidence.model_dump(),
         )
 
     def _mcp_scan_run_response(
@@ -12437,15 +12576,32 @@ def create_app(
     )
     async def import_marketplace_plugin(
         body: PluginImportRequest,
+        request: Request,
         current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
     ) -> PluginResponse:
         organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        environment_id = context.environment_id or _default_environment_id_for_org(organization_id)
         with _audit_database().transaction() as connection:
             repository = MarketplaceCatalogRepository(connection, organization_id)
             try:
-                row = repository.import_plugin(body)
+                row = repository.import_plugin(body, imported_by=current_user.id)
             except MarketplaceManifestError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if body.status == "disabled":
+                grants = repository.list_runtime_tool_grants_for_plugin(row["id"])
+                if grants:
+                    AuditEventRepository(connection).insert(
+                        _plugin_runtime_tool_grants_plugin_audit_event(
+                            organization_id=organization_id,
+                            environment_id=environment_id,
+                            actor_id=current_user.id,
+                            plugin_id=row["id"],
+                            event_type="marketplace.plugin.runtime_grants.revoked",
+                            grants=grants,
+                            correlation_id=context.correlation_id,
+                        )
+                    )
             return plugin_response(repository, row)
 
     @app.get(
@@ -12684,6 +12840,39 @@ def create_app(
             return plugin_quality_assessment_response(row)
 
     @app.post(
+        "/api/v1/marketplace/plugins/{version_id}/artifact-evidence",
+        response_model=PluginArtifactEvidenceResponse,
+        status_code=201,
+        tags=["marketplace"],
+    )
+    async def submit_marketplace_plugin_artifact_evidence(
+        version_id: str,
+        body: PluginArtifactEvidenceSubmitRequest,
+        request: Request,
+        current_user: UserPrincipal = Depends(require_permission(Permission.SECURITY_MANAGE)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> PluginArtifactEvidenceResponse:
+        organization_id = _require_organization_id(current_user)
+        context = _request_context_from_request(request)
+        with _audit_database().transaction() as connection:
+            repository = MarketplaceCatalogRepository(connection, organization_id)
+            try:
+                row = repository.submit_artifact_evidence(version_id, body)
+            except PluginNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            response = plugin_artifact_evidence_response(row)
+            AuditEventRepository(connection).insert(
+                _plugin_artifact_evidence_audit_event(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    actor_id=current_user.id,
+                    evidence=response,
+                    correlation_id=context.correlation_id,
+                )
+            )
+            return response
+
+    @app.post(
         "/api/v1/marketplace/plugins/{version_id}/recompute-trust",
         response_model=PluginTrustEventResponse,
         status_code=201,
@@ -12719,27 +12908,57 @@ def create_app(
         if body.environment_id != environment_id:
             raise HTTPException(status_code=400, detail="Installation environment must match request context.")
         context = _request_context_from_request(request)
+        blocked_reason: str | None = None
+        response: PluginInstallationResponse | None = None
         with _audit_database().transaction() as connection:
             repository = MarketplaceCatalogRepository(connection, organization_id)
             try:
                 row = repository.create_installation(body, installed_by=current_user.id)
             except PluginInstallationBlockedError as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
+                blocked_reason = str(exc)
+                AuditEventRepository(connection).insert(
+                    _plugin_installation_blocked_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        body=body,
+                        reason=blocked_reason,
+                        correlation_id=context.correlation_id,
+                    )
+                )
             except PluginInstallationStateError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             except PluginNotFoundError as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
-            response = plugin_installation_response(row)
-            AuditEventRepository(connection).insert(
-                _plugin_installation_audit_event(
-                    organization_id=organization_id,
-                    actor_id=current_user.id,
-                    event_type="marketplace.plugin.installed",
-                    installation=response,
-                    correlation_id=context.correlation_id,
+            else:
+                response = plugin_installation_response(row)
+                grants = repository.list_runtime_tool_grants_for_installation(response.id)
+                AuditEventRepository(connection).insert(
+                    _plugin_installation_audit_event(
+                        organization_id=organization_id,
+                        actor_id=current_user.id,
+                        event_type="marketplace.plugin.installed",
+                        installation=response,
+                        correlation_id=context.correlation_id,
+                    )
                 )
-            )
-            return response
+                if grants:
+                    AuditEventRepository(connection).insert(
+                        _plugin_runtime_tool_grants_audit_event(
+                            organization_id=organization_id,
+                            environment_id=environment_id,
+                            actor_id=current_user.id,
+                            event_type="marketplace.plugin.runtime_grants.created",
+                            installation=response,
+                            grants=grants,
+                            correlation_id=context.correlation_id,
+                        )
+                    )
+        if blocked_reason is not None:
+            raise HTTPException(status_code=409, detail=blocked_reason)
+        if response is None:
+            raise HTTPException(status_code=500, detail="Plugin installation did not complete.")
+        return response
 
     @app.get(
         "/api/v1/marketplace/installations",
@@ -12775,7 +12994,7 @@ def create_app(
         with _audit_database().transaction() as connection:
             repository = MarketplaceCatalogRepository(connection, organization_id)
             try:
-                row = repository.uninstall(installation_id)
+                row = repository.uninstall(installation_id, actor_id=current_user.id)
             except PluginInstallationNotFoundError as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
             except PluginInstallationStateError as exc:
@@ -12792,6 +13011,19 @@ def create_app(
                     correlation_id=context.correlation_id,
                 )
             )
+            grants = repository.list_runtime_tool_grants_for_installation(response.id)
+            if grants:
+                AuditEventRepository(connection).insert(
+                    _plugin_runtime_tool_grants_audit_event(
+                        organization_id=organization_id,
+                        environment_id=environment_id,
+                        actor_id=current_user.id,
+                        event_type="marketplace.plugin.runtime_grants.revoked",
+                        installation=response,
+                        grants=grants,
+                        correlation_id=context.correlation_id,
+                    )
+                )
             return response
 
     @app.get(
