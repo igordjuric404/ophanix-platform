@@ -171,6 +171,50 @@ class WorkflowRepository:
             raise ValueError("Workflow run not found.")
         return row
 
+    def requeue_run(
+        self,
+        run_id: str,
+        *,
+        environment_id: str,
+        summary: dict[str, Any] | None = None,
+    ) -> Row:
+        """Move a failed workflow run back to queued for a scheduled worker retry."""
+
+        now = utc_now_iso()
+        cursor = self.connection.execute(
+            """
+            UPDATE workflow_runs
+            SET status = ?,
+                started_at = NULL,
+                finished_at = NULL,
+                exit_code = NULL,
+                summary_json = ?,
+                updated_at = ?
+            WHERE id = ?
+              AND organization_id = ?
+              AND environment_id = ?
+              AND status = ?
+            """,
+            (
+                "queued",
+                json.dumps(summary or {}, sort_keys=True),
+                now,
+                run_id,
+                self.organization_id,
+                environment_id,
+                "failed",
+            ),
+        )
+        if cursor.rowcount == 0:
+            row = self.get_run(run_id, environment_id=environment_id)
+            if row is None:
+                raise ValueError("Workflow run not found.")
+            raise RuntimeError("Workflow run is not failed.")
+        row = self.get_run(run_id, environment_id=environment_id)
+        if row is None:
+            raise ValueError("Workflow run not found.")
+        return row
+
     def cancel_run(self, run_id: str, *, environment_id: str) -> Row:
         row = self.get_run(run_id, environment_id=environment_id)
         if row is None:

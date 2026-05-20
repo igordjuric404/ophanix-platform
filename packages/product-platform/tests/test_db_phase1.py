@@ -119,6 +119,9 @@ FEATURE_MIGRATIONS = [
     "0089",
     "0090",
     "0091",
+    "0092",
+    "0093",
+    "0094",
 ]
 
 ALL_EXPECTED_MIGRATIONS = [*EXPECTED_MIGRATIONS, *FEATURE_MIGRATIONS]
@@ -386,6 +389,24 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
             self.assertIn("report_attestations", tables)
             self.assertIn("compliance_recompute_runs", tables)
             self.assertIn("workflow_logs", tables)
+            background_job_columns = column_names(connection, "background_jobs")
+            for column in (
+                "queue_name",
+                "priority",
+                "lease_until",
+                "claimed_by",
+                "heartbeat_at",
+                "concurrency_key",
+                "retry_backoff_seconds",
+                "next_retry_at",
+                "dead_lettered_at",
+                "dead_letter_reason",
+                "idempotency_key",
+                "operation_type",
+                "operation_id",
+                "idempotency_payload_hash",
+            ):
+                self.assertIn(column, background_job_columns)
             self.assertIn("artifacts", tables)
             self.assertIn("artifact_links", tables)
             self.assertIn("artifact_attestations", tables)
@@ -547,6 +568,26 @@ class DatabaseMigrationPhase1Tests(unittest.TestCase):
                     self.assertNotIn("worker_job_id", saga_activity_result_columns)
                     self.assertNotIn("repair_status", saga_activity_result_columns)
                     self.assertNotIn("lease_owner", saga_activity_result_columns)
+                if migration == "0092":
+                    background_job_columns = column_names(connection, "background_jobs")
+                    self.assertNotIn("queue_name", background_job_columns)
+                    self.assertNotIn("priority", background_job_columns)
+                    self.assertNotIn("lease_until", background_job_columns)
+                    self.assertNotIn("claimed_by", background_job_columns)
+                    self.assertNotIn("heartbeat_at", background_job_columns)
+                    self.assertNotIn("concurrency_key", background_job_columns)
+                if migration == "0093":
+                    background_job_columns = column_names(connection, "background_jobs")
+                    self.assertNotIn("retry_backoff_seconds", background_job_columns)
+                    self.assertNotIn("next_retry_at", background_job_columns)
+                    self.assertNotIn("dead_lettered_at", background_job_columns)
+                    self.assertNotIn("dead_letter_reason", background_job_columns)
+                if migration == "0094":
+                    background_job_columns = column_names(connection, "background_jobs")
+                    self.assertNotIn("idempotency_key", background_job_columns)
+                    self.assertNotIn("operation_type", background_job_columns)
+                    self.assertNotIn("operation_id", background_job_columns)
+                    self.assertNotIn("idempotency_payload_hash", background_job_columns)
                 if migration == "0070":
                     audit_export_columns = column_names(connection, "audit_exports")
                     self.assertNotIn("event_count", audit_export_columns)

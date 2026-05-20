@@ -196,6 +196,9 @@ class JobScheduleRepository:
                 job_type=schedule["job_type"],
                 payload=payload,
                 scheduled_at=scheduled_at,
+                idempotency_key=_scheduled_idempotency_key(schedule, scheduled_at),
+                operation_type="schedule",
+                operation_id=_scheduled_operation_id(schedule, scheduled_at),
             )
             jobs.append(job)
             self._advance_schedule(schedule, now)
@@ -208,13 +211,17 @@ class JobScheduleRepository:
             WHERE organization_id = ?
               AND environment_id = ?
               AND job_type = ?
-              AND payload_json = ?
-              AND scheduled_at = ?
+              AND (
+                (operation_type = ? AND operation_id = ?)
+                OR (payload_json = ? AND scheduled_at = ?)
+              )
             """,
             (
                 schedule["organization_id"],
                 schedule["environment_id"],
                 schedule["job_type"],
+                "schedule",
+                _scheduled_operation_id(schedule, scheduled_at),
                 schedule["payload_json"],
                 scheduled_at,
             ),
@@ -284,3 +291,11 @@ def _parse_interval(interval: str) -> timedelta:
     if unit == "d":
         return timedelta(days=amount)
     raise ValueError(f"Unsupported interval unit: {unit}")
+
+
+def _scheduled_operation_id(schedule: Row, scheduled_at: str) -> str:
+    return f"{schedule['id']}:{scheduled_at}"
+
+
+def _scheduled_idempotency_key(schedule: Row, scheduled_at: str) -> str:
+    return f"schedule:{_scheduled_operation_id(schedule, scheduled_at)}"

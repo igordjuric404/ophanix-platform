@@ -67,6 +67,10 @@ class JobRegistry:
     def register(self, job_type: str, handler: JobHandler) -> None:
         self._handlers[job_type] = handler
 
+    @property
+    def job_types(self) -> tuple[str, ...]:
+        return tuple(self._handlers.keys())
+
     def resolve(self, job_type: str) -> JobHandler:
         try:
             return self._handlers[job_type]
@@ -147,4 +151,3 @@ class Worker:
                 break
             executions.append(execution)
         return executions
-

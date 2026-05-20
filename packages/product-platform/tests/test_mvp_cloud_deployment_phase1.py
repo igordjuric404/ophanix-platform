@@ -32,7 +32,7 @@ class MVPCloudDeploymentPhase1Tests(unittest.TestCase):
         self.assertIn("COPY packages/agent-discovery/pyproject.toml", worker)
         self.assertIn("python -m pip install ./packages/agent-discovery", worker)
         self.assertIn('CMD ["worker", "loop", "--interval-seconds", "10"]', worker)
-        self.assertIn("worker noop", worker)
+        self.assertIn("worker ready", worker)
 
     def test_image_build_workflow_targets_frontend_api_and_worker(self) -> None:
         workflow = (REPO_ROOT / ".github/workflows/product-platform-images.yml").read_text()
@@ -62,7 +62,7 @@ class MVPCloudDeploymentPhase1Tests(unittest.TestCase):
         self.assertIn("-t \"$FRONTEND_IMAGE\" \"$REPO_ROOT\"", script)
         self.assertIn("/health", script)
         self.assertIn("/ready", script)
-        self.assertIn("worker noop", script)
+        self.assertIn("worker ready", script)
 
     def test_worker_image_smoke_command_executes_noop_job(self) -> None:
         env = dict(os.environ)

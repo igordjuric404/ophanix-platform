@@ -102,7 +102,7 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-m", "product_platform.cli", "worker", "noop"]
+      test: ["CMD", "python", "-m", "product_platform.cli", "worker", "ready"]
       interval: 10s
       timeout: 3s
       retries: 20

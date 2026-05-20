@@ -23,7 +23,7 @@ RUN python -m pip install --upgrade pip \
     && python -m pip install ./packages/product-platform
 
 HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
-    CMD python -m product_platform.cli worker noop
+    CMD python -m product_platform.cli worker ready
 
 ENTRYPOINT ["python", "-m", "product_platform.cli"]
 CMD ["worker", "loop", "--interval-seconds", "10"]

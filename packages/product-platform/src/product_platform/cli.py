@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import socket
 import time
 
 import uvicorn
@@ -15,6 +17,7 @@ from product_platform.db.seed import reset_demo_data, seed_demo_data
 from product_platform.demo.services import check_demo_http_health, run_demo_http_service
 from product_platform.tool_gateway.runtime_audit import purge_tool_invocation_idempotency_records
 from product_platform.worker import InMemoryJobQueue, JobRegistry, JobRequest, JobResult, Worker
+from product_platform.worker.persistent import ProductPlatformWorker, check_worker_store_ready
 
 
 def main() -> None:
@@ -48,8 +51,21 @@ def main() -> None:
     worker = subparsers.add_parser("worker", help="Run local worker utilities")
     worker_subparsers = worker.add_subparsers(dest="worker_command")
     worker_subparsers.add_parser("noop", help="Execute one in-memory no-op job")
-    loop = worker_subparsers.add_parser("loop", help="Run a lightweight local worker loop")
+    worker_subparsers.add_parser("ready", help="Check persistent worker job-store readiness")
+    run_once = worker_subparsers.add_parser("run-once", help="Claim and execute one persistent queued job")
+    run_once.add_argument("--queue", default=None, help="Optional queue name to consume")
+    run_once.add_argument("--worker-id", default=None, help="Stable worker identity for leases")
+    run_once.add_argument("--lease-seconds", type=int, default=300)
+    loop = worker_subparsers.add_parser("loop", help="Run the persistent worker loop")
     loop.add_argument("--interval-seconds", type=float, default=5.0)
+    loop.add_argument("--queue", default=None, help="Optional queue name to consume")
+    loop.add_argument("--worker-id", default=None, help="Stable worker identity for leases")
+    loop.add_argument("--lease-seconds", type=int, default=300)
+    loop.add_argument(
+        "--dev-noop",
+        action="store_true",
+        help="Run the old in-memory no-op loop for local diagnostics only.",
+    )
 
     demo_service = subparsers.add_parser("demo-service", help="Run local demo helper services")
     demo_service_subparsers = demo_service.add_subparsers(dest="demo_service_command")
@@ -115,16 +131,61 @@ def main() -> None:
             execution = _run_noop_worker_job()
             print(f"Worker no-op job {execution.status}: {execution.result.get('ok')}")
             return
+        if args.worker_command == "ready":
+            database = _worker_database()
+            try:
+                check_worker_store_ready(database)
+            finally:
+                database.close()
+            print("Worker ready: job store reachable")
+            return
+        if args.worker_command == "run-once":
+            database = _worker_database()
+            try:
+                execution = ProductPlatformWorker(
+                    database,
+                    queue_name=args.queue,
+                    worker_id=args.worker_id or _default_worker_id(),
+                    lease_seconds=args.lease_seconds,
+                ).run_once()
+            finally:
+                database.close()
+            if execution is None:
+                print("Worker found no queued jobs")
+            else:
+                print(f"Worker job {execution.job_id} {execution.status}")
+            return
         if args.worker_command == "loop":
+            if args.dev_noop:
+                print("Worker dev no-op loop started")
+                try:
+                    while True:
+                        _run_noop_worker_job()
+                        time.sleep(args.interval_seconds)
+                except KeyboardInterrupt:
+                    print("Worker dev no-op loop stopped")
+                    return
+            database = _worker_database()
+            persistent_worker = ProductPlatformWorker(
+                database,
+                queue_name=args.queue,
+                worker_id=args.worker_id or _default_worker_id(),
+                lease_seconds=args.lease_seconds,
+            )
             print("Worker loop started")
             try:
                 while True:
-                    _run_noop_worker_job()
+                    execution = persistent_worker.run_once()
+                    if execution is not None:
+                        print(f"Worker job {execution.job_id} {execution.status}")
                     time.sleep(args.interval_seconds)
             except KeyboardInterrupt:
                 print("Worker loop stopped")
+                database.close()
                 return
-        parser.error("worker command requires noop or loop")
+            finally:
+                database.close()
+        parser.error("worker command requires noop, ready, run-once, or loop")
 
     if args.command == "demo-service":
         if args.demo_service_command == "serve":
@@ -164,6 +225,15 @@ def _run_noop_worker_job():
     if execution is None:
         raise RuntimeError("No worker job was executed.")
     return execution
+
+
+def _worker_database() -> Database:
+    settings = load_settings()
+    return Database(settings.database_url, max_pool_size=int(settings.database_max_pool_size))
+
+
+def _default_worker_id() -> str:
+    return f"{socket.gethostname()}:{os.getpid()}"
 
 
 if __name__ == "__main__":

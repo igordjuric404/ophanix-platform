@@ -1,5 +1,90 @@
 # Feature Audit: Workers and Background Jobs
 
+## Remediation Summary
+
+Date of remediation: 2026-05-20
+
+Total findings in this report: 4
+
+Number fixed: 4
+
+Number partially fixed: 0
+
+Number blocked: 0
+
+Number already fixed: 0
+
+Files changed:
+- `packages/product-platform/src/product_platform/worker/runtime.py`
+- `packages/product-platform/src/product_platform/worker/persistent.py`
+- `packages/product-platform/src/product_platform/worker/__init__.py`
+- `packages/product-platform/src/product_platform/worker/store.py`
+- `packages/product-platform/src/product_platform/worker/api_models.py`
+- `packages/product-platform/src/product_platform/worker/scheduler.py`
+- `packages/product-platform/src/product_platform/workflows/worker.py`
+- `packages/product-platform/src/product_platform/workflows/repository.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/src/product_platform/cli.py`
+- `packages/product-platform/src/product_platform/db/migrations/0001_base_schema.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0092_background_job_routing_leases.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0092_background_job_routing_leases.down.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0093_background_job_retry_dlq.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0093_background_job_retry_dlq.down.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0094_background_job_idempotency.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0094_background_job_idempotency.down.sql`
+- `packages/product-platform/deploy/cloud/Dockerfile.worker`
+- `packages/product-platform/docker-compose.demo.yml`
+- `packages/product-platform/deploy/cloud/smoke-images.sh`
+- `packages/product-platform/deploy/cloud/observability.yml`
+- `packages/product-platform/tests/test_workers_background_jobs_phase1.py`
+- `packages/product-platform/tests/test_workers_background_jobs_phase2.py`
+- `packages/product-platform/tests/test_workers_background_jobs_phase3.py`
+- `packages/product-platform/tests/test_workers_background_jobs_phase4.py`
+- `packages/product-platform/tests/test_mvp_cloud_deployment_phase1.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+
+Tests added or updated:
+- `test_workers_background_jobs_phase1.py::test_cli_worker_consumes_persistent_workflow_job`
+- `test_workers_background_jobs_phase1.py::test_cli_worker_ready_checks_persistent_job_store`
+- `test_workers_background_jobs_phase1.py::test_deployment_worker_health_uses_persistent_readiness`
+- `test_workers_background_jobs_phase2.py::test_queue_priority_schedule_guard_and_worker_identity_control_claims`
+- `test_workers_background_jobs_phase2.py::test_stale_worker_lease_is_recovered_by_next_worker`
+- `test_workers_background_jobs_phase2.py::test_worker_heartbeat_extends_running_lease`
+- `test_workers_background_jobs_phase2.py::test_api_job_response_exposes_queue_priority_and_lease_metadata`
+- `test_workers_background_jobs_phase3.py::test_persistent_worker_retries_then_enters_dead_letter_queue`
+- `test_workers_background_jobs_phase3.py::test_workflow_worker_requeues_failed_run_until_dead_lettered`
+- `test_workers_background_jobs_phase3.py::test_dead_lettered_jobs_are_queryable_and_replayable_by_operator`
+- `test_workers_background_jobs_phase3.py::test_operator_can_cancel_failed_job`
+- `test_workers_background_jobs_phase4.py::test_duplicate_enqueue_api_returns_existing_job_and_rejects_conflict`
+- `test_workers_background_jobs_phase4.py::test_scheduler_uses_operation_identity_for_duplicate_safe_enqueue`
+- `test_workers_background_jobs_phase4.py::test_idempotent_duplicate_job_claim_executes_side_effect_once`
+- `test_mvp_cloud_deployment_phase1.py::test_production_dockerfiles_define_expected_entrypoints_and_healthchecks`
+- `test_mvp_cloud_deployment_phase1.py::test_image_smoke_script_builds_and_runs_expected_targets`
+- `test_db_phase1.py::test_migration_applies_to_empty_database`
+- `test_db_phase1.py::test_migration_can_be_rolled_back`
+
+Validation commands run:
+- `PYTHONPATH=src:tests python3 -m unittest test_workers_background_jobs_phase1 test_worker_phase1 test_worker_phase2 test_worker_phase4 test_mvp_cloud_deployment_phase1 -v` passed after fixing a test assertion.
+- `PYTHONPATH=src:tests python3 -m unittest test_workers_background_jobs_phase2 test_worker_phase2 test_worker_phase3 test_worker_phase4 test_workers_background_jobs_phase1 -v` passed.
+- `PYTHONPATH=src:tests python3 -m unittest test_workers_background_jobs_phase3 test_workers_background_jobs_phase2 test_workers_background_jobs_phase1 test_worker_phase2 test_worker_phase4 -v` passed.
+- `PYTHONPATH=src:tests python3 -m unittest test_workers_background_jobs_phase4 test_worker_phase3 test_worker_phase4 test_workers_background_jobs_phase3 test_workers_background_jobs_phase2 -v` passed.
+- `PYTHONPATH=src:tests python3 -m unittest test_workers_background_jobs_phase1 test_workers_background_jobs_phase2 test_workers_background_jobs_phase3 test_workers_background_jobs_phase4 test_worker_phase1 test_worker_phase2 test_worker_phase3 test_worker_phase4 test_workflow_runner_phase2 test_mvp_cloud_deployment_phase1 -v` passed.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` passed.
+- `python3 -m py_compile src/product_platform/cli.py src/product_platform/worker/persistent.py src/product_platform/worker/runtime.py src/product_platform/worker/__init__.py tests/test_workers_background_jobs_phase1.py tests/test_mvp_cloud_deployment_phase1.py` passed.
+- `python3 -m py_compile src/product_platform/worker/store.py src/product_platform/worker/api_models.py src/product_platform/workflows/worker.py src/product_platform/worker/persistent.py src/product_platform/cli.py tests/test_workers_background_jobs_phase2.py tests/test_db_phase1.py` passed.
+- `python3 -m py_compile src/product_platform/worker/store.py src/product_platform/worker/api_models.py src/product_platform/worker/persistent.py src/product_platform/workflows/repository.py src/product_platform/workflows/worker.py src/product_platform/api/app.py tests/test_workers_background_jobs_phase3.py tests/test_db_phase1.py` passed.
+- `python3 -m py_compile src/product_platform/worker/store.py src/product_platform/worker/api_models.py src/product_platform/worker/scheduler.py src/product_platform/api/app.py tests/test_workers_background_jobs_phase4.py tests/test_db_phase1.py` passed.
+- `python3 -m ruff check src/product_platform/cli.py src/product_platform/worker/persistent.py src/product_platform/worker/runtime.py src/product_platform/worker/__init__.py tests/test_workers_background_jobs_phase1.py tests/test_mvp_cloud_deployment_phase1.py` passed.
+- `python3 -m ruff check src/product_platform/worker/store.py src/product_platform/worker/api_models.py src/product_platform/workflows/worker.py src/product_platform/worker/persistent.py src/product_platform/cli.py tests/test_workers_background_jobs_phase2.py tests/test_db_phase1.py` passed.
+- `python3 -m ruff check src/product_platform/worker/store.py src/product_platform/worker/api_models.py src/product_platform/worker/persistent.py src/product_platform/workflows/repository.py src/product_platform/workflows/worker.py src/product_platform/api/app.py tests/test_workers_background_jobs_phase3.py tests/test_db_phase1.py` passed.
+- `python3 -m ruff check src/product_platform/worker/store.py src/product_platform/worker/api_models.py src/product_platform/worker/scheduler.py src/product_platform/api/app.py tests/test_workers_background_jobs_phase4.py tests/test_db_phase1.py` passed.
+- `python3 -m ruff check src/product_platform/cli.py src/product_platform/worker/runtime.py src/product_platform/worker/persistent.py src/product_platform/worker/store.py src/product_platform/worker/api_models.py src/product_platform/worker/scheduler.py src/product_platform/worker/__init__.py src/product_platform/workflows/repository.py src/product_platform/workflows/worker.py src/product_platform/api/app.py tests/test_workers_background_jobs_phase1.py tests/test_workers_background_jobs_phase2.py tests/test_workers_background_jobs_phase3.py tests/test_workers_background_jobs_phase4.py tests/test_db_phase1.py tests/test_mvp_cloud_deployment_phase1.py` passed.
+- `python3 -m mypy --config-file pyproject.toml` passed.
+- `python3 -m build --wheel --sdist --outdir /tmp/ophanix-product-platform-build-validation` passed.
+
+Remaining risks:
+- None.
+
 ## 1. Scope
 
 This audit covers persistent background jobs, workflow workers, retries, leasing, scheduling, idempotency, readiness probes, operational visibility, and worker deployment wiring. It inspects `product_platform/worker`, `product_platform/workflows/worker.py`, `api/app.py`, `cli.py`, `docker-compose.demo.yml`, job migrations, and frontend workflow views. Relevant benchmarks are Temporal task queues/workers, AWS AgentCore async runtime patterns, and CrewAI deployment/monitoring workflows. Out of scope: saga-specific compensation semantics, covered in SAG.
@@ -23,6 +108,41 @@ Current workflow: jobs can be created and listed, schedules can produce jobs, so
 ## 4. Findings
 
 ### F-WRK-001 [P0] [Scalability] Persistent jobs are created but the shipped worker loop does not consume the production queue
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+The shipped worker path now consumes persistent database-backed jobs instead of repeatedly running the in-memory no-op job. Added a production `ProductPlatformWorker` that runs queued workflow jobs through `WorkflowRunWorker` first, then generic registered persistent jobs such as `demo.noop`. The CLI now exposes `worker run-once`, `worker ready`, and a production `worker loop`; the old no-op behavior remains only behind explicit `worker noop` and `worker loop --dev-noop`. Worker Dockerfile, compose healthcheck, image smoke, and observability health command now use persistent job-store readiness.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/worker/runtime.py`
+- `packages/product-platform/src/product_platform/worker/persistent.py`
+- `packages/product-platform/src/product_platform/worker/__init__.py`
+- `packages/product-platform/src/product_platform/cli.py`
+- `packages/product-platform/deploy/cloud/Dockerfile.worker`
+- `packages/product-platform/docker-compose.demo.yml`
+- `packages/product-platform/deploy/cloud/smoke-images.sh`
+- `packages/product-platform/deploy/cloud/observability.yml`
+- `packages/product-platform/tests/test_workers_background_jobs_phase1.py`
+- `packages/product-platform/tests/test_mvp_cloud_deployment_phase1.py`
+
+**Tests added or updated:**
+- `test_workers_background_jobs_phase1.py::test_cli_worker_consumes_persistent_workflow_job`
+- `test_workers_background_jobs_phase1.py::test_cli_worker_ready_checks_persistent_job_store`
+- `test_workers_background_jobs_phase1.py::test_deployment_worker_health_uses_persistent_readiness`
+- `test_mvp_cloud_deployment_phase1.py::test_production_dockerfiles_define_expected_entrypoints_and_healthchecks`
+- `test_mvp_cloud_deployment_phase1.py::test_image_smoke_script_builds_and_runs_expected_targets`
+
+**Validation performed:**
+- `PYTHONPATH=src:tests python3 -m unittest test_workers_background_jobs_phase1 test_worker_phase1 test_worker_phase2 test_worker_phase4 test_mvp_cloud_deployment_phase1 -v` initially failed on a YAML-list string assertion, was fixed, and then passed with 27 tests.
+- `python3 -m py_compile src/product_platform/cli.py src/product_platform/worker/persistent.py src/product_platform/worker/runtime.py src/product_platform/worker/__init__.py tests/test_workers_background_jobs_phase1.py tests/test_mvp_cloud_deployment_phase1.py` passed.
+- `python3 -m ruff check src/product_platform/cli.py src/product_platform/worker/persistent.py src/product_platform/worker/runtime.py src/product_platform/worker/__init__.py tests/test_workers_background_jobs_phase1.py tests/test_mvp_cloud_deployment_phase1.py` passed.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Incorrect
 
@@ -76,6 +196,44 @@ Production deployments can accumulate queued jobs that never run.
 
 ### F-WRK-002 [P1] [Reliability] Retry and terminal failure behavior is modeled but not operationalized consistently
 
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Background workers now share an operational retry and dead-letter path. Added retry metadata fields, migration `0093`, a `dead_lettered` job status, deterministic exponential backoff with bounded jitter, worker-facing failure handling that either schedules the next retry or dead-letters after max attempts, queryable status filtering, manual replay for failed/dead-lettered jobs, and cancellation for failed/dead-lettered jobs. Workflow jobs now default to three attempts, failed workflow runs are reset to queued when their backing job is scheduled for retry, and exhausted workflow jobs remain failed while their backing job enters the queryable DLQ state.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/db/migrations/0001_base_schema.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0093_background_job_retry_dlq.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0093_background_job_retry_dlq.down.sql`
+- `packages/product-platform/src/product_platform/worker/store.py`
+- `packages/product-platform/src/product_platform/worker/api_models.py`
+- `packages/product-platform/src/product_platform/worker/persistent.py`
+- `packages/product-platform/src/product_platform/workflows/repository.py`
+- `packages/product-platform/src/product_platform/workflows/worker.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/tests/test_workers_background_jobs_phase3.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+
+**Tests added or updated:**
+- `test_workers_background_jobs_phase3.py::test_persistent_worker_retries_then_enters_dead_letter_queue`
+- `test_workers_background_jobs_phase3.py::test_workflow_worker_requeues_failed_run_until_dead_lettered`
+- `test_workers_background_jobs_phase3.py::test_dead_lettered_jobs_are_queryable_and_replayable_by_operator`
+- `test_workers_background_jobs_phase3.py::test_operator_can_cancel_failed_job`
+- `test_db_phase1.py::test_migration_applies_to_empty_database`
+- `test_db_phase1.py::test_migration_can_be_rolled_back`
+
+**Validation performed:**
+- `python3 -m py_compile src/product_platform/worker/store.py src/product_platform/worker/api_models.py src/product_platform/worker/persistent.py src/product_platform/workflows/repository.py src/product_platform/workflows/worker.py src/product_platform/api/app.py tests/test_workers_background_jobs_phase3.py tests/test_db_phase1.py` passed.
+- `PYTHONPATH=src:tests python3 -m unittest test_workers_background_jobs_phase3 test_workers_background_jobs_phase2 test_workers_background_jobs_phase1 test_worker_phase2 test_worker_phase4 -v` passed with 26 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` passed with 5 tests.
+- `python3 -m ruff check src/product_platform/worker/store.py src/product_platform/worker/api_models.py src/product_platform/worker/persistent.py src/product_platform/workflows/repository.py src/product_platform/workflows/worker.py src/product_platform/api/app.py tests/test_workers_background_jobs_phase3.py tests/test_db_phase1.py` passed.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
+
 **Status:** Partially Implemented
 
 **Current implementation:**
@@ -128,6 +286,41 @@ Recoverable outages become permanent workflow failures.
 
 ### F-WRK-003 [P1] [Idempotency] Background jobs lack generic idempotency and dedupe guarantees
 
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Generic background jobs now support scoped idempotency and operation identity. Added `idempotency_key`, `operation_type`, `operation_id`, and `idempotency_payload_hash` fields with uniqueness indexes scoped by organization, environment, and job type. Duplicate enqueue with the same key and same logical content returns the existing job; key or operation reuse with different content is rejected with a 409 conflict. API responses expose idempotency metadata, scheduler enqueue uses deterministic schedule operation identity, and duplicate idempotent jobs only execute once through the persistent worker.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/db/migrations/0001_base_schema.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0094_background_job_idempotency.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0094_background_job_idempotency.down.sql`
+- `packages/product-platform/src/product_platform/worker/store.py`
+- `packages/product-platform/src/product_platform/worker/api_models.py`
+- `packages/product-platform/src/product_platform/worker/scheduler.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/tests/test_workers_background_jobs_phase4.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+
+**Tests added or updated:**
+- `test_workers_background_jobs_phase4.py::test_duplicate_enqueue_api_returns_existing_job_and_rejects_conflict`
+- `test_workers_background_jobs_phase4.py::test_scheduler_uses_operation_identity_for_duplicate_safe_enqueue`
+- `test_workers_background_jobs_phase4.py::test_idempotent_duplicate_job_claim_executes_side_effect_once`
+- `test_db_phase1.py::test_migration_applies_to_empty_database`
+- `test_db_phase1.py::test_migration_can_be_rolled_back`
+
+**Validation performed:**
+- `python3 -m py_compile src/product_platform/worker/store.py src/product_platform/worker/api_models.py src/product_platform/worker/scheduler.py src/product_platform/api/app.py tests/test_workers_background_jobs_phase4.py tests/test_db_phase1.py` passed.
+- `PYTHONPATH=src:tests python3 -m unittest test_workers_background_jobs_phase4 test_worker_phase3 test_worker_phase4 test_workers_background_jobs_phase3 test_workers_background_jobs_phase2 -v` passed with 25 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` passed with 5 tests.
+- `python3 -m ruff check src/product_platform/worker/store.py src/product_platform/worker/api_models.py src/product_platform/worker/scheduler.py src/product_platform/api/app.py tests/test_workers_background_jobs_phase4.py tests/test_db_phase1.py` passed.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
+
 **Status:** Missing
 
 **Current implementation:**
@@ -179,6 +372,44 @@ Retries and client resubmits can create duplicate work.
 **Affects stated Ophanix product promise:** Yes
 
 ### F-WRK-004 [P1] [Scalability] Queue routing and leases are too thin for multi-worker production operation
+
+**Remediation status:** Fixed
+
+**Remediation summary:**
+Background jobs now have first-class queue routing and worker lease metadata. The store can enqueue jobs with `queue_name`, `priority`, and optional `concurrency_key`, claim jobs by queue with due-schedule guards, order claims by priority, record `claimed_by`, `lease_until`, and `heartbeat_at`, recover stale running leases, and extend leases through heartbeat updates. Workflow and persistent workers accept worker identity, queue selection, and lease duration. Job API responses expose queue and lease metadata, workflow jobs are routed to the `workflows` queue, and migration `0092` plus the base schema carry the new fields and indexes.
+
+**Files changed:**
+- `packages/product-platform/src/product_platform/db/migrations/0001_base_schema.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0092_background_job_routing_leases.up.sql`
+- `packages/product-platform/src/product_platform/db/migrations/0092_background_job_routing_leases.down.sql`
+- `packages/product-platform/src/product_platform/worker/store.py`
+- `packages/product-platform/src/product_platform/worker/api_models.py`
+- `packages/product-platform/src/product_platform/workflows/worker.py`
+- `packages/product-platform/src/product_platform/worker/persistent.py`
+- `packages/product-platform/src/product_platform/cli.py`
+- `packages/product-platform/src/product_platform/api/app.py`
+- `packages/product-platform/tests/test_workers_background_jobs_phase2.py`
+- `packages/product-platform/tests/test_db_phase1.py`
+
+**Tests added or updated:**
+- `test_workers_background_jobs_phase2.py::test_queue_priority_schedule_guard_and_worker_identity_control_claims`
+- `test_workers_background_jobs_phase2.py::test_stale_worker_lease_is_recovered_by_next_worker`
+- `test_workers_background_jobs_phase2.py::test_worker_heartbeat_extends_running_lease`
+- `test_workers_background_jobs_phase2.py::test_api_job_response_exposes_queue_priority_and_lease_metadata`
+- `test_db_phase1.py::test_migration_applies_to_empty_database`
+- `test_db_phase1.py::test_migration_can_be_rolled_back`
+
+**Validation performed:**
+- `PYTHONPATH=src:tests python3 -m unittest test_workers_background_jobs_phase2 test_worker_phase2 test_worker_phase3 test_worker_phase4 test_workers_background_jobs_phase1 -v` passed with 26 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_db_phase1.py' -v` passed with 5 tests.
+- `python3 -m py_compile src/product_platform/worker/store.py src/product_platform/worker/api_models.py src/product_platform/workflows/worker.py src/product_platform/worker/persistent.py src/product_platform/cli.py tests/test_workers_background_jobs_phase2.py tests/test_db_phase1.py` passed.
+- `python3 -m ruff check src/product_platform/worker/store.py src/product_platform/worker/api_models.py src/product_platform/workflows/worker.py src/product_platform/worker/persistent.py src/product_platform/cli.py tests/test_workers_background_jobs_phase2.py tests/test_db_phase1.py` passed.
+
+**Remaining work:**
+None
+
+**Remediated by:**
+AI coding agent
 
 **Status:** Partially Implemented
 
@@ -279,4 +510,3 @@ None.
 ## 7. Feature-Level Target State
 
 Workers should operate as a production queue system: durable jobs, typed handlers, queues, priorities, leases, heartbeats, retries, DLQs, idempotency, and operational visibility. The CLI and deployment manifests should run the real worker. APIs should expose queue status, stuck jobs, replay, cancel, and worker health. Runtime and saga execution should dispatch side effects through this worker layer or a proven durable backend. Tests should cover multi-worker races, restart recovery, retry exhaustion, and deployment smoke.
-

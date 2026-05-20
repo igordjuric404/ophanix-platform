@@ -47,6 +47,9 @@ class WorkflowRunWorker:
         *,
         runner_registry: WorkflowRunnerRegistry | None = None,
         artifact_storage_path: str | Path | None = None,
+        queue_name: str | None = None,
+        worker_id: str | None = None,
+        lease_seconds: int = 300,
     ) -> None:
         self.database = database
         self.runner_registry = runner_registry or build_default_workflow_runner_registry()
@@ -54,6 +57,9 @@ class WorkflowRunWorker:
             artifact_storage_path
             or os.environ.get("OPHANIX_ARTIFACT_STORAGE_PATH", "/tmp/ophanix-product-artifacts")
         )
+        self.queue_name = queue_name
+        self.worker_id = worker_id
+        self.lease_seconds = lease_seconds
 
     def run_once(self, job_id: str | None = None) -> WorkflowJobExecution | None:
         """Execute one queued workflow job, returning None when no job is available."""
@@ -61,9 +67,18 @@ class WorkflowRunWorker:
         with self.database.transaction() as connection:
             jobs = JobStateRepository(connection)
             job = (
-                jobs.claim_queued_job(job_id)
+                jobs.claim_queued_job(
+                    job_id,
+                    worker_id=self.worker_id,
+                    lease_seconds=self.lease_seconds,
+                )
                 if job_id
-                else jobs.claim_next_queued_job(job_type=WORKFLOW_JOB_TYPE)
+                else jobs.claim_next_queued_job(
+                    job_type=WORKFLOW_JOB_TYPE,
+                    queue_name=self.queue_name,
+                    worker_id=self.worker_id,
+                    lease_seconds=self.lease_seconds,
+                )
             )
             if job is None:
                 return None
@@ -76,7 +91,7 @@ class WorkflowRunWorker:
             repository = WorkflowRepository(connection, organization_id)
             workflow_run = repository.get_run(workflow_run_id, environment_id=environment_id)
             if workflow_run is None:
-                failed = jobs.mark_failed(
+                failed = jobs.record_failed_attempt(
                     job["id"],
                     expected_attempt=int(job["attempts"]),
                     error_message="Workflow run not found.",
@@ -89,7 +104,7 @@ class WorkflowRunWorker:
                 )
 
             if workflow_run["status"] != JobStatus.QUEUED:
-                failed = jobs.mark_failed(
+                failed = jobs.record_failed_attempt(
                     job["id"],
                     expected_attempt=int(job["attempts"]),
                     error_message="Workflow run is not queued.",
@@ -169,12 +184,21 @@ class WorkflowRunWorker:
                     result=job_result,
                 )
             else:
-                job = jobs.mark_failed(
+                job = jobs.record_failed_attempt(
                     job["id"],
                     expected_attempt=int(job["attempts"]),
                     error_message=str(result.summary.get("error") or "Workflow run failed."),
                     logs=job_logs,
                 )
+                if job["status"] == JobStatus.QUEUED:
+                    completed = repository.requeue_run(
+                        workflow_run_id,
+                        environment_id=environment_id,
+                        summary={
+                            "retry_scheduled_at": job["next_retry_at"],
+                            "error": job["error_message"],
+                        },
+                    )
             _insert_workflow_audit_event(
                 connection,
                 organization_id=organization_id,

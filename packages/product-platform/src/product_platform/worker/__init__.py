@@ -11,6 +11,13 @@ from product_platform.worker.runtime import (
     JobResult,
     Worker,
 )
+from product_platform.worker.persistent import (
+    PersistentJobExecution,
+    PersistentJobWorker,
+    ProductPlatformWorker,
+    build_default_persistent_job_registry,
+    check_worker_store_ready,
+)
 from product_platform.worker.scheduler import (
     JobScheduleRepository,
     calculate_next_run,
@@ -26,6 +33,11 @@ __all__ = [
     "JobRequest",
     "JobResult",
     "Worker",
+    "PersistentJobExecution",
+    "PersistentJobWorker",
+    "ProductPlatformWorker",
+    "build_default_persistent_job_registry",
+    "check_worker_store_ready",
     "JobStateRepository",
     "JobStateConflictError",
     "JobStatus",

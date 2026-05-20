@@ -54,6 +54,6 @@ sleep 3
 curl --fail "http://127.0.0.1:$API_PORT/health" >/dev/null
 curl --fail "http://127.0.0.1:$API_PORT/ready" >/dev/null
 
-docker run --rm --network "$SMOKE_NETWORK" -e OPHANIX_DATABASE_URL="$API_DB_URL" "$WORKER_IMAGE" worker noop
+docker run --rm --network "$SMOKE_NETWORK" -e OPHANIX_DATABASE_URL="$API_DB_URL" "$WORKER_IMAGE" worker ready
 
 printf '%s\n' "Product platform image smoke checks passed."

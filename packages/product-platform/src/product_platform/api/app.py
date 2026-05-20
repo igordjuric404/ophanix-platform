@@ -702,7 +702,12 @@ from product_platform.worker.api_models import (
     job_schedule_response,
 )
 from product_platform.worker.scheduler import JobScheduleRepository
-from product_platform.worker.store import JobStateConflictError, JobStateRepository
+from product_platform.worker.store import (
+    JobIdempotencyConflictError,
+    JobStateConflictError,
+    JobStateRepository,
+    JobStatus,
+)
 from product_platform.workflows.models import (
     WorkflowDefinitionResponse,
     WorkflowInputValidationError,
@@ -2244,6 +2249,7 @@ def create_app(
                     organization_id=organization_id,
                     environment_id=environment_id,
                     job_type=WORKFLOW_JOB_TYPE,
+                    queue_name="workflows",
                     payload={
                         "workflow_run_id": run["id"],
                         "workflow_definition_id": definition["id"],
@@ -2252,7 +2258,7 @@ def create_app(
                         "inputs": body.inputs,
                         "started_by": current_user.id,
                     },
-                    max_attempts=1,
+                    max_attempts=3,
                     job_id=run["id"],
                     **_trace_context_fields(context),
                 )
@@ -10182,14 +10188,23 @@ def create_app(
         with database_for_jobs.transaction() as connection:
             jobs = JobStateRepository(connection)
             audit = AuditEventRepository(connection)
-            created = jobs.create_job(
-                organization_id=organization_id,
-                environment_id=environment_id,
-                job_type=body.job_type,
-                payload=body.payload,
-                max_attempts=body.max_attempts,
-                **_trace_context_fields(context),
-            )
+            try:
+                created = jobs.create_job(
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                    job_type=body.job_type,
+                    queue_name=body.queue_name,
+                    priority=body.priority,
+                    concurrency_key=body.concurrency_key,
+                    idempotency_key=body.idempotency_key,
+                    operation_type=body.operation_type,
+                    operation_id=body.operation_id,
+                    payload=body.payload,
+                    max_attempts=body.max_attempts,
+                    **_trace_context_fields(context),
+                )
+            except JobIdempotencyConflictError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
             _insert_job_audit_event(
                 audit,
                 organization_id=organization_id,
@@ -11205,6 +11220,7 @@ def create_app(
 
     @app.get("/api/v1/jobs", response_model=list[JobResponse], tags=["jobs"])
     async def list_jobs(
+        status: str | None = Query(default=None),
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
         current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
@@ -11213,12 +11229,15 @@ def create_app(
         """List background jobs for the current organization."""
 
         organization_id = _require_organization_id(current_user)
+        if status is not None and status not in JobStatus.ALL:
+            raise HTTPException(status_code=422, detail="Unsupported job status filter.")
         jobs = JobStateRepository(_audit_database().connect())
         return [
             job_response(row, jobs.runs_for_job(row["id"]))
             for row in jobs.list_jobs(
                 organization_id,
                 environment_id=environment_id,
+                status=status,
                 limit=limit,
                 offset=offset,
             )
@@ -11272,6 +11291,39 @@ def create_app(
                     status=canceled["status"],
                 )
             return job_response(canceled, jobs.runs_for_job(job_id))
+
+    @app.post("/api/v1/jobs/{job_id}/replay", response_model=JobResponse, tags=["jobs"])
+    async def replay_job(
+        job_id: str,
+        current_user: UserPrincipal = Depends(require_permission(Permission.JOB_RUN)),
+        environment_id: str = Depends(require_environment_context),
+    ) -> JobResponse:
+        """Replay a failed or dead-lettered background job."""
+
+        organization_id = _require_organization_id(current_user)
+        database_for_jobs = _audit_database()
+        with database_for_jobs.transaction() as connection:
+            jobs = JobStateRepository(connection)
+            row = jobs.get_job_for_org(job_id, organization_id, environment_id=environment_id)
+            if row is None:
+                raise HTTPException(status_code=404, detail="Job not found.")
+            try:
+                replayed = jobs.replay(
+                    job_id,
+                    organization_id=organization_id,
+                    environment_id=environment_id,
+                )
+            except JobStateConflictError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            _insert_job_audit_event(
+                AuditEventRepository(connection),
+                organization_id=organization_id,
+                environment_id=replayed["environment_id"],
+                job_id=replayed["id"],
+                job_type=replayed["job_type"],
+                status=replayed["status"],
+            )
+            return job_response(replayed, jobs.runs_for_job(job_id))
 
     @app.post(
         "/api/v1/job-schedules",

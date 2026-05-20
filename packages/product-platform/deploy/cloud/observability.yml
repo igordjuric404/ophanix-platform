@@ -7,7 +7,7 @@ logs:
 metrics:
   api_ready_endpoint: /ready
   api_health_endpoint: /health
-  worker_health_command: "python3 -m product_platform.cli worker noop"
+  worker_health_command: "python3 -m product_platform.cli worker ready"
 traces:
   otlp_endpoint_env: OTEL_EXPORTER_OTLP_ENDPOINT
   service_names:
