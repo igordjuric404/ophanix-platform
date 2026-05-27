@@ -1,0 +1,91 @@
+schema_version: 1
+repo: ophanix-platform
+last_updated: 2026-05-27
+last_reviewed: 2026-05-27
+last_verified_commit: unknown
+canonical_documents:
+  - id: MAP-ophanix-platform
+    type: project-map
+    path: project-context/MAP.md
+    purpose: Repository orientation and operating model.
+  - id: FEATURE-MAP-ophanix-platform
+    type: feature-map
+    path: project-context/FEATURE_MAP.md
+    purpose: Feature ownership and subsystem routing.
+  - id: CODEBASE-MAP-ophanix-platform
+    type: codebase-map
+    path: project-context/CODEBASE_MAP.md
+    purpose: Implementation-level package, docs, and validation routing.
+  - id: RUNBOOK-validation-ophanix-platform
+    type: runbook
+    path: project-context/runbooks/validation.md
+    purpose: Validation command selection.
+  - id: ADR-0001
+    type: decision
+    path: project-context/decisions/ADR-0001-use-project-context-for-agent-memory.md
+    purpose: Canonical project-context decision.
+  - id: GUIDE-ophanix-platform-project-context
+    type: project-context-guide
+    path: project-context/README.md
+    purpose: Local rules for project-context usage.
+features:
+  - id: FEAT-0001
+    name: Product Platform and Tool Gateway
+    path: project-context/features/FEAT-0001-product-platform-tool-gateway.md
+  - id: FEAT-0002
+    name: Agent OS Governance
+    path: project-context/features/FEAT-0002-agent-os-governance.md
+  - id: FEAT-0003
+    name: Agent Mesh Trust and Identity
+    path: project-context/features/FEAT-0003-agent-mesh-trust-identity.md
+  - id: FEAT-0004
+    name: Framework Integrations
+    path: project-context/features/FEAT-0004-framework-integrations.md
+  - id: FEAT-0005
+    name: Compliance and Agent SRE
+    path: project-context/features/FEAT-0005-compliance-agent-sre.md
+  - id: FEAT-0006
+    name: Runtime Sandboxing
+    path: project-context/features/FEAT-0006-runtime-sandboxing.md
+routing:
+  first_read:
+    - AGENTS.md
+    - project-context/MAP.md
+    - project-context/FEATURE_MAP.md
+    - project-context/CODEBASE_MAP.md
+    - project-context/runbooks/validation.md
+    - .github/copilot-instructions.md
+  source_areas:
+    - path: packages/product-platform/
+      responsibility: Ophanix product-platform implementation.
+    - path: packages/agent-os/
+      responsibility: Governance and policy engine.
+    - path: packages/agent-mesh/
+      responsibility: Trust, identity, mesh communication, schemas, and deployment assets.
+    - path: packages/agentmesh-integrations/
+      responsibility: Framework adapters.
+    - path: packages/agent-compliance/
+      responsibility: Compliance verification and schemas.
+    - path: packages/agent-sre/
+      responsibility: Reliability, dashboards, operator, and deployments.
+    - path: packages/agent-runtime/
+      responsibility: Runtime behavior.
+    - path: packages/agent-hypervisor/
+      responsibility: Sandboxing and hypervisor controls.
+    - path: docs/product-platform-worktree/
+      responsibility: Existing Ophanix product-platform plans, logs, and audits.
+ignore:
+  - node_modules/
+  - .mypy_cache/
+  - .ruff_cache/
+  - .pytest_cache/
+  - __pycache__/
+  - dist/
+  - build/
+  - .venv-codex-product/
+rules:
+  - Keep authored knowledge in Markdown with project-context frontmatter.
+  - Keep machine routing in this file.
+  - Preserve upstream toolkit instructions when editing inherited packages.
+  - Do not index generated caches as canonical source.
+  - Update feature docs and validation runbook when package ownership or validation changes.
