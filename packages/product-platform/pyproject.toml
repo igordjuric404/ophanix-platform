@@ -51,7 +51,7 @@ ophanix-product-api = "product_platform.cli:main"
 dev = [
     "mypy>=1.10,<2",
     "pytest==8.4.1",
-    "pytest-asyncio>=0.26,<1",
+    "pytest-asyncio>=0.26,<2",
     "ruff>=0.12,<1",
 ]
 release = [
