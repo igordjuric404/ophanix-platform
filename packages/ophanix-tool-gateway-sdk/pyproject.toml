@@ -40,7 +40,7 @@ dev = [
 ]
 release = [
     "build>=1.2.2,<2",
-    "twine>=5.1,<7",
+    "twine>=5.1,<8",
 ]
 security = [
     "pip-audit>=2.7,<3",
